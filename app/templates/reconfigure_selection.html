@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Select VM to Reconfigure</title>
+    <link href="{{ url_for('static', filename='css/bootstrap-5.3.0.min.css') }}" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        .container {
+            margin-top: 50px;
+        }
+        .card {
+            padding: 30px;
+            border-radius: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card shadow-sm">
+            <h1 class="text-center mb-4">Select a VM to Reconfigure</h1>
+            {% if vms %}
+            <ul class="list-group">
+                {% for vm in vms %}
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    {{ vm.name }} (VMID: {{ vm.vmid }})
+                    <div class="btn-group">
+                        <button type="button" class="btn btn-primary btn-sm reconfigure-btn" data-vmid="{{ vm.vmid }}" data-uuid="{{ vm.uuid }}">Reconfigure</button>
+                        <a href="{{ url_for('sysprep_existing_vm_form', vmid=vm.vmid) }}" class="btn btn-info btn-sm">Sysprep</a>
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <div class="alert alert-info text-center" role="alert">
+                No cloned VMs found for reconfiguration.
+            </div>
+            {% endif %}
+            <div class="d-grid mt-3">
+                <a href="{{ url_for('index') }}" class="btn btn-secondary">Back to Home</a>
+            </div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='js/jquery-3.5.1.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/bootstrap-5.3.0.bundle.min.js') }}"></script>
+    <script>
+        $(document).ready(function() {
+            $('.reconfigure-btn').on('click', async function() {
+                const vmid = $(this).data('vmid');
+                const vmUuid = $(this).data('uuid');
+
+                try {
+                    const response = await fetch('{{ url_for('start_prepare_reconfigure_task') }}', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ vmid: vmid, vm_uuid: vmUuid })
+                    });
+
+                    if (response.ok) {
+                        const result = await response.json();
+                        window.location.href = '{{ url_for('workflow', task_id='') }}' + result.task_id;
+                    } else {
+                        const errorText = await response.text();
+                        alert('Error starting preparation task: ' + errorText);
+                        console.error('Error:', errorText);
+                    }
+                } catch (error) {
+                    alert('An unexpected error occurred.');
+                    console.error('Unexpected error:', error);
+                }
+            });
+        });
+    </script>
+</body>
+</html>

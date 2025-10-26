@@ -1,0 +1,14 @@
+[Unit]
+Description=Celery Worker for GuestOS Flask App
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+Group=YOUR_GROUP
+WorkingDirectory=/srv/guestos/guestos
+ExecStart=/srv/guestos/guestos/bin/celery -A app.celery worker --loglevel=info
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

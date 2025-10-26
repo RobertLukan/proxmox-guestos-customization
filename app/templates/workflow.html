@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Task Status</title>
+    <link href="{{ url_for('static', filename='css/bootstrap-5.3.0.min.css') }}" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        .container {
+            margin-top: 50px;
+        }
+        .card {
+            padding: 30px;
+            border-radius: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card shadow-sm">
+            <h1 class="text-center mb-4">Task Status</h1>
+            <div id="status-container">
+                <div class="progress mb-3">
+                    <div id="progress-bar" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                </div>
+                <p id="status-message" class="text-center"></p>
+            </div>
+            <div id="result-container" style="display: none;">
+                <div id="result-alert" class="alert" role="alert"></div>
+                <div class="d-grid gap-2">
+                    <a href="{{ url_for('index') }}" class="btn btn-primary">Back to Template Selection</a>
+                    <button id="power-on-btn" class="btn btn-success" style="display: none;">Power On VM</button>
+                    <button id="wait-for-ip-btn" class="btn btn-info" style="display: none;">Wait for IP</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const progressBar = document.getElementById('progress-bar');
+        const statusMessage = document.getElementById('status-message');
+        const resultContainer = document.getElementById('result-container');
+        const resultAlert = document.getElementById('result-alert');
+        const statusContainer = document.getElementById('status-container');
+        const powerOnBtn = document.getElementById('power-on-btn');
+        const waitForIpBtn = document.getElementById('wait-for-ip-btn');
+
+        const urlParts = window.location.pathname.split('/');
+        const taskId = urlParts[urlParts.length - 1];
+
+        let pollInterval;
+
+        async function pollTaskStatus() {
+            try {
+                const response = await fetch(`{{ url_for('task_status', task_id='') }}${taskId}`);
+                const data = await response.json();
+
+                progressBar.style.width = data.progress + '%';
+                progressBar.setAttribute('aria-valuenow', data.progress);
+                statusMessage.innerText = data.message;
+
+                if (data.status === 'SUCCESS' || data.status === 'FAILURE') {
+                    clearInterval(pollInterval);
+                    statusContainer.style.display = 'none';
+                    resultContainer.style.display = 'block';
+
+                    // Check for redirect_url
+                    if (data.redirect_url) {
+                        window.location.href = data.redirect_url;
+                        return; // Stop further processing if redirecting
+                    }
+
+                    if (data.status === 'SUCCESS') {
+                        resultAlert.classList.add('alert-success');
+                        if (data.name === 'Clone VM') {
+                            const newVmid = data.result_vmid; // Get new_vmid from task data
+                            const vmUuid = data.vm_uuid; // Get vm_uuid from task data
+                            if (newVmid && vmUuid) {
+                                powerOnBtn.style.display = 'block';
+                                powerOnBtn.onclick = async function() {
+                                    const powerOnResponse = await fetch('{{ url_for('start_power_on_task') }}', {
+                                        method: 'POST',
+                                        headers: {
+                                            'Content-Type': 'application/json'
+                                        },
+                                        body: JSON.stringify({ vmid: newVmid, vm_uuid: vmUuid })
+                                    });
+                                    if (powerOnResponse.ok) {
+                                        const powerOnResult = await powerOnResponse.json();
+                                        window.location.href = `{{ url_for('workflow', task_id='') }}${powerOnResult.task_id}`;
+                                    } else {
+                                        alert('Error starting power on task.');
+                                    }
+                                };
+                                
+                            }
+                        } else if (data.name === 'Power On VM') {
+                            const vmid = data.result_vmid; // Get vmid from task data
+                            const vmUuid = data.vm_uuid; // Get vm_uuid from task data
+                            if (vmid && vmUuid) {
+                                // Automatically trigger wait for IP after successful power on
+                                const waitResponse = await fetch('{{ url_for('start_wait_for_ip_task') }}', {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json'
+                                    },
+                                    body: JSON.stringify({ vmid: vmid, vm_uuid: vmUuid })
+                                });
+                                if (waitResponse.ok) {
+                                    const waitResult = await waitResponse.json();
+                                    window.location.href = `{{ url_for('workflow', task_id='') }}${waitResult.task_id}`;
+                                } else {
+                                    alert('Error starting wait for IP task automatically after power on.');
+                                }
+                            }
+                        } else if (data.name === 'Wait for IP') {
+                            const ipAddress = data.result_ip_address; // Get IP from task data
+                            if (ipAddress) {
+                                resultAlert.innerText += `\nVM IP: ${ipAddress}`;
+                                // Here you would display the network configuration form
+                                // For now, just display the IP
+                            }
+                        }
+                    }
+                    else {
+                        resultAlert.classList.add('alert-danger');
+                    }
+                    resultAlert.innerText = data.message;
+                }
+            } catch (error) {
+                console.error('Error polling task status:', error);
+                clearInterval(pollInterval);
+                statusMessage.innerText = 'Error fetching status.';
+                progressBar.style.width = '0%';
+                progressBar.setAttribute('aria-valuenow', 0);
+            }
+        }
+
+        pollInterval = setInterval(pollTaskStatus, 2000); // Poll every 2 seconds
+        pollTaskStatus(); // Initial poll
+    </script>
+    <script src="{{ url_for('static', filename='js/bootstrap-5.3.0.bundle.min.js') }}"></script>
+</body>
+</html>

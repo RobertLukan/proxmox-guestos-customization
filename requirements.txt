@@ -1,0 +1,11 @@
+Flask
+proxmoxer
+requests
+SQLAlchemy
+Flask-SQLAlchemy
+Celery
+redis
+pywinrm
+Flask-Login
+Werkzeug
+python-dotenv

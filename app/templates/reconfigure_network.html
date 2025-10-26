@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reconfigure VM Network</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/bootstrap-4.5.2.min.css') }}">
+    <style>
+        body {
+            background-color: #f8f9fa;
+            padding-top: 50px;
+        }
+        .container {
+            max-width: 600px;
+            background-color: #ffffff;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        h2 {
+            color: #007bff;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        .form-group label {
+            font-weight: bold;
+        }
+        .btn-primary {
+            background-color: #007bff;
+            border-color: #007bff;
+            width: 100%;
+            padding: 10px;
+            font-size: 1.1em;
+        }
+        .btn-primary:hover {
+            background-color: #0056b3;
+            border-color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Reconfigure VM Network</h2>
+        <form id="reconfigureForm">
+            <input type="hidden" id="vmid" name="vmid" value="{{ vmid }}">
+            <input type="hidden" id="vm_uuid" name="vm_uuid" value="{{ vm_uuid }}">
+            <input type="hidden" id="temp_ip_address_hidden" name="temp_ip_address" value="{{ temp_ip_address }}">
+            <input type="hidden" id="primary_mac_address_hidden" name="primary_mac_address" value="{{ primary_mac_address }}">
+            <input type="hidden" name="vlan" id="vlan">
+
+            <div class="form-group">
+                <label for="current_ip_address">Current IP WinRM MGMT Address:</label>
+                <input type="text" class="form-control" id="current_ip_address" value="{{ current_ip_address }}" readonly>
+            </div>
+            <div class="form-group">
+                <label for="new_ip_address">New IP Address:</label>
+                <input type="text" class="form-control" id="new_ip_address" name="new_ip_address" required>
+            </div>
+            <div class="form-group">
+                <label for="netmask">Netmask (CIDR):</label>
+                <select class="form-control" id="netmask" name="netmask" required>
+                    <option value="24">24 (255.255.255.0)</option>
+                    <option value="25">25 (255.255.255.128)</option>
+                    <option value="26">26 (255.255.255.192)</option>
+                    <option value="27">27 (255.255.255.224)</option>
+                    <option value="28">28 (255.255.255.240)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="gateway">Default Gateway:</label>
+                <input type="text" class="form-control" id="gateway" name="gateway" required>
+            </div>
+            <div class="form-group">
+                <label for="domain_profile">Domain Profile:</label>
+                <select class="form-control" id="domain_profile" name="domain_profile">
+                    <option value="">Select a profile</option>
+                    {% for profile, details in domain_profiles.items() %}
+                    <option value="{{ profile }}" data-vlan="{{ details.vlan }}">{{ profile }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="dns_servers">DNS Servers (comma-separated):</label>
+                <textarea class="form-control" id="dns_servers" name="dns_servers" rows="3" required></textarea>
+            </div>
+            <hr>
+            <h4>WinRM Credentials</h4>
+            <div class="form-group form-check">
+                <input type="checkbox" class="form-check-input" id="use_predefined_winrm" checked>
+                <label class="form-check-label" for="use_predefined_winrm">Use Predefined WinRM Credentials</label>
+            </div>
+            <div id="winrm_credentials_fields" style="display: none;">
+                <div class="form-group">
+                    <label for="winrm_username">Username:</label>
+                    <input type="text" class="form-control" id="winrm_username" name="winrm_username">
+                </div>
+                <div class="form-group">
+                    <label for="winrm_password">Password:</label>
+                    <input type="password" class="form-control" id="winrm_password" name="winrm_password">
+                </div>
+            </div>
+            <div class="form-group form-check">
+                <input type="checkbox" class="form-check-input" id="remove_temp_interface" name="remove_temp_interface" checked>
+                <label class="form-check-label" for="remove_temp_interface">Remove Temporary Interface (net1) after reconfiguration</label>
+            </div>
+            <hr>
+            <h4>Domain Join (Optional)</h4>
+            <div class="form-group form-check">
+                <input type="checkbox" class="form-check-input" id="join_domain_checkbox">
+                <label class="form-check-label" for="join_domain_checkbox">Join Domain</label>
+            </div>
+            <div id="domain_fields" style="display: none;">
+                <div class="form-group form-check">
+                    <input type="checkbox" class="form-check-input" id="use_domain_profile_credentials" checked>
+                    <label class="form-check-label" for="use_domain_profile_credentials">Use Domain Profile Credentials</label>
+                </div>
+                <div id="domain_credentials_fields" style="display: none;">
+                    <div class="form-group">
+                        <label for="domain_name">Domain Name:</label>
+                        <input type="text" class="form-control" id="domain_name" name="domain_name">
+                    </div>
+                    <div class="form-group">
+                        <label for="domain_username">Service Account Username:</label>
+                        <input type="text" class="form-control" id="domain_username" name="domain_username">
+                    </div>
+                    <div class="form-group">
+                        <label for="domain_password">Service Account Password:</label>
+                        <input type="password" class="form-control" id="domain_password" name="domain_password">
+                    </div>
+                </div>
+            </div>
+            <button type="submit" class="btn btn-primary">Reconfigure VM</button>
+        </form>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/jquery-3.5.1.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/popper-1.16.1.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/bootstrap-4.5.2.min.js') }}"></script>
+    <script>
+        $(document).ready(function() {
+            var domainProfiles = {{ domain_profiles | tojson }};
+
+            $('#domain_profile').on('change', function() {
+                var selectedProfile = $(this).val();
+                if (selectedProfile in domainProfiles) {
+                    $('#dns_servers').val(domainProfiles[selectedProfile]['dns_servers']);
+                    $('#vlan').val(domainProfiles[selectedProfile]['vlan']);
+                } else {
+                    $('#dns_servers').val('');
+                    $('#vlan').val('');
+                }
+            });
+
+            $('#use_predefined_winrm').on('change', function() {
+                if ($(this).is(':checked')) {
+                    $('#winrm_credentials_fields').hide();
+                    $('#winrm_username').prop('required', false);
+                    $('#winrm_password').prop('required', false);
+                } else {
+                    $('#winrm_credentials_fields').show();
+                    $('#winrm_username').prop('required', true);
+                    $('#winrm_password').prop('required', true);
+                }
+            });
+
+            $('#join_domain_checkbox').on('change', function() {
+                if ($(this).is(':checked')) {
+                    $('#domain_fields').show();
+                } else {
+                    $('#domain_fields').hide();
+                }
+            });
+
+            $('#use_domain_profile_credentials').on('change', function() {
+                if ($(this).is(':checked')) {
+                    $('#domain_credentials_fields').hide();
+                    $('#domain_name').prop('required', false);
+                    $('#domain_username').prop('required', false);
+                    $('#domain_password').prop('required', false);
+                } else {
+                    $('#domain_credentials_fields').show();
+                    $('#domain_name').prop('required', true);
+                    $('#domain_username').prop('required', true);
+                    $('#domain_password').prop('required', true);
+                }
+            });
+
+            $('#reconfigureForm').on('submit', function(event) {
+                event.preventDefault();
+
+                var formData = {
+                    vmid: $('#vmid').val(),
+                    vm_uuid: $('#vm_uuid').val(),
+                    temp_ip_address: $('#temp_ip_address_hidden').val(),
+                    primary_mac_address: $('#primary_mac_address_hidden').val(),
+                    new_ip_address: $('#new_ip_address').val(),
+                    netmask: $('#netmask').val(),
+                    gateway: $('#gateway').val(),
+                    dns_servers: $('#dns_servers').val(),
+                    winrm_username: $('#winrm_username').val(),
+                    winrm_password: $('#winrm_password').val(),
+                    remove_temp_interface: $('#remove_temp_interface').is(':checked'),
+                    join_domain: $('#join_domain_checkbox').is(':checked'),
+                    domain_name: $('#domain_name').val(),
+                    domain_username: $('#domain_username').val(),
+                    domain_password: $('#domain_password').val(),
+                    vlan: $('#vlan').val()
+                };
+
+                if ($('#use_predefined_winrm').is(':checked')) {
+                    formData.winrm_username = '{{ winrm_username }}';
+                    formData.winrm_password = '{{ winrm_password }}';
+                }
+
+                if ($('#join_domain_checkbox').is(':checked') && $('#use_domain_profile_credentials').is(':checked')) {
+                    var selectedProfile = $('#domain_profile').val();
+                    if (selectedProfile in domainProfiles) {
+                        formData.domain_name = domainProfiles[selectedProfile]['domain_name'];
+                        formData.domain_username = domainProfiles[selectedProfile]['domain_username'];
+                        formData.domain_password = domainProfiles[selectedProfile]['domain_password'];
+                    }
+                }
+
+                $.ajax({
+                    type: 'POST',
+                    url: '{{ url_for('start_reconfigure_task_endpoint') }}',
+                    contentType: 'application/json',
+                    data: JSON.stringify(formData),
+                    success: function(response) {
+                        window.location.href = '{{ url_for('workflow', task_id='') }}' + response.task_id;
+                    },
+                    error: function(xhr, status, error) {
+                        alert('Error starting reconfiguration task: ' + xhr.responseText);
+                        console.error('Error:', error);
+                    }
+                });
+            });
+        });
+    </script>
+</body>
+</html>

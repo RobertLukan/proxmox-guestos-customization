@@ -1,0 +1,29 @@
+# Virtual Environment
+venv/
+vendor/
+
+# Python cache
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Instance folder
+instance/
+
+# Environment variables
+.env
+
+# Build artifacts
+*.tar.gz
+
+# OS-specific files
+.DS_Store
+
+# Certificates
+*.pem
+*.cer
+*.pfx
+*.crt
+*.key
+openssl.cnf

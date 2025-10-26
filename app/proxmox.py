@@ -1,0 +1,664 @@
+import hashlib
+import base64
+from proxmoxer import ProxmoxAPI
+from app import app, celery, db
+from app.models import Task
+import time
+import uuid
+import winrm
+from flask import url_for
+import ipaddress
+import re
+import logging
+
+def get_proxmox_api():
+    try:
+        proxmox = ProxmoxAPI(
+            app.config['PROXMOX_HOST'],
+            user=app.config['PROXMOX_USER'],
+            password=app.config['PROXMOX_PASSWORD'],
+            verify_ssl=False,
+            timeout=300
+        )
+        return proxmox
+    except Exception as e:
+        print(f"Error connecting to Proxmox: {e}")
+        return None
+
+def get_template_vms():
+    proxmox = get_proxmox_api()
+    if proxmox:
+        templates = []
+        for vm in proxmox.cluster.resources.get(type='vm'):
+            if vm.get('template') == 1:
+                templates.append(vm)
+        return templates
+    return []
+
+def get_network_bridges():
+    proxmox = get_proxmox_api()
+    if not proxmox:
+        return []
+    bridges = []
+    nodes = proxmox.nodes.get()
+    for node in nodes:
+        node_name = node['node']
+        networks = proxmox.nodes(node_name).network.get()
+        for network in networks:
+            if network.get('type') == 'bridge':
+                bridges.append(network)
+    return bridges
+
+def _get_vm_node(vmid):
+    proxmox = get_proxmox_api()
+    if not proxmox:
+        return None
+    for vm in proxmox.cluster.resources.get(type='vm'):
+        if str(vm.get('vmid')) == str(vmid):
+            return vm.get('node')
+    return None
+
+def _update_vm_tags(vmid, node, tags_to_add=None, tags_to_remove=None):
+    proxmox = get_proxmox_api()
+    if not proxmox:
+        return False, "Failed to connect to Proxmox."
+    try:
+        vm_config = proxmox.nodes(node).qemu(vmid).config.get()
+        current_tags_str = vm_config.get('tags', '')
+        current_tags = set(current_tags_str.split(',')) if current_tags_str else set()
+        current_tags.discard('')
+        if tags_to_add:
+            for current_tag in list(current_tags):
+                if current_tag.startswith('lifecycle-'):
+                    current_tags.remove(current_tag)
+            for tag in tags_to_add:
+                current_tags.add(tag)
+        if tags_to_remove:
+            for tag_prefix in tags_to_remove:
+                for current_tag in list(current_tags):
+                    if current_tag.startswith(tag_prefix):
+                        current_tags.remove(current_tag)
+        new_tags_str = ','.join(sorted(list(filter(None, current_tags))))
+        proxmox.nodes(node).qemu(vmid).config.set(tags=new_tags_str)
+        return True, "VM tags updated successfully."
+    except Exception as e:
+        return False, f"Failed to update VM tags: {e}"
+
+def get_vm_current_ip(vmid):
+    proxmox = get_proxmox_api()
+    if not proxmox:
+        return None
+    node = _get_vm_node(vmid)
+    if not node:
+        return None
+    
+    # Poll for a few seconds to handle guest agent instability
+    for i in range(5): # 5 attempts over 10 seconds
+        try:
+            network_info = proxmox.nodes(node).qemu(vmid).agent.get('network-get-interfaces')
+            for iface in network_info['result']:
+                if 'ip-addresses' in iface:
+                    for ip_addr in iface['ip-addresses']:
+                        if ip_addr['ip-address-type'] == 'ipv4' and not ip_addr['ip-address'].startswith('127.0.0.1') and not ip_addr['ip-address'].startswith('169.254.'):
+                            return ip_addr['ip-address']
+        except Exception as e:
+            print(f"Could not get current IP for VM {vmid} on attempt {i+1}: {e}")
+        
+        time.sleep(2)
+        
+    return None
+
+def get_manageable_vms():
+    """Gets all running, non-template VMs with a 'lifecycle-' tag."""
+    proxmox = get_proxmox_api()
+    if not proxmox:
+        return []
+    
+    manageable_vms = []
+    for vm in proxmox.cluster.resources.get(type='vm'):
+        # Skip templates and VMs that are not running
+        if vm.get('template') == 1 or vm.get('status') != 'running':
+            continue
+
+        vm_tags_str = vm.get('tags', '')
+        vm_tags = set(vm_tags_str.split(',')) if vm_tags_str else set()
+        vm_tags.discard('')
+
+        # Check if any tag starts with 'lifecycle-'
+        if not any(tag.startswith('lifecycle-') for tag in vm_tags):
+            continue
+
+        manageable_vms.append({
+            'vmid': vm.get('vmid'),
+            'name': vm.get('name'),
+            'status': vm.get('status'),
+            'node': vm.get('node'),
+            'tags': list(vm_tags),
+            'uuid': next((tag.split(':')[1] for tag in vm_tags if tag.startswith('uuid:')), str(uuid.uuid4())), # Assign a new UUID if none exists
+        })
+    return manageable_vms
+
+def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan):
+    """Clones a VM and returns the new VMID."""
+    proxmox = get_proxmox_api()
+    if not proxmox:
+        raise Exception("Failed to connect to Proxmox.")
+
+    template_info = next((vm for vm in proxmox.cluster.resources.get(type='vm') if str(vm.get('vmid')) == str(template_vmid)), None)
+    if not template_info:
+        raise Exception(f"Template with VMID {template_vmid} not found.")
+
+    node = template_info['node']
+    new_vmid = proxmox.cluster.nextid.get()
+    
+    clone_params = {'newid': new_vmid, 'name': hostname, 'full': 1}
+    upid = proxmox.nodes(node).qemu(template_vmid).clone.post(**clone_params)
+    task_node = upid.split(':')[1]
+
+    while proxmox.nodes(task_node).tasks(upid).status.get()['status'] == 'running':
+        time.sleep(2)
+
+    if proxmox.nodes(task_node).tasks(upid).status.get().get('exitstatus') != 'OK':
+        raise Exception("Cloning failed.")
+
+    vm_uuid = str(uuid.uuid4())
+    _update_vm_tags(new_vmid, node, tags_to_add=[f'uuid:{vm_uuid}', 'lifecycle-cloning'])
+    
+    net0_config = f'virtio,bridge={bridge}' + (f',tag={vlan}' if vlan else '')
+    proxmox.nodes(node).qemu(new_vmid).config.post(cores=cores, memory=ram, net0=net0_config, agent=1)
+    
+    return {'vmid': new_vmid, 'uuid': vm_uuid}
+
+def power_on_vm(vmid):
+    """Powers on a VM."""
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not node:
+        raise Exception(f"VM with VMID {vmid} not found.")
+    
+    vm_status = proxmox.nodes(node).qemu(vmid).status.current.get()
+    if vm_status.get('status') != 'running':
+        proxmox.nodes(node).qemu(vmid).status.start.post()
+        for _ in range(10): # 50-second timeout
+            time.sleep(5)
+            vm_status = proxmox.nodes(node).qemu(vmid).status.current.get()
+            if vm_status.get('status') == 'running':
+                return
+        raise Exception(f"VM {vmid} failed to power on.")
+
+def wait_for_guest_agent(vmid, timeout=600):
+    """Waits for the QEMU Guest Agent to be responsive."""
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not node:
+        raise Exception(f"VM {vmid} not found.")
+
+    for _ in range(timeout // 10):
+        try:
+            if proxmox.nodes(node).qemu(vmid).agent.get('get-fsinfo'):
+                return
+        except Exception:
+            pass
+        time.sleep(10)
+    raise Exception(f"Timed out waiting for QEMU Guest Agent on VM {vmid}.")
+
+def write_file_to_guest(vmid, content, file_path):
+    """Writes a file to the guest OS via QEMU Guest Agent."""
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not node:
+        raise Exception(f"VM {vmid} not found.")
+
+    content_b64 = base64.b64encode(content).decode('ascii')
+
+    command = f"powershell -command \"New-Item -ItemType Directory -Force -Path (Split-Path -Path '{file_path}' -Parent); [System.IO.File]::WriteAllBytes('{file_path}', [System.Convert]::FromBase64String('{content_b64}'))\""
+    run_command_in_guest(vmid, command)
+
+
+def run_command_in_guest(vmid, command):
+    """Runs a command in the guest OS via QEMU Guest Agent."""
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not node:
+        raise Exception(f"VM {vmid} not found.")
+        
+    result = proxmox.nodes(node).qemu(vmid).agent.exec.post(command=command)
+    pid = result['pid']
+    
+    # Wait for the command to complete
+    while True:
+        status = proxmox.nodes(node).qemu(vmid).agent('exec-status').get(pid=pid)
+        if status.get('exited'):
+            if status.get('exitcode') != 0:
+                raise Exception(f"Command failed with exit code {status['exitcode']}: {status.get('err-data')}")
+            return status.get('out-data')
+        time.sleep(2)
+
+def get_vm_ip(vmid, timeout=300):
+    """Gets the IP address of a VM."""
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not node:
+        raise Exception(f"VM with VMID {vmid} not found.")
+
+    logging.info(f"Waiting for IP for VM {vmid} (timeout: {timeout}s)")
+    for i in range(timeout // 10):
+        try:
+            network_info = proxmox.nodes(node).qemu(vmid).agent.get('network-get-interfaces')
+            for iface in network_info['result']:
+                if 'ip-addresses' in iface:
+                    for ip_addr in iface['ip-addresses']:
+                        if ip_addr['ip-address-type'] == 'ipv4' and not ip_addr['ip-address'].startswith('127.0.0.1') and not ip_addr['ip-address'].startswith('169.254.'):
+                            logging.info(f"Found IP for VM {vmid}: {ip_addr['ip-address']}")
+                            return ip_addr['ip-address']
+            logging.info(f"No IP found for VM {vmid} on attempt {i+1}")
+        except Exception as e:
+            logging.warning(f"Could not get network info for VM {vmid} on attempt {i+1}: {e}")
+        
+        time.sleep(10)
+        
+    raise Exception(f"Timed out waiting for IP for VM {vmid}.")
+
+@celery.task(bind=True)
+def clone_vm_task(self, task_id, template_vmid, hostname, cores, ram, bridge, vlan):
+    with app.app_context():
+        task = Task.query.get(task_id)
+        if not task: return
+        task.update_status('STARTED', 0, "Starting VM cloning process...")
+        try:
+            clone_result = clone_vm(template_vmid, hostname, cores, ram, bridge, vlan)
+            new_vmid = clone_result['vmid']
+            vm_uuid = clone_result['uuid']
+            
+            task.update_status('SUCCESS', 100, f"Successfully cloned to VM {new_vmid}.", result_vmid=new_vmid, vm_uuid=vm_uuid)
+            _update_vm_tags(new_vmid, _get_vm_node(new_vmid), tags_to_add=['lifecycle-configured'])
+            power_on_vm_task.delay(task_id, new_vmid, vm_uuid)
+        except Exception as e:
+            task.update_status('FAILURE', 100, f"An error occurred during cloning: {e}")
+
+@celery.task(bind=True)
+def power_on_vm_task(self, task_id, vmid, vm_uuid):
+    with app.app_context():
+        task = Task.query.get(task_id)
+        if not task: return
+        task.update_status('STARTED', 0, f"Powering on VM {vmid}...")
+        node = _get_vm_node(vmid)
+        if not node:
+            task.update_status('FAILURE', 100, f"VM with VMID {vmid} not found.")
+            return
+        _update_vm_tags(vmid, node, tags_to_add=['lifecycle-powering_on'])
+        try:
+            power_on_vm(vmid)
+            task.update_status('PROGRESS', 50, f"VM {vmid} is running. Adding temporary network interface...")
+            
+            proxmox = get_proxmox_api()
+            vm_config = proxmox.nodes(node).qemu(vmid).config.get()
+            if 'net1' not in vm_config:
+                proxmox.nodes(node).qemu(vmid).config.post(net1=f"virtio,bridge={app.config['TEMP_BRIDGE']}")
+                time.sleep(5)
+
+            task.update_status('PROGRESS', 100, f"VM {vmid} is running. Waiting 90 seconds for initial OS reboots...")
+            time.sleep(90)
+            _update_vm_tags(vmid, node, tags_to_add=['lifecycle-powered_on'])
+            wait_for_guest_agent_and_ip_task.delay(task_id, vmid, vm_uuid)
+        except Exception as e:
+            task.update_status('FAILURE', 100, f"Failed to power on VM {vmid}: {e}")
+            _update_vm_tags(vmid, node, tags_to_add=['lifecycle-failed'])
+
+@celery.task(bind=True)
+def wait_for_guest_agent_and_ip_task(self, task_id, vmid, vm_uuid):
+    with app.app_context():
+        task = Task.query.get(task_id)
+        if not task: return
+        task.update_status('STARTED', 0, f"Waiting for IP for VM {vmid}...", vm_uuid=vm_uuid)
+        node = _get_vm_node(vmid)
+        if not node:
+            task.update_status('FAILURE', 100, f"VM {vmid} not found.")
+            return
+        _update_vm_tags(vmid, node, tags_to_add=['lifecycle-waiting_for_ip'])
+        
+        try:
+            # Get WINRM_SUBNET from config
+            winrm_subnet_str = app.config.get('WINRM_SUBNET')
+            winrm_network = None
+            if winrm_subnet_str:
+                try:
+                    winrm_network = ipaddress.ip_network(winrm_subnet_str)
+                except ValueError as e:
+                    task.update_status('FAILURE', 100, f"Invalid WINRM_SUBNET configured: {e}")
+                    return
+
+            selected_ip_address = None
+            max_attempts = 30 # Increased attempts for robustness
+            for attempt in range(max_attempts):
+                task.update_status('PROGRESS', int((attempt / max_attempts) * 100), f"Waiting for WinRM IP... (Attempt {attempt+1}/{max_attempts})")
+                try:
+                    network_info = get_proxmox_api().nodes(node).qemu(vmid).agent.get('network-get-interfaces')
+                    for iface in network_info['result']:
+                        if 'ip-addresses' in iface:
+                            for ip_addr_obj in iface['ip-addresses']:
+                                if ip_addr_obj['ip-address-type'] == 'ipv4':
+                                    current_ip = ip_addr_obj['ip-address']
+                                    # Exclude loopback and APIPA addresses
+                                    if not current_ip.startswith('127.') and not current_ip.startswith('169.254.'):
+                                        if winrm_network:
+                                            if ipaddress.ip_address(current_ip) in winrm_network:
+                                                selected_ip_address = current_ip
+                                                break # Found a suitable IP
+                                        else: # If no WINRM_SUBNET is configured, take the first valid IP
+                                            selected_ip_address = current_ip
+                                            break
+                            if selected_ip_address:
+                                break # Found a suitable IP from any interface
+                except Exception as e:
+                    logging.warning(f"Attempt {attempt+1}: Could not get network info for VM {vmid}: {e}")
+                
+                if selected_ip_address:
+                    break
+                time.sleep(10) # Wait before retrying
+
+            if not selected_ip_address:
+                task.update_status('FAILURE', 100, f"Timed out waiting for a suitable IP address within {winrm_subnet_str if winrm_subnet_str else 'any network'} for VM {vmid}.")
+                _update_vm_tags(vmid, node, tags_to_add=['lifecycle-failed'])
+                return
+
+            ip_address = selected_ip_address # Use the selected IP
+
+            primary_mac_address = next((re.search(r'virtio=([0-9A-Fa-f:]{17})', vm_config['net0']).group(1) for vm_config in [get_proxmox_api().nodes(node).qemu(vmid).config.get()] if 'net0' in vm_config and re.search(r'virtio=([0-9A-Fa-f:]{17})', vm_config['net0'])), None)
+            if not primary_mac_address:
+                task.update_status('FAILURE', 100, "Could not determine primary MAC address.")
+                return
+
+            with app.test_request_context():
+                redirect_url = url_for('reconfigure_network', vmid=vmid, vm_uuid=vm_uuid, temp_ip_address=ip_address, primary_mac_address=primary_mac_address)
+            task.update_status('SUCCESS', 100, f"VM online with temporary IP: {ip_address}.", result_ip_address=ip_address, redirect_url=redirect_url)
+            _update_vm_tags(vmid, node, tags_to_add=['lifecycle-ready'])
+        except Exception as e:
+            task.update_status('FAILURE', 100, f"An unexpected error occurred: {e}")
+            _update_vm_tags(vmid, node, tags_to_add=['lifecycle-failed'])
+
+@celery.task(bind=True)
+def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, new_ip_address, netmask, gateway, dns_servers, winrm_username, winrm_password, primary_mac_address, remove_temp_interface, join_domain, domain_name, domain_username, domain_password, vlan):
+    with app.app_context():
+        task = Task.query.get(task_id)
+        if not task: return
+        task.update_status('STARTED', 5, "Connecting to VM via WinRM...")
+        try:
+            # Validate temp_ip_address against WINRM_SUBNET
+            winrm_subnet_str = app.config.get('WINRM_SUBNET')
+            if winrm_subnet_str:
+                try:
+                    winrm_network = ipaddress.ip_network(winrm_subnet_str)
+                    temp_ip = ipaddress.ip_address(temp_ip_address)
+                    if temp_ip not in winrm_network:
+                        task.update_status('FAILURE', 100, f"Temporary IP address {temp_ip_address} is not within the allowed WinRM subnet {winrm_subnet_str}.")
+                        return
+                except ValueError as e:
+                    task.update_status('FAILURE', 100, f"Invalid WINRM_SUBNET or temporary IP address: {e}")
+                    return
+
+            task.update_status('PROGRESS', 6, "Establishing insecure WinRM connection...")
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            session = winrm.Session(
+                f'http://{temp_ip_address}:5985/wsman',
+                auth=(winrm_username, winrm_password),
+                transport='basic',
+                server_cert_validation='ignore'
+            )
+
+            proxmox = get_proxmox_api()
+            node = _get_vm_node(vmid)
+            vm_config = proxmox.nodes(node).qemu(vmid).config.get()
+            hostname = vm_config.get('name').split('.')[0]
+            
+            task.update_status('PROGRESS', 10, "Identifying primary network adapter...")
+            adapter_name_cmd = f"(Get-NetAdapter -Physical | Where-Object {{$_.MacAddress -eq '{primary_mac_address.replace(':', '-')}'}}).Name"
+            r = session.run_ps(adapter_name_cmd)
+            if r.status_code != 0:
+                task.update_status('FAILURE', 100, f"Error getting network adapter: {r.std_err.decode('utf-8')}")
+                return
+            adapter_name = r.std_out.decode('utf-8').strip()
+
+            task.update_status('PROGRESS', 20, "Clearing existing IP configuration...")
+            r = session.run_ps(f'Get-NetIPAddress -InterfaceAlias "{adapter_name}" | Remove-NetIPAddress -Confirm:$false')
+            if r.status_code != 0: print(f"Warning: Non-zero status when clearing IP: {r.std_err.decode('utf-8')}")
+            r = session.run_ps(f'Get-NetRoute -InterfaceAlias "{adapter_name}" | Where-Object {{$_.DestinationPrefix -eq "0.0.0.0/0"}} | Remove-NetRoute -Confirm:$false')
+            if r.status_code != 0: print(f"Warning: Non-zero status when clearing gateway: {r.std_err.decode('utf-8')}")
+
+            task.update_status('PROGRESS', 30, f"Setting new IP: {new_ip_address}...")
+            r = session.run_ps(f'New-NetIPAddress -InterfaceAlias "{adapter_name}" -IPAddress "{new_ip_address}" -PrefixLength {netmask}')
+            if r.status_code != 0:
+                task.update_status('FAILURE', 100, f"Error setting static IP: {r.std_err.decode('utf-8')}")
+                return
+
+            task.update_status('PROGRESS', 40, f"Setting new gateway: {gateway}...")
+            r = session.run_ps(f'New-NetRoute -InterfaceAlias "{adapter_name}" -DestinationPrefix "0.0.0.0/0" -NextHop "{gateway}"')
+            if r.status_code != 0:
+                task.update_status('FAILURE', 100, f"Error setting gateway: {r.std_err.decode('utf-8')}")
+                return
+
+            if dns_servers:
+                task.update_status('PROGRESS', 50, f"Setting DNS servers: {dns_servers}...")
+                dns_list = ",".join([f'"{s.strip()}"' for s in dns_servers.split(',')])
+                r = session.run_ps(f'Set-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -ServerAddresses ({dns_list})')
+                if r.status_code != 0:
+                    task.update_status('FAILURE', 100, f"Error setting DNS: {r.std_err.decode('utf-8')}")
+                    return
+            
+            if vlan:
+                task.update_status('PROGRESS', 55, f"Setting VLAN tag to {vlan}...")
+                net0_config = proxmox.nodes(node).qemu(vmid).config.get().get('net0')
+                if net0_config:
+                    parts = net0_config.split(',')
+                    parts = [p for p in parts if not p.startswith('tag=')]
+                    parts.append(f'tag={vlan}')
+                    new_net0_config = ','.join(parts)
+                    proxmox.nodes(node).qemu(vmid).config.post(net0=new_net0_config)
+            
+            task.update_status('PROGRESS', 60, f"Renaming computer to '{hostname}' and rebooting...")
+            try:
+                session.run_ps(f'Rename-Computer -NewName "{hostname}" -Force -Restart')
+            except Exception as e:
+                print(f"Ignoring expected error during reboot after rename: {e}")
+
+            task.update_status('PROGRESS', 65, "Waiting for VM to reboot and for new hostname to apply...")
+            max_attempts_rename = 30
+            rename_verified = False
+            for i in range(max_attempts_rename):
+                time.sleep(10)
+                task.update_status('PROGRESS', 65 + int((i / max_attempts_rename) * 10), f"Waiting for guest agent... (Attempt {i+1}/{max_attempts_rename})")
+                try:
+                    session = winrm.Session(
+                        f'http://{temp_ip_address}:5985/wsman',
+                        auth=(winrm_username, winrm_password),
+                        transport='basic',
+                        server_cert_validation='ignore'
+                    )
+                    r = session.run_ps("hostname")
+                    if r.status_code == 0:
+                        current_hostname = r.std_out.decode('utf-8').strip().lower()
+                        if current_hostname == hostname.lower():
+                            task.update_status('PROGRESS', 75, "Hostname change verified.")
+                            rename_verified = True
+                            break
+                except Exception as e:
+                    print(f"Could not connect or verify hostname yet (Attempt {i+1}/{max_attempts_rename}): {e}")
+            
+            if not rename_verified:
+                task.update_status('FAILURE', 100, "Timed out verifying hostname change after reboot.")
+                _update_vm_tags(vmid, node, tags_to_add=['lifecycle-failed'])
+                return
+
+            if join_domain:
+                task.update_status('PROGRESS', 78, f"Joining domain '{domain_name}'...")
+                ps_script = f'''
+                $domainName = "{domain_name}"
+                $username = "{domain_username}"
+                $password = "{domain_password}" | ConvertTo-SecureString -asPlainText -Force
+                $credential = New-Object System.Management.Automation.PSCredential($username, $password)
+                Add-Computer -DomainName $domainName -Credential $credential -Force -ErrorAction Stop
+                '''
+                r = session.run_ps(ps_script)
+                if r.status_code != 0:
+                    task.update_status('FAILURE', 100, f"Error joining domain: {r.std_err.decode('utf-8')}")
+                    return
+
+            task.update_status('PROGRESS', 85, "Shutting down VM for network reconfiguration...")
+            try:
+                session.run_ps("Stop-Computer -Force")
+            except Exception as e:
+                print(f"Ignoring expected error during shutdown: {e}")
+
+            # Wait for VM to stop
+            for _ in range(30): # 5 minutes timeout
+                vm_status = proxmox.nodes(node).qemu(vmid).status.current.get()
+                if vm_status.get('status') == 'stopped':
+                    break
+                time.sleep(10)
+            else:
+                task.update_status('FAILURE', 100, "Timed out waiting for VM to stop.")
+                _update_vm_tags(vmid, node, tags_to_add=['lifecycle-failed'])
+                return
+
+            if remove_temp_interface:
+                task.update_status('PROGRESS', 98, "Removing temporary interface...")
+                try:
+                    proxmox.nodes(node).qemu(vmid).config.post(delete='net1')
+                except Exception as e:
+                    print(f"Warning: Failed to remove net1 while VM was stopped: {e}")
+            
+            task.update_status('PROGRESS', 87, "Starting VM...")
+            proxmox.nodes(node).qemu(vmid).status.start.post()
+
+            task.update_status('PROGRESS', 90, "Waiting for VM to reboot and guest agent to respond...")
+            
+            max_attempts = 30
+            for i in range(max_attempts):
+                time.sleep(10)
+                task.update_status('PROGRESS', 90 + int((i / max_attempts) * 5), f"Waiting for guest agent... (Attempt {i+1}/{max_attempts})")
+                
+                try:
+                    proxmox = get_proxmox_api()
+                    if not proxmox:
+                        continue
+
+                    if not proxmox.nodes(node).qemu(vmid).agent.get('get-fsinfo'):
+                        continue
+
+                    task.update_status('PROGRESS', 95, "Guest agent online. Verifying configuration...")
+
+                    current_hostname_raw = proxmox.nodes(node).qemu(vmid).agent.exec.post(command="hostname")
+                    pid = current_hostname_raw['pid']
+                    time.sleep(2)
+                    status = proxmox.nodes(node).qemu(vmid).agent('exec-status').get(pid=pid)
+                    current_hostname = status.get('out-data', '').strip().lower()
+                    
+                    hostname_match = current_hostname == hostname.lower()
+
+                    if not hostname_match:
+                        continue
+
+                    net_info = proxmox.nodes(node).qemu(vmid).agent.get('network-get-interfaces')['result']
+                    current_ip = next((ip['ip-address'] for iface in net_info for ip in iface.get('ip-addresses', []) if ip.get('ip-address') == new_ip_address), None)
+                    
+                    ip_match = current_ip == new_ip_address
+
+                    if ip_match:
+                                                # task.update_status('PROGRESS', 97, "Scheduling WinRM deactivation...")
+                        disable_winrm_script = """
+                        # --- Configuration ---
+                        $taskName = "Disable WinRM Service Temporary"
+
+                        # --- 1. Create the Self-Destruct Command ---
+                        # This command now properly stops and disables the service, waits, then unregisters the task.
+                        $finalCommand = "Stop-Service -Name WinRM -Force; Set-Service -Name WinRM -StartupType Disabled; Start-Sleep -Seconds 5; Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false"
+
+                        # We encode the command in Base64 to avoid all nested quoting issues.
+                        $encodedFinalCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($finalCommand))
+
+                        # --- 2. Create the Main Task Action ---
+                        # This action launches our main command in a new, hidden process.
+                        # This allows the scheduled task to end immediately, releasing its lock so it can be deleted.
+                        $mainArgument = "-NoProfile -WindowStyle Hidden -EncodedCommand $encodedFinalCommand"
+
+                        # --- 3. Define and Register the Scheduled Task ---
+                        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $mainArgument
+
+                        $time = (Get-Date).AddMinutes(1).ToString("s")
+                        $trigger = New-ScheduledTaskTrigger -Once -At $time
+
+                        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+
+                        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -User "NT AUTHORITY\System" -RunLevel Highest -Force
+                        """
+                                                # try:
+                        #     session.run_ps(disable_winrm_script)
+                        # except Exception as e:
+                        #     print(f"Warning: Failed to schedule WinRM deactivation: {e}")
+
+                        # The temporary interface is now removed during the power-cycle, so this is no longer needed.
+                        
+                        task.update_status('SUCCESS', 100, f"Reconfiguration successful. IP: {current_ip}, Hostname: {current_hostname}.", result_ip_address=current_ip)
+                        _update_vm_tags(vmid, node, tags_to_add=['lifecycle-reconfigured'])
+                        return
+                
+                except Exception as e:
+                    print(f"Error during verification (Attempt {i+1}/{max_attempts}): {e}")
+                    pass
+            
+            task.update_status('FAILURE', 100, "Timed out verifying reconfiguration after reboot.")
+            _update_vm_tags(vmid, node, tags_to_add=['lifecycle-failed'])
+        except Exception as e:
+            task.update_status('FAILURE', 100, f"Reconfiguration failed: {e}")
+
+@celery.task(bind=True)
+def prepare_reconfigure_task(self, task_id, vmid, vm_uuid):
+    with app.app_context():
+        task = Task.query.get(task_id)
+        if not task: return
+        task.update_status('STARTED', 0, f"Preparing VM {vmid} for reconfiguration...")
+        node = _get_vm_node(vmid)
+        if not node:
+            task.update_status('FAILURE', 100, f"VM {vmid} not found.")
+            return
+        proxmox = get_proxmox_api()
+        if not proxmox:
+            task.update_status('FAILURE', 100, "Failed to connect to Proxmox.")
+            return
+        try:
+            vm_config = proxmox.nodes(node).qemu(vmid).config.get()
+            if 'net1' not in vm_config:
+                task.update_status('PROGRESS', 10, "Adding temporary network interface (net1)...")
+                proxmox.nodes(node).qemu(vmid).config.post(net1=f"virtio,bridge={app.config['TEMP_BRIDGE']}")
+                time.sleep(5)
+            
+            task.update_status('PROGRESS', 20, "Waiting for IP on temporary interface...")
+            ip_address = get_vm_ip(vmid)
+            primary_mac_address = next((re.search(r'virtio=([0-9A-Fa-f:]{17})', vm_config['net0']).group(1) for vm_config in [proxmox.nodes(node).qemu(vmid).config.get()] if 'net0' in vm_config and re.search(r'virtio=([0-9A-Fa-f:]{17})', vm_config['net0'])), None)
+            if not primary_mac_address:
+                task.update_status('FAILURE', 100, "Could not determine primary MAC address.")
+                return
+            
+            with app.test_request_context():
+                redirect_url = url_for('reconfigure_network', vmid=vmid, vm_uuid=vm_uuid, temp_ip_address=ip_address, primary_mac_address=primary_mac_address)
+            task.update_status('SUCCESS', 100, f"VM ready for reconfiguration with IP: {ip_address}.", result_ip_address=ip_address, redirect_url=redirect_url)
+            _update_vm_tags(vmid, node, tags_to_add=['lifecycle-ready-for-reconfigure'])
+        except Exception as e:
+            task.update_status('FAILURE', 100, f"Preparation failed: {e}")
+
+def get_vm_details(vmid):
+    """Gets details for a specific VM."""
+    proxmox = get_proxmox_api()
+    if not proxmox:
+        return None
+    
+    node = _get_vm_node(vmid)
+    if not node:
+        return None
+        
+    vm_info = proxmox.nodes(node).qemu(vmid).config.get()
+    return {
+        'vmid': vmid,
+        'name': vm_info.get('name'),
+    }
