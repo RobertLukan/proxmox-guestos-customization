@@ -78,8 +78,8 @@ You need a prepared Windows Server VM template in Proxmox. This template is cruc
 
 1.  **Clone the repository:**
     ```bash
-    git clone <repository_url>
-    cd <repository_name>
+    git clone https://github.com/RobertLukan/proxmox-guestos-customization/
+    cd proxmox-guestos-customization
     ```
 
 2.  **Create a virtual environment and install dependencies:**
