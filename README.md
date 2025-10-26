@@ -2,6 +2,12 @@
 
 A Flask web application to automate the cloning, configuration, and sysprepping of Windows virtual machines in a Proxmox VE environment.
 
+## TODO
+
+-   Create Docker container
+-   Test .env configuration. I am using this software with hardcoded credentials/configs. I have decided to change to .env recently and I still need to test it.
+-   I was testing scheduled task to disable WinRM after it is not needed anymore. There is still some code left that needs to be cleaned.
+  
 ## Features
 
 -   Clone VMs from templates.
