@@ -64,7 +64,8 @@ You need a prepared Windows Server VM template in Proxmox. This template is cruc
     ```powershell
     New-NetFirewallRule -Name "WinRM-HTTP" -DisplayName "WinRM-HTTP" -Protocol TCP -LocalPort 5985 -Action Allow -Enabled True
     ```
-
+-   Make sure to run sysprep after everything is configured. I will provide a very simple example of sysprep unattend.xml file that configures Administrator password and accepts EULA.
+-   VM shuts down it self once sysprep is done. Convert that VM to PVE template.
 ### Network
 -   **DHCP Server:** You need a DHCP server on the network that you will use for the temporary WinRM connection (the network of your `TEMP_BRIDGE`). The cloned VMs will rely on this to get their initial IP address.
 -   **Application Host Network:** The server/VM where this Flask application is running must have a network interface in the same subnet as the temporary WinRM network. This is necessary for the application to be able to connect to the guest VMs. It can be hosted on a DHCP server. 
