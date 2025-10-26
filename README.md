@@ -1,12 +1,13 @@
 # Proxmox GuestOS Utility
 
-A Flask web application to automate the cloning, configuration, and sysprepping of virtual machines in a Proxmox VE environment.
+A Flask web application to automate the cloning, configuration, and sysprepping of Windows virtual machines in a Proxmox VE environment.
 
 ## Features
 
 -   Clone VMs from templates.
 -   Reconfigure network settings of existing VMs.
--   Run Sysprep on new or existing VMs with custom unattended settings.
+-   Assign an IP address, default gateway, network mask, join VM to a domain.
+-   Run Sysprep on new or existing VMs with custom unattended settings (work in progress).
 -   Background task management with Celery.
 -   Web-based UI for all operations.
 
@@ -46,7 +47,8 @@ While Cloud-Init is a powerful tool and the standard for cloud environments, it 
 
 ### Proxmox VE
 -   A working Proxmox VE environment.
-
+-   An account with adequate privileges.
+    
 ### Proxmox VM Template
 You need a prepared Windows Server VM template in Proxmox. This template is crucial for the workflow to succeed. It must have the following:
 -   **Windows Server:** A clean installation of your desired Windows Server version.
