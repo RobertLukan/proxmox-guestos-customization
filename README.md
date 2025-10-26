@@ -13,6 +13,7 @@ A Flask web application to automate the cloning, configuration, and sysprepping 
 -   Clone VMs from templates.
 -   Reconfigure network settings of existing VMs.
 -   Assign an IP address, default gateway, network mask, join VM to a domain.
+-   Supports multiple VLANs/network configuration. User can select a Domain Profile that has preconfigured DNS servers, VLAN and a user credentials to join a VM to a Domain.
 -   Run Sysprep on new or existing VMs with custom unattended settings (work in progress).
 -   Background task management with Celery.
 -   Web-based UI for all operations.
