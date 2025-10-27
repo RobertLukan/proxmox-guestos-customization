@@ -115,16 +115,22 @@ You need a prepared Windows Server VM template in Proxmox. This template is cruc
 
 ## Configuration
 
-The application is configured using environment variables in the `.env` file. 
-                                                                                                                              
+The application is configured using environment variables in the `.env` file. Below is a description of the key variables:
+
+-   `PROXMOX_HOST`, `PROXMOX_USER`, `PROXMOX_PASSWORD`: Your Proxmox server details.
+-   `WINRM_USERNAME`, `WINRM_PASSWORD`: Default credentials for connecting to guest VMs.
+-   `SECRET_KEY`: A long, random string to secure web sessions.
+-   `PORT`: The port on which the web application will listen (defaults to `5001`).
+-   `DOMAIN_PROFILES_JSON`: A JSON string defining profiles for domain joining, including DNS servers, domain names, and credentials.
+
 1.  **Start the Web Server:**
     For development:
     ```bash
-    flask run
+    python3 run.py
     ```
     For production, use a WSGI server like Gunicorn, managed by a process manager like `systemd`.
     ```bash
-    gunicorn --bind 0.0.0.0:8000 wsgi:app
+    gunicorn --bind 0.0.0.0:5001 wsgi:app
     ```
 
 2.  **Start the Celery Worker:**

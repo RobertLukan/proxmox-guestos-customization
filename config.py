@@ -32,3 +32,10 @@ TEMP_BRIDGE = os.environ.get('TEMP_BRIDGE', 'vmbr1')
 
 # Secret key for session management
 SECRET_KEY = os.environ.get('SECRET_KEY')
+
+# Application Port
+PORT = int(os.environ.get('PORT', 5001))
+
+# Celery configuration
+CELERY_BROKER_URL = 'redis://localhost:6379/0'
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
