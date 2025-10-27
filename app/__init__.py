@@ -5,7 +5,6 @@ from flask_login import LoginManager
 
 app = Flask(__name__)
 app.config.from_object('config')
-app.config['APPLICATION_ROOT'] = '/guestos'
 app.config['SECRET_KEY'] = app.config.get('SECRET_KEY')
 
 # Configure SQLAlchemy
