@@ -29,7 +29,7 @@ A Flask web application to automate the cloning, configuration, and sysprepping 
 
 The main workflow of the application is to reconfigure a cloned Windows VM. The following is a high-level overview of the steps:
 
-1.  **Clone VM:** A new VM is cloned from a prepared Proxmox template.
+1.  **Clone VM:** A new VM is cloned from a prepared Proxmox template. The hostname provided at this stage is used for both the Proxmox VM name and the Windows hostname during reconfiguration.
 2.  **Temporary Network:** A temporary network interface is attached to the new VM on a network with a DHCP server. This interface is used for the initial configuration.
 3.  **Get IP:** The application waits for the VM to boot and get an IP address from the DHCP server on the temporary network.
 4.  **WinRM Connection:** The application connects to the VM using WinRM over the temporary network.
