@@ -115,25 +115,43 @@ You need a prepared Windows Server VM template in Proxmox. This template is cruc
 
 ## Running the Application
 
-### With a Reverse Proxy (Recommended)
+To run the application, you need to start both the Flask web server and the Celery worker.
 
-It is recommended to run this application behind a reverse proxy that handles TLS termination. In this setup, the application will run on a local port (e.g., 5001), and the reverse proxy (e.g., Nginx) will forward requests to it.
+### 1. Start the Web Server
 
-1.  Make sure `BEHIND_REVERSE_PROXY` is set to `True` in your `.env` file.
-2.  Configure your reverse proxy to forward requests to the application.
+You can run the web server in two modes:
 
-### Without a Reverse Proxy
-
-For development or testing purposes, you can run the application without a reverse proxy.
+#### Without a Reverse Proxy (for development)
 
 1.  Make sure `BEHIND_REVERSE_PROXY` is set to `False` in your `.env` file.
 2.  Run the application directly:
 
     ```bash
-    python run.py
+    python3 run.py
     ```
 
-The application will be accessible at `http://127.0.0.1:5001`.
+    The application will be accessible at `http://127.0.0.1:5001`.
+
+#### With a Reverse Proxy (for production)
+
+1.  Make sure `BEHIND_REVERSE_PROXY` is set to `True` in your `.env` file.
+2.  Configure your reverse proxy to forward requests to the application.
+3.  Use a WSGI server like Gunicorn to run the application:
+
+    ```bash
+    gunicorn --bind 0.0.0.0:5001 wsgi:app
+    ```
+
+### 2. Start the Celery Worker
+
+In a separate terminal, start the Celery worker. Make sure to activate the virtual environment first.
+
+```bash
+source venv/bin/activate
+celery -A app.celery worker --loglevel=info
+```
+
+For production, you should run the Celery worker as a `systemd` service. See the `guestos-celery.service` file for an example.
 
 ## Configuration
 
@@ -146,23 +164,7 @@ The application is configured using environment variables in the `.env` file. Be
 -   `PORT`: The port on which the web application will listen (defaults to `5001`).
 -   `DOMAIN_PROFILES_JSON`: A JSON string defining profiles for domain joining, including DNS servers, domain names, and credentials.
 
-1.  **Start the Web Server:**
-    For development:
-    ```bash
-    python3 run.py
-    ```
-    For production, use a WSGI server like Gunicorn, managed by a process manager like `systemd`.
-    ```bash
-    gunicorn --bind 0.0.0.0:5001 wsgi:app
-    ```
 
-2.  **Start the Celery Worker:**
-    In a separate terminal, start the Celery worker.
-    ```bash
-    source venv/bin/activate
-    celery -A app.celery worker --loglevel=info
-    ```
-    For production, you should run the Celery worker as a `systemd` service. See the `guestos-celery.service` file for an example.
 
 ## Usage
 
