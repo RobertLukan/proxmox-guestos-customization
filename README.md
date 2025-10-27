@@ -113,7 +113,30 @@ You need a prepared Windows Server VM template in Proxmox. This template is cruc
     ```
     The default password is `changeme`. You should log in and change it. This feature has not been implemented yet, so you can change it directly in the database or by creating a new user.
 
+## Running the Application
+
+### With a Reverse Proxy (Recommended)
+
+It is recommended to run this application behind a reverse proxy that handles TLS termination. In this setup, the application will run on a local port (e.g., 5001), and the reverse proxy (e.g., Nginx) will forward requests to it.
+
+1.  Make sure `BEHIND_REVERSE_PROXY` is set to `True` in your `.env` file.
+2.  Configure your reverse proxy to forward requests to the application.
+
+### Without a Reverse Proxy
+
+For development or testing purposes, you can run the application without a reverse proxy.
+
+1.  Make sure `BEHIND_REVERSE_PROXY` is set to `False` in your `.env` file.
+2.  Run the application directly:
+
+    ```bash
+    python run.py
+    ```
+
+The application will be accessible at `http://127.0.0.1:5001`.
+
 ## Configuration
+
 
 The application is configured using environment variables in the `.env` file. Below is a description of the key variables:
 
