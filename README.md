@@ -148,6 +148,8 @@ The application is configured using environment variables in the `.env` file. Be
 
 ## Screenshots
 
+*Note: These screenshots are from a slightly older version of the application and are for illustrative purposes only.*
+
 ### Initial Page
 ![Initial Page](screenshots/Initial.png)
 
