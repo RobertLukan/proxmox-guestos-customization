@@ -140,6 +140,20 @@ The application is configured using environment variables in the `.env` file.
 1.  Open your web browser and navigate to the application's URL.
 2.  Follow the on-screen instructions to clone, configure, or sysprep your VMs.
 
+## Screenshots
+
+### Initial Page
+![Initial Page](screenshots/Initial.png)
+
+### Clone VM
+![Clone VM](screenshots/Clone.png)
+
+### Reconfigure VM
+![Reconfigure VM](screenshots/Reconfigure.png)
+
+### Progress
+![Progress](screenshots/Progress.png)
+
 ## Security considerations
 -   Use Nginx with TLS.
 -   Do not expose this software outside of your admin network.
