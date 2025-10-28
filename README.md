@@ -77,6 +77,7 @@ You need a prepared Windows Server VM template in Proxmox. This template is cruc
 -   **DHCP Server:** You need a DHCP server on the network that you will use for the temporary WinRM connection (the network of your `TEMP_BRIDGE`). The cloned VMs will rely on this to get their initial IP address.
 -   **Application Host Network:** The server/VM where this Flask application is running must have a network interface in the same subnet as the temporary WinRM network. This is necessary for the application to be able to connect to the guest VMs. It can be hosted on a DHCP server, but the server will need to have two network cards.
 -   **WinRM network:** Use a dedicated L2 network (VLAN) that is not routed due to security considerations. 
+-   **Bridge Configuration:** The application assumes that your `TEMP_BRIDGE` (for WinRM) is a standard access port on a single VLAN, while the `PRIMARY_BRIDGE` (for the VMs) is a trunk port that can carry multiple VLANs. This is the most common setup, but it can be modified in the code if your environment is different. I am open to feedback on how to make this more flexible. 
 
 ### Software
 -   Python 3
