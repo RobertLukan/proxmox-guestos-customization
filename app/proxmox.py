@@ -1,8 +1,18 @@
 import hashlib
 import base64
+import json
 from proxmoxer import ProxmoxAPI
 from app import app, celery, db
 from app.models import Task
+from app.validators import (
+    ValidationError,
+    validate_dns_servers,
+    validate_hostname,
+    validate_ipv4,
+    validate_mac,
+    validate_netmask,
+    validate_vlan,
+)
 import time
 import uuid
 import winrm
@@ -10,6 +20,23 @@ from flask import url_for
 import ipaddress
 import re
 import logging
+
+
+def run_ps_with_params(session, script_body, params):
+    """Run a PowerShell script, passing untrusted values via a Base64-encoded
+    JSON object decoded into a ``$p`` variable inside the guest.
+
+    User-controlled data is never interpolated into PowerShell syntax: the only
+    value placed in the script text is a Base64 string (``[A-Za-z0-9+/=]``),
+    which cannot break out of the surrounding single quotes. Scripts should
+    reference their inputs as ``$p.fieldName``.
+    """
+    blob = base64.b64encode(json.dumps(params).encode("utf-8")).decode("ascii")
+    prelude = (
+        "$p = ConvertFrom-Json ([System.Text.Encoding]::UTF8.GetString("
+        f"[System.Convert]::FromBase64String('{blob}')))\n"
+    )
+    return session.run_ps(prelude + script_body)
 
 def get_proxmox_api():
     try:
@@ -397,6 +424,23 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
                     task.update_status('FAILURE', 100, f"Invalid WINRM_SUBNET or temporary IP address: {e}")
                     return
 
+            # Validate all user-supplied values before they are sent to the guest.
+            try:
+                validate_ipv4(temp_ip_address, field="temporary IP address")
+                new_ip_address = validate_ipv4(new_ip_address, field="new IP address")
+                gateway = validate_ipv4(gateway, field="gateway")
+                netmask = validate_netmask(netmask)
+                vlan = validate_vlan(vlan)
+                dns_list = validate_dns_servers(dns_servers)
+                primary_mac_address = validate_mac(primary_mac_address)
+                if join_domain:
+                    if not domain_name or not domain_username or domain_password is None:
+                        raise ValidationError("Domain join requires domain name, username and password.")
+            except ValidationError as e:
+                task.update_status('FAILURE', 100, f"Invalid reconfiguration input: {e}")
+                _update_vm_tags(vmid, _get_vm_node(vmid), tags_to_add=['lifecycle-failed'])
+                return
+
             task.update_status('PROGRESS', 6, "Establishing insecure WinRM connection...")
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -410,38 +454,57 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
             proxmox = get_proxmox_api()
             node = _get_vm_node(vmid)
             vm_config = proxmox.nodes(node).qemu(vmid).config.get()
-            hostname = vm_config.get('name').split('.')[0]
-            
+            try:
+                hostname = validate_hostname(vm_config.get('name'))
+            except ValidationError as e:
+                task.update_status('FAILURE', 100, f"VM name is not a valid hostname: {e}")
+                _update_vm_tags(vmid, node, tags_to_add=['lifecycle-failed'])
+                return
+
             task.update_status('PROGRESS', 10, "Identifying primary network adapter...")
-            adapter_name_cmd = f"(Get-NetAdapter -Physical | Where-Object {{$_.MacAddress -eq '{primary_mac_address.replace(':', '-')}'}}).Name"
-            r = session.run_ps(adapter_name_cmd)
+            r = run_ps_with_params(
+                session,
+                "(Get-NetAdapter -Physical | Where-Object { $_.MacAddress -eq $p.mac }).Name",
+                {"mac": primary_mac_address.replace(':', '-')},
+            )
             if r.status_code != 0:
                 task.update_status('FAILURE', 100, f"Error getting network adapter: {r.std_err.decode('utf-8')}")
                 return
             adapter_name = r.std_out.decode('utf-8').strip()
 
             task.update_status('PROGRESS', 20, "Clearing existing IP configuration...")
-            r = session.run_ps(f'Get-NetIPAddress -InterfaceAlias "{adapter_name}" | Remove-NetIPAddress -Confirm:$false')
-            if r.status_code != 0: print(f"Warning: Non-zero status when clearing IP: {r.std_err.decode('utf-8')}")
-            r = session.run_ps(f'Get-NetRoute -InterfaceAlias "{adapter_name}" | Where-Object {{$_.DestinationPrefix -eq "0.0.0.0/0"}} | Remove-NetRoute -Confirm:$false')
-            if r.status_code != 0: print(f"Warning: Non-zero status when clearing gateway: {r.std_err.decode('utf-8')}")
+            r = run_ps_with_params(session, 'Get-NetIPAddress -InterfaceAlias $p.adapter | Remove-NetIPAddress -Confirm:$false', {"adapter": adapter_name})
+            if r.status_code != 0: logging.warning(f"Non-zero status when clearing IP: {r.std_err.decode('utf-8')}")
+            r = run_ps_with_params(session, 'Get-NetRoute -InterfaceAlias $p.adapter | Where-Object { $_.DestinationPrefix -eq "0.0.0.0/0" } | Remove-NetRoute -Confirm:$false', {"adapter": adapter_name})
+            if r.status_code != 0: logging.warning(f"Non-zero status when clearing gateway: {r.std_err.decode('utf-8')}")
 
             task.update_status('PROGRESS', 30, f"Setting new IP: {new_ip_address}...")
-            r = session.run_ps(f'New-NetIPAddress -InterfaceAlias "{adapter_name}" -IPAddress "{new_ip_address}" -PrefixLength {netmask}')
+            r = run_ps_with_params(
+                session,
+                'New-NetIPAddress -InterfaceAlias $p.adapter -IPAddress $p.ip -PrefixLength $p.prefix',
+                {"adapter": adapter_name, "ip": new_ip_address, "prefix": netmask},
+            )
             if r.status_code != 0:
                 task.update_status('FAILURE', 100, f"Error setting static IP: {r.std_err.decode('utf-8')}")
                 return
 
             task.update_status('PROGRESS', 40, f"Setting new gateway: {gateway}...")
-            r = session.run_ps(f'New-NetRoute -InterfaceAlias "{adapter_name}" -DestinationPrefix "0.0.0.0/0" -NextHop "{gateway}"')
+            r = run_ps_with_params(
+                session,
+                'New-NetRoute -InterfaceAlias $p.adapter -DestinationPrefix "0.0.0.0/0" -NextHop $p.gateway',
+                {"adapter": adapter_name, "gateway": gateway},
+            )
             if r.status_code != 0:
                 task.update_status('FAILURE', 100, f"Error setting gateway: {r.std_err.decode('utf-8')}")
                 return
 
-            if dns_servers:
-                task.update_status('PROGRESS', 50, f"Setting DNS servers: {dns_servers}...")
-                dns_list = ",".join([f'"{s.strip()}"' for s in dns_servers.split(',')])
-                r = session.run_ps(f'Set-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -ServerAddresses ({dns_list})')
+            if dns_list:
+                task.update_status('PROGRESS', 50, f"Setting DNS servers: {', '.join(dns_list)}...")
+                r = run_ps_with_params(
+                    session,
+                    'Set-DnsClientServerAddress -InterfaceAlias $p.adapter -ServerAddresses $p.dns',
+                    {"adapter": adapter_name, "dns": dns_list},
+                )
                 if r.status_code != 0:
                     task.update_status('FAILURE', 100, f"Error setting DNS: {r.std_err.decode('utf-8')}")
                     return
@@ -458,9 +521,9 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
             
             task.update_status('PROGRESS', 60, f"Renaming computer to '{hostname}' and rebooting...")
             try:
-                session.run_ps(f'Rename-Computer -NewName "{hostname}" -Force -Restart')
+                run_ps_with_params(session, 'Rename-Computer -NewName $p.hostname -Force -Restart', {"hostname": hostname})
             except Exception as e:
-                print(f"Ignoring expected error during reboot after rename: {e}")
+                logging.info(f"Ignoring expected error during reboot after rename: {e}")
 
             task.update_status('PROGRESS', 65, "Waiting for VM to reboot and for new hostname to apply...")
             max_attempts_rename = 30
@@ -492,14 +555,16 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
 
             if join_domain:
                 task.update_status('PROGRESS', 78, f"Joining domain '{domain_name}'...")
-                ps_script = f'''
-                $domainName = "{domain_name}"
-                $username = "{domain_username}"
-                $password = "{domain_password}" | ConvertTo-SecureString -asPlainText -Force
-                $credential = New-Object System.Management.Automation.PSCredential($username, $password)
-                Add-Computer -DomainName $domainName -Credential $credential -Force -ErrorAction Stop
+                ps_script = '''
+                $password = $p.password | ConvertTo-SecureString -AsPlainText -Force
+                $credential = New-Object System.Management.Automation.PSCredential($p.username, $password)
+                Add-Computer -DomainName $p.domainName -Credential $credential -Force -ErrorAction Stop
                 '''
-                r = session.run_ps(ps_script)
+                r = run_ps_with_params(session, ps_script, {
+                    "domainName": domain_name,
+                    "username": domain_username,
+                    "password": domain_password,
+                })
                 if r.status_code != 0:
                     task.update_status('FAILURE', 100, f"Error joining domain: {r.std_err.decode('utf-8')}")
                     return
@@ -565,40 +630,9 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
                     ip_match = current_ip == new_ip_address
 
                     if ip_match:
-                                                # task.update_status('PROGRESS', 97, "Scheduling WinRM deactivation...")
-                        disable_winrm_script = """
-                        # --- Configuration ---
-                        $taskName = "Disable WinRM Service Temporary"
-
-                        # --- 1. Create the Self-Destruct Command ---
-                        # This command now properly stops and disables the service, waits, then unregisters the task.
-                        $finalCommand = "Stop-Service -Name WinRM -Force; Set-Service -Name WinRM -StartupType Disabled; Start-Sleep -Seconds 5; Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false"
-
-                        # We encode the command in Base64 to avoid all nested quoting issues.
-                        $encodedFinalCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($finalCommand))
-
-                        # --- 2. Create the Main Task Action ---
-                        # This action launches our main command in a new, hidden process.
-                        # This allows the scheduled task to end immediately, releasing its lock so it can be deleted.
-                        $mainArgument = "-NoProfile -WindowStyle Hidden -EncodedCommand $encodedFinalCommand"
-
-                        # --- 3. Define and Register the Scheduled Task ---
-                        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $mainArgument
-
-                        $time = (Get-Date).AddMinutes(1).ToString("s")
-                        $trigger = New-ScheduledTaskTrigger -Once -At $time
-
-                        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-
-                        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -User "NT AUTHORITY\System" -RunLevel Highest -Force
-                        """
-                                                # try:
-                        #     session.run_ps(disable_winrm_script)
-                        # except Exception as e:
-                        #     print(f"Warning: Failed to schedule WinRM deactivation: {e}")
-
-                        # The temporary interface is now removed during the power-cycle, so this is no longer needed.
-                        
+                        # WinRM is disabled centrally via Group Policy, so no
+                        # in-guest deactivation step is needed here. The temporary
+                        # interface was already removed during the power-cycle.
                         task.update_status('SUCCESS', 100, f"Reconfiguration successful. IP: {current_ip}, Hostname: {current_hostname}.", result_ip_address=current_ip)
                         _update_vm_tags(vmid, node, tags_to_add=['lifecycle-reconfigured'])
                         return

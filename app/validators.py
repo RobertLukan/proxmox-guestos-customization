@@ -1,0 +1,86 @@
+"""Input validation helpers.
+
+These are used to sanitize user-supplied values before they are sent to a
+guest VM (over WinRM or the QEMU guest agent). Rejecting malformed input early
+is the first line of defense against command/script injection: combined with
+the parameter-passing helper in ``app.proxmox``, no user-controlled bytes are
+ever interpolated directly into PowerShell syntax.
+"""
+
+import ipaddress
+import re
+
+# NetBIOS computer names: 1-15 chars, letters/digits/hyphen.
+HOSTNAME_RE = re.compile(r"^[A-Za-z0-9-]{1,15}$")
+MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$")
+
+
+class ValidationError(ValueError):
+    """Raised when a user-supplied value fails validation."""
+
+
+def validate_ipv4(value, field="IP address"):
+    """Return the canonical string form of an IPv4 address or raise."""
+    try:
+        return str(ipaddress.IPv4Address(str(value).strip()))
+    except (ValueError, ipaddress.AddressValueError):
+        raise ValidationError(f"Invalid {field}: {value!r}")
+
+
+def validate_netmask(value):
+    """Return an int prefix length in the range 0-32 or raise."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ValidationError(f"Invalid netmask (expected integer 0-32): {value!r}")
+    if not 0 <= n <= 32:
+        raise ValidationError(f"Netmask out of range 0-32: {n}")
+    return n
+
+
+def validate_vlan(value):
+    """Return an int VLAN id in the range 1-4094, or None when empty."""
+    if value in (None, "", "None"):
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ValidationError(f"Invalid VLAN (expected integer 1-4094): {value!r}")
+    if not 1 <= n <= 4094:
+        raise ValidationError(f"VLAN out of range 1-4094: {n}")
+    return n
+
+
+def validate_hostname(value):
+    """Return a validated NetBIOS-safe hostname (first DNS label) or raise."""
+    label = str(value).strip().split(".")[0]
+    if not HOSTNAME_RE.match(label):
+        raise ValidationError(
+            f"Invalid hostname (1-15 chars, letters/digits/hyphen only): {value!r}"
+        )
+    return label
+
+
+def validate_mac(value):
+    """Return the MAC address unchanged if it is well-formed, else raise."""
+    v = str(value).strip()
+    if not MAC_RE.match(v):
+        raise ValidationError(f"Invalid MAC address: {value!r}")
+    return v
+
+
+def validate_dns_servers(value):
+    """Parse a comma-separated string into a list of validated IPv4 strings.
+
+    Empty/None input yields an empty list. Each non-empty entry must be a valid
+    IPv4 address.
+    """
+    if not value:
+        return []
+    servers = []
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        servers.append(validate_ipv4(part, field="DNS server"))
+    return servers
