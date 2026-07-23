@@ -44,9 +44,6 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object('config')
 
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///site.db'
-    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
     # Harden session cookies. Secure is only enabled behind a reverse proxy
     # (i.e. when TLS is terminated upstream) so local HTTP development works.
     app.config.update(
