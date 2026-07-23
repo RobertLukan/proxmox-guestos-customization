@@ -1,7 +1,12 @@
 from app import db
-from datetime import datetime
+from datetime import datetime, timezone
 from flask_login import UserMixin
 from werkzeug.security import generate_password_hash, check_password_hash
+
+
+def _utcnow():
+    """Timezone-aware UTC now (replaces the deprecated datetime.utcnow)."""
+    return datetime.now(timezone.utc)
 
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -20,7 +25,7 @@ class Task(db.Model):
     status = db.Column(db.String(64), default='PENDING') # PENDING, STARTED, PROGRESS, SUCCESS, FAILURE
     progress = db.Column(db.Integer, default=0) # 0-100
     message = db.Column(db.String(512), default='')
-    timestamp = db.Column(db.DateTime, index=True, default=datetime.utcnow)
+    timestamp = db.Column(db.DateTime(timezone=True), index=True, default=_utcnow)
     result_vmid = db.Column(db.Integer, nullable=True) # New column for VMID
     result_ip_address = db.Column(db.String(64), nullable=True) # New column for IP address
     vm_uuid = db.Column(db.String(36), nullable=True) # New column for unique VM identifier
@@ -28,6 +33,19 @@ class Task(db.Model):
 
     def __repr__(self):
         return '<Task {}> '.format(self.name)
+
+    def _timestamp_iso(self):
+        """Return the timestamp as an ISO-8601 string with a trailing 'Z'.
+
+        Handles both timezone-aware and legacy naive (assumed UTC) values so the
+        frontend contract stays stable.
+        """
+        ts = self.timestamp
+        if ts is None:
+            return None
+        if ts.tzinfo is not None:
+            ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+        return ts.isoformat() + 'Z'
 
     def to_dict(self):
         return {
@@ -37,7 +55,7 @@ class Task(db.Model):
             'status': self.status,
             'progress': self.progress,
             'message': self.message,
-            'timestamp': self.timestamp.isoformat() + 'Z',
+            'timestamp': self._timestamp_iso(),
             'result_vmid': self.result_vmid,
             'result_ip_address': self.result_ip_address,
             'vm_uuid': self.vm_uuid, # Include in dict

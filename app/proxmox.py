@@ -49,7 +49,7 @@ def get_proxmox_api():
         )
         return proxmox
     except Exception as e:
-        print(f"Error connecting to Proxmox: {e}")
+        logging.error(f"Error connecting to Proxmox: {e}")
         return None
 
 def get_template_vms():
@@ -83,6 +83,49 @@ def _get_vm_node(vmid):
     for vm in proxmox.cluster.resources.get(type='vm'):
         if str(vm.get('vmid')) == str(vmid):
             return vm.get('node')
+    return None
+
+def select_winrm_ip(vmid, node=None, proxmox=None):
+    """Return a VM's IPv4 address suitable for the WinRM connection.
+
+    Picks the first non-loopback, non-APIPA (169.254.x.x) IPv4 address reported
+    by the guest agent. When ``WINRM_SUBNET`` is configured, only an address
+    within that subnet is accepted; otherwise the first valid address is used.
+    Returns ``None`` if no suitable address is found (or on any error).
+    """
+    proxmox = proxmox or get_proxmox_api()
+    if not proxmox:
+        return None
+    node = node or _get_vm_node(vmid)
+    if not node:
+        return None
+
+    winrm_network = None
+    winrm_subnet_str = app.config.get('WINRM_SUBNET')
+    if winrm_subnet_str:
+        try:
+            winrm_network = ipaddress.ip_network(winrm_subnet_str)
+        except ValueError:
+            winrm_network = None  # Ignore a malformed subnet and match any IP.
+
+    try:
+        network_info = proxmox.nodes(node).qemu(vmid).agent.get('network-get-interfaces')
+    except Exception as e:
+        logging.warning(f"Could not get network info for VM {vmid}: {e}")
+        return None
+
+    for iface in network_info.get('result', []):
+        for ip_addr_obj in iface.get('ip-addresses', []):
+            if ip_addr_obj.get('ip-address-type') != 'ipv4':
+                continue
+            ip_candidate = ip_addr_obj.get('ip-address', '')
+            if ip_candidate.startswith('127.') or ip_candidate.startswith('169.254.'):
+                continue
+            if winrm_network:
+                if ipaddress.ip_address(ip_candidate) in winrm_network:
+                    return ip_candidate
+            else:
+                return ip_candidate
     return None
 
 def _update_vm_tags(vmid, node, tags_to_add=None, tags_to_remove=None):
@@ -129,7 +172,7 @@ def get_vm_current_ip(vmid):
                         if ip_addr['ip-address-type'] == 'ipv4' and not ip_addr['ip-address'].startswith('127.0.0.1') and not ip_addr['ip-address'].startswith('169.254.'):
                             return ip_addr['ip-address']
         except Exception as e:
-            print(f"Could not get current IP for VM {vmid} on attempt {i+1}: {e}")
+            logging.warning(f"Could not get current IP for VM {vmid} on attempt {i+1}: {e}")
         
         time.sleep(2)
         
@@ -345,12 +388,11 @@ def wait_for_guest_agent_and_ip_task(self, task_id, vmid, vm_uuid):
         _update_vm_tags(vmid, node, tags_to_add=['lifecycle-waiting_for_ip'])
         
         try:
-            # Get WINRM_SUBNET from config
+            # Validate WINRM_SUBNET up front so a misconfiguration fails clearly.
             winrm_subnet_str = app.config.get('WINRM_SUBNET')
-            winrm_network = None
             if winrm_subnet_str:
                 try:
-                    winrm_network = ipaddress.ip_network(winrm_subnet_str)
+                    ipaddress.ip_network(winrm_subnet_str)
                 except ValueError as e:
                     task.update_status('FAILURE', 100, f"Invalid WINRM_SUBNET configured: {e}")
                     return
@@ -359,27 +401,7 @@ def wait_for_guest_agent_and_ip_task(self, task_id, vmid, vm_uuid):
             max_attempts = 30 # Increased attempts for robustness
             for attempt in range(max_attempts):
                 task.update_status('PROGRESS', int((attempt / max_attempts) * 100), f"Waiting for WinRM IP... (Attempt {attempt+1}/{max_attempts})")
-                try:
-                    network_info = get_proxmox_api().nodes(node).qemu(vmid).agent.get('network-get-interfaces')
-                    for iface in network_info['result']:
-                        if 'ip-addresses' in iface:
-                            for ip_addr_obj in iface['ip-addresses']:
-                                if ip_addr_obj['ip-address-type'] == 'ipv4':
-                                    current_ip = ip_addr_obj['ip-address']
-                                    # Exclude loopback and APIPA addresses
-                                    if not current_ip.startswith('127.') and not current_ip.startswith('169.254.'):
-                                        if winrm_network:
-                                            if ipaddress.ip_address(current_ip) in winrm_network:
-                                                selected_ip_address = current_ip
-                                                break # Found a suitable IP
-                                        else: # If no WINRM_SUBNET is configured, take the first valid IP
-                                            selected_ip_address = current_ip
-                                            break
-                            if selected_ip_address:
-                                break # Found a suitable IP from any interface
-                except Exception as e:
-                    logging.warning(f"Attempt {attempt+1}: Could not get network info for VM {vmid}: {e}")
-                
+                selected_ip_address = select_winrm_ip(vmid, node=node)
                 if selected_ip_address:
                     break
                 time.sleep(10) # Wait before retrying
@@ -546,7 +568,7 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
                             rename_verified = True
                             break
                 except Exception as e:
-                    print(f"Could not connect or verify hostname yet (Attempt {i+1}/{max_attempts_rename}): {e}")
+                    logging.info(f"Could not connect or verify hostname yet (Attempt {i+1}/{max_attempts_rename}): {e}")
             
             if not rename_verified:
                 task.update_status('FAILURE', 100, "Timed out verifying hostname change after reboot.")
@@ -573,7 +595,7 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
             try:
                 session.run_ps("Stop-Computer -Force")
             except Exception as e:
-                print(f"Ignoring expected error during shutdown: {e}")
+                logging.info(f"Ignoring expected error during shutdown: {e}")
 
             # Wait for VM to stop
             for _ in range(30): # 5 minutes timeout
@@ -591,7 +613,7 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
                 try:
                     proxmox.nodes(node).qemu(vmid).config.post(delete='net1')
                 except Exception as e:
-                    print(f"Warning: Failed to remove net1 while VM was stopped: {e}")
+                    logging.warning(f"Failed to remove net1 while VM was stopped: {e}")
             
             task.update_status('PROGRESS', 87, "Starting VM...")
             proxmox.nodes(node).qemu(vmid).status.start.post()
@@ -638,8 +660,7 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
                         return
                 
                 except Exception as e:
-                    print(f"Error during verification (Attempt {i+1}/{max_attempts}): {e}")
-                    pass
+                    logging.warning(f"Error during verification (Attempt {i+1}/{max_attempts}): {e}")
             
             task.update_status('FAILURE', 100, "Timed out verifying reconfiguration after reboot.")
             _update_vm_tags(vmid, node, tags_to_add=['lifecycle-failed'])
