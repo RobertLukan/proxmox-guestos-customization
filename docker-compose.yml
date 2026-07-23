@@ -1,0 +1,40 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+  web:
+    build: .
+    # Initialize the database (idempotent) then start the web server.
+    command: sh -c "python init_db.py && gunicorn --bind 0.0.0.0:5001 wsgi:app"
+    env_file: .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    ports:
+      - "5001:5001"
+    depends_on:
+      - redis
+    volumes:
+      # Persist the SQLite database (Flask-SQLAlchemy stores it under instance/).
+      - app-instance:/app/instance
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: celery -A app.celery worker --loglevel=info
+    env_file: .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      - redis
+    volumes:
+      - app-instance:/app/instance
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  app-instance:
