@@ -1,5 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
+    <!--
+      specialize: applied on first boot after Sysprep /generalize.
+      The hostname and time zone are set declaratively here (reliable), while
+      the network configuration is handled by setup.ps1 (invoked by
+      SetupComplete.cmd) because keying a static IP off a virtio NIC is far more
+      robust from PowerShell than from the answer file's <Identifier>.
+    -->
+    <settings pass="specialize">
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <ComputerName>{{ hostname }}</ComputerName>
+            {% if timezone %}<TimeZone>{{ timezone }}</TimeZone>{% endif %}
+        </component>
+    </settings>
     <settings pass="oobeSystem">
         <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <InputLocale>en-US</InputLocale>
@@ -21,31 +34,6 @@
                     <PlainText>true</PlainText>
                 </AdministratorPassword>
             </UserAccounts>
-        </component>
-    </settings>
-    <settings pass="specialize">
-        <component name="Microsoft-Windows-TCPIP" processorArchitecture="amd64" publicKeyToken="41bf3856ad364xx35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-            <Interfaces>
-                <Interface wcm:action="add">
-                    <Identifier>Ethernet</Identifier>
-                    <Ipv4Settings>
-                        <DhcpEnabled>false</DhcpEnabled>
-                        <RouterDiscoveryEnabled>true</RouterDiscoveryEnabled>
-                        <Metric>30</Metric>
-                    </Ipv4Settings>
-                    <UnicastIpAddresses>
-                        <IpAddress wcm:action="add" wcm:keyValue="1">{{ ip_address }}/{{ netmask_cidr }}</IpAddress>
-                    </UnicastIpAddresses>
-                    <Routes>
-                        <Route wcm:action="add">
-                            <Identifier>10</Identifier>
-                            <Metric>20</Metric>
-                            <NextHopAddress>{{ gateway }}</NextHopAddress>
-                            <Prefix>0.0.0.0/0</Prefix>
-                        </Route>
-                    </Routes>
-                </Interface>
-            </Interfaces>
         </component>
     </settings>
 </unattend>

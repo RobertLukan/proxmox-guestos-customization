@@ -85,6 +85,27 @@ def _get_vm_node(vmid):
             return vm.get('node')
     return None
 
+def get_primary_mac_address(vmid, node=None, proxmox=None):
+    """Return the MAC address of the VM's primary NIC (net0), or None.
+
+    Used to key guest-side network configuration off a stable identifier rather
+    than a fragile adapter name.
+    """
+    proxmox = proxmox or get_proxmox_api()
+    if not proxmox:
+        return None
+    node = node or _get_vm_node(vmid)
+    if not node:
+        return None
+    try:
+        vm_config = proxmox.nodes(node).qemu(vmid).config.get()
+    except Exception as e:
+        logging.warning(f"Could not read config for VM {vmid}: {e}")
+        return None
+    net0 = vm_config.get('net0', '')
+    match = re.search(r'([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})', net0)
+    return match.group(1) if match else None
+
 def select_winrm_ip(vmid, node=None, proxmox=None):
     """Return a VM's IPv4 address suitable for the WinRM connection.
 
@@ -303,6 +324,42 @@ def run_command_in_guest(vmid, command):
                 raise Exception(f"Command failed with exit code {status['exitcode']}: {status.get('err-data')}")
             return status.get('out-data')
         time.sleep(2)
+
+def run_shutdown_command_in_guest(vmid, command, settle=30):
+    """Launch a guest command that is expected to power off/reboot the VM.
+
+    Unlike ``run_command_in_guest``, this does NOT treat the guest agent
+    becoming unreachable as an error: a command such as
+    ``sysprep ... /shutdown`` intentionally kills the agent when it powers the
+    machine down. We briefly poll ``exec-status`` so a command that exits
+    non-zero *before* the shutdown still surfaces as an error; once the agent
+    disappears (or ``settle`` seconds pass) we return and let the caller confirm
+    success by waiting for the VM to actually stop.
+    """
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not node:
+        raise Exception(f"VM {vmid} not found.")
+
+    result = proxmox.nodes(node).qemu(vmid).agent.exec.post(command=command)
+    pid = result.get('pid')
+    deadline = time.time() + settle
+    while time.time() < deadline:
+        try:
+            status = proxmox.nodes(node).qemu(vmid).agent('exec-status').get(pid=pid)
+        except Exception as e:
+            # Agent unreachable -> the shutdown has begun. This is expected.
+            logging.info(f"Guest agent unreachable after issuing shutdown command on VM {vmid} (expected): {e}")
+            return
+        if status.get('exited'):
+            exitcode = status.get('exitcode')
+            if exitcode not in (0, None):
+                raise Exception(f"Command failed with exit code {exitcode}: {status.get('err-data')}")
+            return
+        time.sleep(2)
+    # Command still running after settle window; assume the shutdown is in
+    # progress and let the caller verify via VM status.
+    return
 
 def get_vm_ip(vmid, timeout=300):
     """Gets the IP address of a VM."""
