@@ -23,6 +23,7 @@
         <div class="card shadow-sm">
             <h1 class="text-center mb-4">Select a Proxmox VM Template</h1>
             <form action="{{ url_for('select_template') }}" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="mb-3">
                     <label for="template" class="form-label">Choose a template:</label>
                     <select name="template_vmid" id="template" class="form-select">

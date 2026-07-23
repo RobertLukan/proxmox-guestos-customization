@@ -2,10 +2,15 @@ from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from celery import Celery
 from flask_login import LoginManager
+from flask_wtf.csrf import CSRFProtect
 
 app = Flask(__name__)
 app.config.from_object('config')
 app.config['SECRET_KEY'] = app.config.get('SECRET_KEY')
+
+# CSRF protection for all state-changing requests (form posts + JSON via the
+# X-CSRFToken header, wired up in static/js/csrf.js).
+csrf = CSRFProtect(app)
 
 # Configure SQLAlchemy
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///site.db'
