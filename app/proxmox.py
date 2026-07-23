@@ -44,7 +44,7 @@ def get_proxmox_api():
             app.config['PROXMOX_HOST'],
             user=app.config['PROXMOX_USER'],
             password=app.config['PROXMOX_PASSWORD'],
-            verify_ssl=False,
+            verify_ssl=app.config.get('PROXMOX_VERIFY_SSL', False),
             timeout=300
         )
         return proxmox

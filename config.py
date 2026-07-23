@@ -5,10 +5,20 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+# Helper for parsing boolean environment variables.
+def _env_bool(name, default=False):
+    return os.environ.get(name, str(default)).lower() in ('true', '1', 't', 'yes')
+
+
 # Proxmox PVE API credentials
 PROXMOX_HOST = os.environ.get('PROXMOX_HOST')
 PROXMOX_USER = os.environ.get('PROXMOX_USER')
 PROXMOX_PASSWORD = os.environ.get('PROXMOX_PASSWORD')
+
+# Whether to verify the Proxmox API TLS certificate. Defaults to False to
+# preserve the common homelab setup (self-signed PVE certs), but should be set
+# to True when a trusted certificate is in place.
+PROXMOX_VERIFY_SSL = _env_bool('PROXMOX_VERIFY_SSL', False)
 
 # Domain Profiles - loaded from a JSON string in the environment variable
 # See .env.example for the expected format.
@@ -30,8 +40,14 @@ WINRM_SUBNET = os.environ.get('WINRM_SUBNET')
 PRIMARY_BRIDGE = os.environ.get('PRIMARY_BRIDGE', 'vmbr0')
 TEMP_BRIDGE = os.environ.get('TEMP_BRIDGE', 'vmbr1')
 
-# Secret key for session management
+# Secret key for session management. Required: without it Flask sessions and
+# CSRF tokens are insecure, so fail fast rather than starting up with None.
 SECRET_KEY = os.environ.get('SECRET_KEY')
+if not SECRET_KEY:
+    raise RuntimeError(
+        "SECRET_KEY is not set. Add it to your .env file "
+        "(generate one with: python -c 'import secrets; print(secrets.token_hex())')."
+    )
 
 # Application Port
 PORT = int(os.environ.get('PORT', 5001))

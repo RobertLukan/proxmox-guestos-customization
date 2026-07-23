@@ -8,6 +8,14 @@ app = Flask(__name__)
 app.config.from_object('config')
 app.config['SECRET_KEY'] = app.config.get('SECRET_KEY')
 
+# Harden session cookies. Secure is only enabled behind a reverse proxy (i.e.
+# when TLS is terminated upstream) so local HTTP development still works.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=app.config.get('BEHIND_REVERSE_PROXY', False),
+)
+
 # CSRF protection for all state-changing requests (form posts + JSON via the
 # X-CSRFToken header, wired up in static/js/csrf.js).
 csrf = CSRFProtect(app)
