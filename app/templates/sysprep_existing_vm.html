@@ -45,26 +45,36 @@
                 <h5 class="mt-4">Network Configuration</h5>
                 <hr>
                 <div class="mb-3">
-                    <label for="ip_address" class="form-label">IP Address:</label>
-                    <input type="text" name="ip_address" id="ip_address" class="form-control" required>
-                </div>
-                <div class="mb-3">
-                    <label for="netmask_cidr" class="form-label">Netmask (CIDR):</label>
-                    <select class="form-select" id="netmask_cidr" name="netmask_cidr" required>
-                        <option value="24">24 (255.255.255.0)</option>
-                        <option value="25">25 (255.255.255.128)</option>
-                        <option value="26">26 (255.255.255.192)</option>
-                        <option value="27">27 (255.255.255.224)</option>
-                        <option value="28">28 (255.255.255.240)</option>
+                    <label for="network_mode" class="form-label">Network Mode:</label>
+                    <select class="form-select" id="network_mode" name="network_mode">
+                        <option value="static" selected>Static</option>
+                        <option value="dhcp">DHCP</option>
                     </select>
                 </div>
-                <div class="mb-3">
-                    <label for="gateway" class="form-label">Default Gateway:</label>
-                    <input type="text" name="gateway" id="gateway" class="form-control" required>
+                <div id="static_fields">
+                    <div class="mb-3">
+                        <label for="ip_address" class="form-label">IP Address:</label>
+                        <input type="text" name="ip_address" id="ip_address" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="netmask_cidr" class="form-label">Netmask (CIDR):</label>
+                        <select class="form-select" id="netmask_cidr" name="netmask_cidr" required>
+                            <option value="24">24 (255.255.255.0)</option>
+                            <option value="25">25 (255.255.255.128)</option>
+                            <option value="26">26 (255.255.255.192)</option>
+                            <option value="27">27 (255.255.255.224)</option>
+                            <option value="28">28 (255.255.255.240)</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="gateway" class="form-label">Default Gateway:</label>
+                        <input type="text" name="gateway" id="gateway" class="form-control" required>
+                    </div>
                 </div>
                 <div class="mb-3">
                     <label for="dns_servers" class="form-label">DNS Servers (comma-separated):</label>
-                    <input type="text" name="dns_servers" id="dns_servers" class="form-control" required>
+                    <input type="text" name="dns_servers" id="dns_servers" class="form-control"
+                           placeholder="Optional under DHCP; recommended (domain controller) when joining a domain">
                 </div>
 
                 <h5 class="mt-4">Domain Join (Optional)</h5>
@@ -76,7 +86,7 @@
                 <div id="domain_fields" style="display: none;">
                     <div class="mb-3">
                         <label for="domain_name" class="form-label">Domain Name:</label>
-                        <input type="text" class="form-control" id="domain_name" name="domain_name">
+                        <input type="text" class="form-control" id="domain_name" name="domain_name" placeholder="corp.example.com">
                     </div>
                     <div class="mb-3">
                         <label for="domain_username" class="form-label">Service Account Username:</label>
@@ -85,6 +95,10 @@
                     <div class="mb-3">
                         <label for="domain_password" class="form-label">Service Account Password:</label>
                         <input type="password" class="form-control" id="domain_password" name="domain_password">
+                    </div>
+                    <div class="mb-3">
+                        <label for="domain_ou" class="form-label">Target OU (optional):</label>
+                        <input type="text" class="form-control" id="domain_ou" name="domain_ou" placeholder="OU=Servers,DC=corp,DC=example,DC=com">
                     </div>
                 </div>
 
@@ -97,6 +111,14 @@
     <script src="{{ url_for('static', filename='js/jquery-3.5.1.min.js') }}"></script>
     <script>
         $(document).ready(function() {
+            function applyNetworkMode() {
+                const isDhcp = $('#network_mode').val() === 'dhcp';
+                $('#static_fields').toggle(!isDhcp);
+                $('#ip_address, #netmask_cidr, #gateway').prop('required', !isDhcp);
+            }
+            $('#network_mode').on('change', applyNetworkMode);
+            applyNetworkMode();
+
             $('#join_domain_checkbox').on('change', function() {
                 if ($(this).is(':checked')) {
                     $('#domain_fields').show();

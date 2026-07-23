@@ -13,6 +13,9 @@ import re
 # NetBIOS computer names: 1-15 chars, letters/digits/hyphen.
 HOSTNAME_RE = re.compile(r"^[A-Za-z0-9-]{1,15}$")
 MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$")
+# DNS/AD domain names: one or more dot-separated labels (e.g. corp.example.com).
+DOMAIN_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+DOMAIN_RE = re.compile(rf"^(?=.{{1,253}}$){DOMAIN_LABEL}(?:\.{DOMAIN_LABEL})+$")
 
 
 class ValidationError(ValueError):
@@ -59,6 +62,14 @@ def validate_hostname(value):
             f"Invalid hostname (1-15 chars, letters/digits/hyphen only): {value!r}"
         )
     return label
+
+
+def validate_domain(value):
+    """Return a lower-cased, validated AD/DNS domain name (e.g. corp.local)."""
+    v = str(value or "").strip().lower().rstrip(".")
+    if not DOMAIN_RE.match(v):
+        raise ValidationError(f"Invalid domain name: {value!r}")
+    return v
 
 
 def validate_mac(value):

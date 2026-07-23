@@ -5,10 +5,17 @@ hostname (unattend ComputerName) and static network config (setup.ps1), and
 that untrusted values are validated before being rendered into the non-escaped
 PowerShell script.
 """
+import base64
+import json
+
 import pytest
 
 from app import app as flask_app
-from app.celery_app import _validate_sysprep_network, _render_sysprep_files
+from app.celery_app import (
+    _validate_sysprep_network,
+    _prepare_domain_join,
+    _render_sysprep_files,
+)
 from app.validators import ValidationError
 
 
@@ -81,3 +88,86 @@ def test_setup_complete_invokes_setup_ps1():
     cmd = cmd.decode()
     assert 'setup.ps1' in cmd
     assert 'powershell.exe' in cmd
+
+
+# --- DHCP mode --------------------------------------------------------------
+
+def test_dhcp_mode_skips_static_and_enables_dhcp():
+    data = _base_data()
+    data['network_mode'] = 'dhcp'
+    # ip/gateway intentionally absent -> must NOT be required in DHCP mode.
+    data.pop('ip_address'); data.pop('gateway')
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        assert data['use_dhcp'] is True
+        _xml, ps1, _cmd = _render_sysprep_files(data)
+    ps1 = ps1.decode()
+    assert '-Dhcp Enabled' in ps1
+    assert 'New-NetIPAddress' not in ps1  # no static addressing
+
+
+def test_dhcp_with_dns_override_sets_servers():
+    data = _base_data()
+    data['network_mode'] = 'dhcp'
+    data['dns_servers'] = '10.0.0.9'
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        _xml, ps1, _cmd = _render_sysprep_files(data)
+    ps1 = ps1.decode()
+    assert "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @('10.0.0.9')" in ps1
+
+
+# --- Domain join ------------------------------------------------------------
+
+def test_domain_join_packs_credentials_as_base64_json():
+    data = _base_data()
+    data.update(join_domain=True, domain_name='CORP.Example.com',
+                domain_username='svc-join', domain_password='p@ss', domain_ou='OU=Servers,DC=corp')
+    _prepare_domain_join(data)
+    assert data['join_domain'] is True
+    assert data['domain_name'] == 'corp.example.com'  # normalized
+    assert 'domain_password' not in data  # raw secret scrubbed from payload
+    decoded = json.loads(base64.b64decode(data['domain_join_b64']))
+    assert decoded == {'domain': 'corp.example.com', 'username': 'svc-join',
+                       'password': 'p@ss', 'ou': 'OU=Servers,DC=corp'}
+
+
+def test_domain_join_password_is_not_interpolated_raw():
+    # A password with a single quote and $ would break naive interpolation; it
+    # must only ever appear inside the Base64 blob, never as raw PowerShell.
+    nasty = "a'; Remove-Item C:\\ #$x"
+    data = _base_data()
+    data.update(join_domain=True, domain_name='corp.local',
+                domain_username='svc', domain_password=nasty)
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        _prepare_domain_join(data)
+        _xml, ps1, _cmd = _render_sysprep_files(data)
+    ps1 = ps1.decode()
+    assert nasty not in ps1  # raw secret never appears
+    assert 'Add-Computer' in ps1
+    # The blob still round-trips to the correct password.
+    decoded = json.loads(base64.b64decode(data['domain_join_b64']))
+    assert decoded['password'] == nasty
+
+
+def test_domain_join_requires_credentials():
+    data = _base_data()
+    data.update(join_domain=True, domain_name='corp.local', domain_username='', domain_password='')
+    with pytest.raises(ValidationError):
+        _prepare_domain_join(data)
+
+
+@pytest.mark.parametrize('bad', ['not_a_domain', 'corp', '-bad.local', ''])
+def test_domain_join_rejects_bad_domain(bad):
+    data = _base_data()
+    data.update(join_domain=True, domain_name=bad, domain_username='u', domain_password='p')
+    with pytest.raises(ValidationError):
+        _prepare_domain_join(data)
+
+
+def test_no_domain_join_leaves_flag_false():
+    data = _base_data()
+    _prepare_domain_join(data)  # join_domain not set
+    assert data['join_domain'] is False
+    assert 'domain_join_b64' not in data

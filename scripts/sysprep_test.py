@@ -38,15 +38,29 @@ def _parse_args():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--vmid', required=True, help='Target VM id (disposable!).')
     p.add_argument('--hostname', required=True, help='New Windows hostname (<=15 chars).')
-    p.add_argument('--ip', required=True, help='Static IPv4 address.')
-    p.add_argument('--netmask', required=True, help='Prefix length (CIDR), e.g. 24.')
-    p.add_argument('--gateway', required=True, help='Default gateway IPv4.')
-    p.add_argument('--dns', required=True, help='Comma-separated DNS servers.')
+    p.add_argument('--network-mode', choices=['static', 'dhcp'], default='static',
+                   help='Network mode (default: static).')
+    p.add_argument('--ip', help='Static IPv4 address (required for --network-mode static).')
+    p.add_argument('--netmask', help='Prefix length (CIDR), e.g. 24 (static only).')
+    p.add_argument('--gateway', help='Default gateway IPv4 (static only).')
+    p.add_argument('--dns', default='', help='Comma-separated DNS servers (optional under DHCP).')
     p.add_argument('--admin-password', required=True, help='Local Administrator password to set.')
     p.add_argument('--timezone', default='Central European Standard Time',
                    help='Windows time zone id.')
+    # Domain join (optional).
+    p.add_argument('--join-domain', action='store_true', help='Join the machine to a domain.')
+    p.add_argument('--domain', help='AD domain name, e.g. corp.example.com.')
+    p.add_argument('--domain-user', help='Domain join account username.')
+    p.add_argument('--domain-password', help='Domain join account password.')
+    p.add_argument('--domain-ou', default='', help='Target OU DN (optional).')
     p.add_argument('--yes', action='store_true', help='Skip the confirmation prompt.')
-    return p.parse_args()
+    args = p.parse_args()
+
+    if args.network_mode == 'static' and not all([args.ip, args.netmask, args.gateway]):
+        p.error('--ip, --netmask and --gateway are required for --network-mode static')
+    if args.join_domain and not all([args.domain, args.domain_user, args.domain_password]):
+        p.error('--domain, --domain-user and --domain-password are required with --join-domain')
+    return args
 
 
 def _preflight(vmid):
@@ -97,19 +111,31 @@ def main():
     data = {
         'vmid': args.vmid,
         'hostname': args.hostname,
+        'network_mode': args.network_mode,
         'ip_address': args.ip,
         'netmask_cidr': args.netmask,
         'gateway': args.gateway,
         'dns_servers': args.dns,
         'administrator_password': args.admin_password,
         'timezone': args.timezone,
-        'join_domain': False,
+        'join_domain': args.join_domain,
+        'domain_name': args.domain,
+        'domain_username': args.domain_user,
+        'domain_password': args.domain_password,
+        'domain_ou': args.domain_ou,
     }
+
+    if args.network_mode == 'dhcp':
+        net = f"DHCP (dns {args.dns or 'auto'})"
+    else:
+        net = f"{args.ip}/{args.netmask} gw {args.gateway} dns {args.dns}"
+    domain = f"join {args.domain} (OU={args.domain_ou or 'default'})" if args.join_domain else "no"
 
     print("Sysprep existing-VM test (synchronous, no Celery/Redis/web)")
     print(f"  Target VM : {args.vmid}")
     print(f"  Hostname  : {args.hostname}")
-    print(f"  Network   : {args.ip}/{args.netmask} gw {args.gateway} dns {args.dns}")
+    print(f"  Network   : {net}")
+    print(f"  Domain    : {domain}")
     print("  NOTE: this GENERALIZES and REBOOTS the VM.\n")
 
     with app.app_context():

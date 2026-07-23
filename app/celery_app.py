@@ -15,13 +15,23 @@ from app.proxmox import (
 from app.validators import (
     ValidationError,
     validate_dns_servers,
+    validate_domain,
     validate_hostname,
     validate_ipv4,
     validate_mac,
     validate_netmask,
 )
 from flask import render_template
+import base64
+import json
 import time
+
+
+def _as_bool(value):
+    """Coerce form/JSON truthy values (True, 'true', 'on', 1) to a bool."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ('true', '1', 't', 'yes', 'on')
 
 def update_task_progress(task_id, progress, message):
     """Helper function to update task progress."""
@@ -39,17 +49,56 @@ def _validate_sysprep_network(data):
     setup.ps1 is not HTML/XML so Flask does not autoescape it; validating the
     values here (IPs, integer netmask, DNS list, MAC) prevents injection into
     the generated PowerShell. Mutates ``data`` in place and raises
-    ValidationError. ``dns_list`` (a list of validated IPs) is stored back on
-    ``data`` for the template to iterate.
+    ValidationError. ``dns_list`` (a list of validated IPs) and ``use_dhcp`` are
+    stored back on ``data`` for the templates.
+
+    Two network modes are supported: ``static`` (default; requires IP, netmask
+    and gateway) and ``dhcp`` (no static addressing; DNS is optional and, when
+    supplied, is applied as an override e.g. to reach the domain controller).
     """
-    data['ip_address'] = validate_ipv4(data.get('ip_address'), field='IP address')
-    data['netmask_cidr'] = validate_netmask(data.get('netmask_cidr'))
-    data['gateway'] = validate_ipv4(data.get('gateway'), field='gateway')
+    data['use_dhcp'] = (str(data.get('network_mode') or 'static').lower() == 'dhcp')
     data['dns_list'] = validate_dns_servers(data.get('dns_servers'))
+    if not data['use_dhcp']:
+        data['ip_address'] = validate_ipv4(data.get('ip_address'), field='IP address')
+        data['netmask_cidr'] = validate_netmask(data.get('netmask_cidr'))
+        data['gateway'] = validate_ipv4(data.get('gateway'), field='gateway')
     if data.get('hostname'):
         data['hostname'] = validate_hostname(data['hostname'])
     if data.get('primary_mac_address'):
         data['primary_mac_address'] = validate_mac(data['primary_mac_address'])
+
+
+def _prepare_domain_join(data):
+    """Validate domain-join inputs and stage them for the setup.ps1 template.
+
+    When a domain join is requested, credentials are packed into a Base64-encoded
+    JSON blob (``domain_join_b64``) so no credential bytes are interpolated into
+    PowerShell syntax. The raw password is removed from ``data`` afterwards so it
+    does not linger in the task payload/logs. Raises ValidationError on bad input.
+    """
+    if not _as_bool(data.get('join_domain')):
+        data['join_domain'] = False
+        return
+
+    domain = validate_domain(data.get('domain_name'))
+    username = (data.get('domain_username') or '').strip()
+    password = data.get('domain_password')
+    if not username or not password:
+        raise ValidationError("Domain join requires a username and password.")
+    ou = (data.get('domain_ou') or '').strip()
+
+    blob = {'domain': domain, 'username': username, 'password': password}
+    if ou:
+        blob['ou'] = ou
+
+    data['join_domain'] = True
+    data['domain_name'] = domain
+    data['domain_ou'] = ou
+    data['domain_join_b64'] = base64.b64encode(
+        json.dumps(blob).encode('utf-8')
+    ).decode('ascii')
+    # Do not keep the raw secret around once it is packed into the blob.
+    data.pop('domain_password', None)
 
 
 def _render_sysprep_files(data):
@@ -71,19 +120,22 @@ def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
     write_file_to_guest(vmid, setup_complete, r'C:\Windows\Setup\Scripts\SetupComplete.cmd')
 
 
-def _verify_sysprep_result(vmid, expected_hostname, expected_ip, timeout=600):
+def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
+                           expected_domain=None, timeout=600):
     """Best-effort post-sysprep verification via the QEMU guest agent (no WinRM).
 
-    Polls for ``expected_ip`` to appear on the guest and reads back the hostname.
-    Returns a human-readable summary string; never raises (verification issues
-    should not fail an otherwise-successful workflow).
+    Reads back the hostname and an IPv4 address (the specific ``expected_ip`` for
+    static configs, or any routable address for DHCP), and — when a domain join
+    was requested — the domain membership. Returns a human-readable summary
+    string; never raises (verification issues should not fail an otherwise
+    successful workflow).
     """
     proxmox = get_proxmox_api()
     node = _get_vm_node(vmid)
     if not proxmox or not node:
         return "verification skipped (VM not found)"
 
-    found_ip = False
+    found_ip = None
     for _ in range(max(1, timeout // 15)):
         try:
             info = proxmox.nodes(node).qemu(vmid).agent.get('network-get-interfaces')
@@ -92,9 +144,14 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip, timeout=600):
                 for iface in info.get('result', [])
                 for addr in iface.get('ip-addresses', [])
                 if addr.get('ip-address-type') == 'ipv4'
+                and not str(addr.get('ip-address', '')).startswith(('127.', '169.254.'))
             ]
-            if expected_ip in ips:
-                found_ip = True
+            if expected_ip:
+                if expected_ip in ips:
+                    found_ip = expected_ip
+                    break
+            elif ips:
+                found_ip = ips[0]
                 break
         except Exception as e:  # noqa: BLE001
             app.logger.info(f"VM {vmid} agent not ready during verify: {e}")
@@ -113,11 +170,28 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip, timeout=600):
         and expected_hostname is not None
         and actual_hostname.lower() == str(expected_hostname).lower()
     )
-    return (
+    parts = [
         f"hostname={actual_hostname or '?'} "
-        f"({'ok' if hostname_ok else 'expected ' + str(expected_hostname)}); "
-        f"IP {expected_ip} {'present' if found_ip else 'NOT yet visible'}"
-    )
+        f"({'ok' if hostname_ok else 'expected ' + str(expected_hostname)})"
+    ]
+
+    if expected_ip:
+        parts.append(f"IP {expected_ip} {'present' if found_ip else 'NOT yet visible'}")
+    else:
+        parts.append(f"DHCP IP={found_ip or 'none yet'}")
+
+    if expected_domain:
+        domain_info = "unknown"
+        try:
+            out = run_command_in_guest(
+                vmid, 'cmd.exe /c "wmic computersystem get Domain,PartOfDomain /value"')
+            if out:
+                domain_info = ' '.join(out.split())
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning(f"Could not read domain membership for VM {vmid}: {e}")
+        parts.append(f"domain[{expected_domain}]: {domain_info}")
+
+    return "; ".join(parts)
 
 
 def _wait_for_vm_stopped(vmid, timeout=900):
@@ -137,9 +211,10 @@ def _wait_for_vm_stopped(vmid, timeout=900):
 def sysprep_workflow_task(self, task_id, data):
     with app.app_context():
         try:
-            # 0. Validate user-supplied network values before templating.
+            # 0. Validate user-supplied network + domain values before templating.
             try:
                 _validate_sysprep_network(data)
+                _prepare_domain_join(data)
             except ValidationError as e:
                 task = Task.query.get(task_id)
                 task.status = 'FAILURE'
@@ -204,7 +279,12 @@ def sysprep_workflow_task(self, task_id, data):
             wait_for_guest_agent(new_vmid, timeout=900)
 
             update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
-            verify_summary = _verify_sysprep_result(new_vmid, data.get('hostname'), data.get('ip_address'))
+            verify_summary = _verify_sysprep_result(
+                new_vmid,
+                data.get('hostname'),
+                expected_ip=None if data.get('use_dhcp') else data.get('ip_address'),
+                expected_domain=data.get('domain_name') if data.get('join_domain') else None,
+            )
 
             task = Task.query.get(task_id)
             task.status = 'SUCCESS'
@@ -231,6 +311,7 @@ def sysprep_existing_vm_task(self, task_id, data):
                 data['primary_mac_address'] = mac
             try:
                 _validate_sysprep_network(data)
+                _prepare_domain_join(data)
             except ValidationError as e:
                 task = Task.query.get(task_id)
                 task.status = 'FAILURE'
@@ -271,7 +352,12 @@ def sysprep_existing_vm_task(self, task_id, data):
             wait_for_guest_agent(vmid, timeout=900)
 
             update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
-            verify_summary = _verify_sysprep_result(vmid, data.get('hostname'), data.get('ip_address'))
+            verify_summary = _verify_sysprep_result(
+                vmid,
+                data.get('hostname'),
+                expected_ip=None if data.get('use_dhcp') else data.get('ip_address'),
+                expected_domain=data.get('domain_name') if data.get('join_domain') else None,
+            )
 
             task = Task.query.get(task_id)
             task.status = 'SUCCESS'

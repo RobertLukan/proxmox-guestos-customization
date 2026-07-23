@@ -1,19 +1,16 @@
-# Static network configuration applied after Sysprep by SetupComplete.cmd.
+# Post-Sysprep configuration applied by SetupComplete.cmd.
 #
-# NOTE: this file is NOT autoescaped by Jinja (it is not HTML/XML), so every
-# interpolated value below is validated server-side in _validate_sysprep_network
-# (IPv4 addresses, an integer prefix length, a DNS list, and a MAC address)
-# before this template is rendered. Do not add unvalidated fields.
+# NOTE: this file is NOT autoescaped by Jinja (it is not HTML/XML). Every value
+# interpolated below is validated server-side before rendering:
+#   * IPv4 addresses, an integer prefix length and a DNS list (network),
+#   * a MAC address (adapter selection),
+#   * domain-join credentials are passed as a Base64-encoded JSON blob so no
+#     credential bytes are ever interpolated into PowerShell syntax.
+# Do not add unvalidated fields.
 
 $ErrorActionPreference = 'Stop'
 
-$mac     = '{{ primary_mac_address | default("", true) }}'.Replace(':', '-').ToUpper()
-$ip      = '{{ ip_address }}'
-$prefix  = {{ netmask_cidr }}
-$gateway = '{{ gateway }}'
-$dns     = @({% for d in dns_list %}'{{ d }}'{% if not loop.last %}, {% endif %}{% endfor %})
-
-Write-Output "[setup.ps1] Requested MAC=$mac IP=$ip/$prefix GW=$gateway DNS=$($dns -join ',')"
+$mac = '{{ primary_mac_address | default("", true) }}'.Replace(':', '-').ToUpper()
 
 # Select the target adapter by MAC; fall back to the first physical adapter so a
 # single-NIC VM still configures correctly even if the MAC could not be resolved.
@@ -30,19 +27,70 @@ if (-not $adapter) { throw "No physical network adapter found." }
 $ifIndex = $adapter.ifIndex
 Write-Output "[setup.ps1] Using adapter '$($adapter.Name)' (ifIndex $ifIndex, MAC $($adapter.MacAddress))."
 
-# Remove any existing IPv4 address / default route so re-runs are idempotent.
+# Clear any existing IPv4 address / default route first so re-runs are idempotent.
 Remove-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetRoute     -InterfaceIndex $ifIndex -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
 
-# Disable DHCP and apply the static address + default gateway.
+{% if use_dhcp %}
+Write-Output "[setup.ps1] Enabling DHCP on ifIndex $ifIndex."
+Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Enabled
+{% if dns_list %}
+# Explicit DNS override (e.g. to reach the domain controller) even under DHCP.
+Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @({% for d in dns_list %}'{{ d }}'{% if not loop.last %}, {% endif %}{% endfor %})
+{% else %}
+Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses
+{% endif %}
+{% else %}
+$ip      = '{{ ip_address }}'
+$prefix  = {{ netmask_cidr }}
+$gateway = '{{ gateway }}'
+$dns     = @({% for d in dns_list %}'{{ d }}'{% if not loop.last %}, {% endif %}{% endfor %})
+Write-Output "[setup.ps1] Static IP=$ip/$prefix GW=$gateway DNS=$($dns -join ',')"
 Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Disabled
 New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $ip -PrefixLength $prefix -DefaultGateway $gateway | Out-Null
-
-# Apply DNS servers (or reset to DHCP-provided if none were supplied).
 if ($dns.Count -gt 0) {
     Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $dns
 } else {
     Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses
 }
+{% endif %}
 
 Write-Output "[setup.ps1] Network configuration complete."
+
+{% if join_domain %}
+# --- Domain join -----------------------------------------------------------
+# Credentials arrive as Base64(JSON{domain,username,password[,ou]}) so nothing
+# sensitive is interpolated into PowerShell syntax and the password is never
+# written to the log.
+$blob = '{{ domain_join_b64 }}'
+$j = ConvertFrom-Json ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($blob)))
+$sec = ConvertTo-SecureString $j.password -AsPlainText -Force
+$cred = New-Object System.Management.Automation.PSCredential($j.username, $sec)
+
+# Wait for the network/DNS to be usable, then join with a few retries.
+$joined = $false
+for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
+    try {
+        {% if domain_ou %}
+        Add-Computer -DomainName $j.domain -OUPath $j.ou -Credential $cred -Force -ErrorAction Stop
+        {% else %}
+        Add-Computer -DomainName $j.domain -Credential $cred -Force -ErrorAction Stop
+        {% endif %}
+        $joined = $true
+        Write-Output "[setup.ps1] Joined domain $($j.domain)."
+    } catch {
+        Write-Output "[setup.ps1] Domain join attempt $($i + 1) failed: $($_.Exception.Message)"
+        Start-Sleep -Seconds 15
+    }
+}
+
+# Scrub the credential-bearing script from disk regardless of outcome.
+Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+
+if ($joined) {
+    Write-Output "[setup.ps1] Restarting to finalize domain membership."
+    shutdown /r /t 5
+} else {
+    Write-Output "[setup.ps1] Domain join FAILED after retries; leaving machine in workgroup."
+}
+{% endif %}
