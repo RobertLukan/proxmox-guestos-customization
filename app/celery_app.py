@@ -6,7 +6,16 @@ from app.proxmox import (
     wait_for_guest_agent,
     write_file_to_guest,
     run_command_in_guest,
-    get_vm_ip
+    get_vm_ip,
+    get_proxmox_api,
+    _get_vm_node,
+)
+from app.validators import (
+    ValidationError,
+    validate_dns_servers,
+    validate_hostname,
+    validate_ipv4,
+    validate_netmask,
 )
 from flask import render_template
 import time
@@ -19,10 +28,50 @@ def update_task_progress(task_id, progress, message):
         task.message = message
         db.session.commit()
 
+
+def _validate_sysprep_network(data):
+    """Validate/normalize network values before they are rendered into the
+    sysprep templates.
+
+    setup.ps1 is not HTML/XML so Flask does not autoescape it; validating the
+    values here (IPs, integer netmask, DNS list) prevents injection into the
+    generated PowerShell. Mutates ``data`` in place and raises ValidationError.
+    """
+    data['ip_address'] = validate_ipv4(data.get('ip_address'), field='IP address')
+    data['netmask_cidr'] = validate_netmask(data.get('netmask_cidr'))
+    data['gateway'] = validate_ipv4(data.get('gateway'), field='gateway')
+    validate_dns_servers(data.get('dns_servers'))  # each entry must be a valid IP
+    if data.get('hostname'):
+        data['hostname'] = validate_hostname(data['hostname'])
+
+
+def _wait_for_vm_stopped(vmid, timeout=900):
+    """Poll until the VM reports 'stopped'. Returns True on success, else False."""
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not proxmox or not node:
+        raise Exception(f"VM {vmid} not found.")
+    for _ in range(max(1, timeout // 10)):
+        status = proxmox.nodes(node).qemu(vmid).status.current.get()
+        if status.get('status') == 'stopped':
+            return True
+        time.sleep(10)
+    return False
+
 @celery.task(bind=True)
 def sysprep_workflow_task(self, task_id, data):
     with app.app_context():
         try:
+            # 0. Validate user-supplied network values before templating.
+            try:
+                _validate_sysprep_network(data)
+            except ValidationError as e:
+                task = Task.query.get(task_id)
+                task.status = 'FAILURE'
+                task.message = f"Invalid sysprep input: {e}"
+                db.session.commit()
+                return
+
             # 1. Clone the VM
             update_task_progress(task_id, 10, "Cloning VM...")
             clone_result = clone_vm(
@@ -59,18 +108,28 @@ def sysprep_workflow_task(self, task_id, data):
             update_task_progress(task_id, 85, "unattended.xml and setup.ps1 written successfully.")
 
             # 6. Run Sysprep
-            update_task_progress(task_id, 90, "Running Sysprep...")
+            update_task_progress(task_id, 88, "Running Sysprep...")
             sysprep_command = r'cmd.exe /c "C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /unattend:C:\Windows\System32\Sysprep\unattended.xml"'
             run_command_in_guest(new_vmid, sysprep_command)
-            update_task_progress(task_id, 95, "Sysprep command issued.")
 
-            # 7. Finalizing
-            # The VM will shut down after Sysprep. You might want to add steps to power it back on
-            # and verify the configuration. For now, we'll mark the task as complete.
+            # 7. Verify: wait for the shutdown, then boot back up and confirm the
+            # guest agent responds before reporting success.
+            update_task_progress(task_id, 92, "Sysprep issued. Waiting for VM to shut down...")
+            if not _wait_for_vm_stopped(new_vmid, timeout=900):
+                task = Task.query.get(task_id)
+                task.status = 'FAILURE'
+                task.message = "Timed out waiting for the VM to shut down after Sysprep."
+                db.session.commit()
+                return
+
+            update_task_progress(task_id, 96, "VM shut down. Powering back on to verify...")
+            power_on_vm(new_vmid)
+            wait_for_guest_agent(new_vmid, timeout=900)
+
             task = Task.query.get(task_id)
             task.status = 'SUCCESS'
             task.progress = 100
-            task.message = f"Sysprep workflow for {data['hostname']} completed successfully."
+            task.message = f"Sysprep workflow for {data['hostname']} completed and verified."
             db.session.commit()
 
         except Exception as e:
@@ -85,6 +144,16 @@ def sysprep_existing_vm_task(self, task_id, data):
     with app.app_context():
         vmid = data.get('vmid')
         try:
+            # 0. Validate user-supplied network values before templating.
+            try:
+                _validate_sysprep_network(data)
+            except ValidationError as e:
+                task = Task.query.get(task_id)
+                task.status = 'FAILURE'
+                task.message = f"Invalid sysprep input: {e}"
+                db.session.commit()
+                return
+
             # 1. Generate unattended.xml and setup.ps1
             update_task_progress(task_id, 10, "Generating unattended.xml and setup.ps1...")
             unattended_xml = render_template('sysprep/unattended.xml', **data).encode('utf-8')
@@ -102,16 +171,27 @@ def sysprep_existing_vm_task(self, task_id, data):
             update_task_progress(task_id, 75, "unattended.xml and setup.ps1 written successfully.")
 
             # 4. Run Sysprep
-            update_task_progress(task_id, 85, "Running Sysprep...")
+            update_task_progress(task_id, 82, "Running Sysprep...")
             sysprep_command = r'cmd.exe /c "C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /unattend:C:\Windows\System32\Sysprep\unattended.xml"'
             run_command_in_guest(vmid, sysprep_command)
-            update_task_progress(task_id, 95, "Sysprep command issued.")
 
-            # 5. Finalizing
+            # 5. Verify: wait for shutdown, boot back up, confirm the guest agent.
+            update_task_progress(task_id, 88, "Sysprep issued. Waiting for VM to shut down...")
+            if not _wait_for_vm_stopped(vmid, timeout=900):
+                task = Task.query.get(task_id)
+                task.status = 'FAILURE'
+                task.message = "Timed out waiting for the VM to shut down after Sysprep."
+                db.session.commit()
+                return
+
+            update_task_progress(task_id, 95, "VM shut down. Powering back on to verify...")
+            power_on_vm(vmid)
+            wait_for_guest_agent(vmid, timeout=900)
+
             task = Task.query.get(task_id)
             task.status = 'SUCCESS'
             task.progress = 100
-            task.message = f"Sysprep for VM {vmid} completed successfully."
+            task.message = f"Sysprep for VM {vmid} completed and verified."
             db.session.commit()
 
         except Exception as e:
