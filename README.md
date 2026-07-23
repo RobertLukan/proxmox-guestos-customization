@@ -2,12 +2,13 @@
 
 A Flask web application to automate the cloning, configuration, and sysprepping of Windows virtual machines in a Proxmox VE environment.
 
-## TODO
+## Recent Improvements
 
--   Create Docker container
--   Test .env configuration. This software was previously used with hardcoded credentials/configs. It has recently been updated to use a `.env` file, but this configuration has not yet been tested.
--   A scheduled task to disable WinRM when it is no longer needed was being tested. Some related code still needs to be cleaned up.
-  
+-   **Security hardening:** eliminated PowerShell command injection in the WinRM/Sysprep flows (all guest values are validated and passed via a Base64/JSON `$p` object), stopped leaking WinRM/domain credentials to the browser (secrets are now resolved server-side), and added CSRF protection to every form and JSON endpoint.
+-   **Auth/config:** the app fails fast if `SECRET_KEY` is unset, session cookies are hardened, TLS verification for the Proxmox API is configurable, and an in-app change-password page was added.
+-   **Packaging & CI:** added a `Dockerfile` + `docker-compose.yml`, pinned dependencies, a `pytest` test suite, and a GitHub Actions workflow.
+-   WinRM is disabled centrally via Group Policy, so the previous in-guest WinRM-disable code was removed.
+
 ## Features
 
 -   Clone VMs from templates.
@@ -23,7 +24,7 @@ A Flask web application to automate the cloning, configuration, and sysprepping 
 **This project is currently under active development.**
 
 -   The **WinRM-based reconfiguration** features (cloning and reconfiguring network settings) are considered stable and working.
--   The **Sysprep-based workflows** are still experimental and under development. In theory, they could offer a simpler approach to VM configuration, but they require more thorough testing. Use them with caution.
+-   The **Sysprep-based workflows** now validate their inputs and verify the VM after Sysprep (wait for shutdown, power back on, confirm the guest agent), but are still considered experimental. Use them with caution.
 
 ## Workflow Overview
 
@@ -112,11 +113,26 @@ You need a prepared Windows Server VM template in Proxmox. This template is cruc
     ```bash
     python3 init_db.py
     ```
-    The default password is `changeme`. You should log in and change it. This feature has not been implemented yet, so you can change it directly in the database or by creating a new user.
+    The default password is `changeme`. Log in and change it immediately using the **Change Password** link on the home page.
 
-## Running the Application
+## Running with Docker (recommended)
 
-To run the application, you need to start both the Flask web server and the Celery worker.
+A `Dockerfile` and `docker-compose.yml` are provided that run the web server, the Celery worker, and Redis together.
+
+1.  Copy and edit the environment file (make sure `SECRET_KEY` is set and `BEHIND_REVERSE_PROXY=False` for direct HTTP access):
+    ```bash
+    cp .env.example .env
+    nano .env
+    ```
+2.  Build and start the stack:
+    ```bash
+    docker compose up -d --build
+    ```
+    The web service runs `init_db.py` automatically on startup, points Celery at the bundled Redis service, and persists the SQLite database in a named volume. The app is available at `http://127.0.0.1:5001`.
+
+## Running the Application (manual)
+
+To run the application manually, you need to start both the Flask web server and the Celery worker.
 
 ### 1. Start the Web Server
 
@@ -160,8 +176,13 @@ For production, you should run the Celery worker as a `systemd` service. See the
 The application is configured using environment variables in the `.env` file. Below is a description of the key variables:
 
 -   `PROXMOX_HOST`, `PROXMOX_USER`, `PROXMOX_PASSWORD`: Your Proxmox server details.
--   `WINRM_USERNAME`, `WINRM_PASSWORD`: Default credentials for connecting to guest VMs.
--   `SECRET_KEY`: A long, random string to secure web sessions.
+-   `PROXMOX_VERIFY_SSL`: Verify the Proxmox API TLS certificate (`False` by default for self-signed homelab certs; set `True` with a trusted cert).
+-   `WINRM_USERNAME`, `WINRM_PASSWORD`: Default credentials for connecting to guest VMs (resolved server-side, never sent to the browser).
+-   `WINRM_SUBNET`, `PRIMARY_BRIDGE`, `TEMP_BRIDGE`: Network configuration (see comments in `.env.example`).
+-   `SECRET_KEY`: **Required.** A long, random string to secure sessions and CSRF tokens; the app refuses to start without it.
+-   `BEHIND_REVERSE_PROXY`: Set `True` when running behind a TLS-terminating reverse proxy (enables ProxyFix and `Secure` session cookies).
+-   `DATABASE_URL`: SQLAlchemy database URL (defaults to a local SQLite file under `instance/`).
+-   `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`: Redis connection strings for Celery (default to local Redis).
 -   `PORT`: The port on which the web application will listen (defaults to `5001`).
 -   `DOMAIN_PROFILES_JSON`: A JSON string defining profiles for domain joining, including DNS servers, domain names, and credentials.
 
@@ -188,10 +209,27 @@ The application is configured using environment variables in the `.env` file. Be
 ### Progress
 ![Progress](screenshots/Progress.png)
 
+## Development / Testing
+
+Install the dev dependencies and run the test suite:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements-dev.txt
+pytest
+```
+
+The tests cover the input validators, the injection-safe PowerShell parameter helper, WinRM IP selection, VM tag handling, and CSRF/auth flows. They mock Proxmox/WinRM, so no live environment is required. The same suite runs in CI via GitHub Actions.
+
 ## Security considerations
--   Use Nginx with TLS.
+-   Always run behind a reverse proxy with TLS, and set `BEHIND_REVERSE_PROXY=True`.
 -   Do not expose this software outside of your admin network.
--   WinRM communication is not encrypted.
+-   WinRM communication itself is not encrypted, so keep the temporary WinRM network isolated (a dedicated, non-routed L2/VLAN).
+-   All values sent to guests are validated and passed via a Base64/JSON parameter object rather than string interpolation, preventing PowerShell injection.
+-   WinRM and domain-join credentials are resolved server-side and are never rendered into pages or accepted as secrets from the browser by default.
+-   CSRF protection is enabled for all forms and JSON endpoints; keep `SECRET_KEY` secret and unique per deployment.
+-   Change the default `changeme` password immediately after first login.
 
 ## Acknowledgements
 
