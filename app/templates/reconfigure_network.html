@@ -188,6 +188,12 @@
             $('#reconfigureForm').on('submit', function(event) {
                 event.preventDefault();
 
+                // Secrets are resolved server-side. The browser only sends flags
+                // indicating which credential source to use, plus any custom
+                // credentials the operator explicitly typed in.
+                var usePredefinedWinrm = $('#use_predefined_winrm').is(':checked');
+                var useProfileCreds = $('#use_domain_profile_credentials').is(':checked');
+
                 var formData = {
                     vmid: $('#vmid').val(),
                     vm_uuid: $('#vm_uuid').val(),
@@ -197,29 +203,18 @@
                     netmask: $('#netmask').val(),
                     gateway: $('#gateway').val(),
                     dns_servers: $('#dns_servers').val(),
-                    winrm_username: $('#winrm_username').val(),
-                    winrm_password: $('#winrm_password').val(),
+                    use_predefined_winrm: usePredefinedWinrm,
+                    winrm_username: usePredefinedWinrm ? '' : $('#winrm_username').val(),
+                    winrm_password: usePredefinedWinrm ? '' : $('#winrm_password').val(),
                     remove_temp_interface: $('#remove_temp_interface').is(':checked'),
                     join_domain: $('#join_domain_checkbox').is(':checked'),
-                    domain_name: $('#domain_name').val(),
-                    domain_username: $('#domain_username').val(),
-                    domain_password: $('#domain_password').val(),
+                    domain_profile: $('#domain_profile').val(),
+                    use_domain_profile_credentials: useProfileCreds,
+                    domain_name: useProfileCreds ? '' : $('#domain_name').val(),
+                    domain_username: useProfileCreds ? '' : $('#domain_username').val(),
+                    domain_password: useProfileCreds ? '' : $('#domain_password').val(),
                     vlan: $('#vlan').val()
                 };
-
-                if ($('#use_predefined_winrm').is(':checked')) {
-                    formData.winrm_username = '{{ winrm_username }}';
-                    formData.winrm_password = '{{ winrm_password }}';
-                }
-
-                if ($('#join_domain_checkbox').is(':checked') && $('#use_domain_profile_credentials').is(':checked')) {
-                    var selectedProfile = $('#domain_profile').val();
-                    if (selectedProfile in domainProfiles) {
-                        formData.domain_name = domainProfiles[selectedProfile]['domain_name'];
-                        formData.domain_username = domainProfiles[selectedProfile]['domain_username'];
-                        formData.domain_password = domainProfiles[selectedProfile]['domain_password'];
-                    }
-                }
 
                 $.ajax({
                     type: 'POST',

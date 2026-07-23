@@ -73,7 +73,15 @@ def reconfigure_network(vmid, vm_uuid):
                 print(f"Error getting network info for VM {vmid}: {e}")
     # --- End of IP selection logic ---
 
-    return render_template('reconfigure_network.html', vmid=vmid, vm_uuid=vm_uuid, temp_ip_address=temp_ip_address, current_ip_address=current_ip_address, primary_mac_address=primary_mac_address, domain_profiles=app.config['DOMAIN_PROFILES'], winrm_username=app.config['WINRM_USERNAME'], winrm_password=app.config['WINRM_PASSWORD'])
+    # Never send secrets to the browser: strip domain credentials from the
+    # profiles and do not pass WinRM credentials at all. The server resolves
+    # the actual credentials in start_reconfigure_task.
+    sanitized_profiles = {
+        name: {k: v for k, v in details.items() if k not in ('domain_password', 'domain_username')}
+        for name, details in app.config['DOMAIN_PROFILES'].items()
+    }
+
+    return render_template('reconfigure_network.html', vmid=vmid, vm_uuid=vm_uuid, temp_ip_address=temp_ip_address, current_ip_address=current_ip_address, primary_mac_address=primary_mac_address, domain_profiles=sanitized_profiles)
 
 @app.route('/start_reconfigure_task', methods=['POST'], endpoint='start_reconfigure_task_endpoint')
 @login_required
@@ -87,16 +95,36 @@ def start_reconfigure_task():
     netmask = data.get('netmask')
     gateway = data.get('gateway')
     dns_servers = data.get('dns_servers')
-    winrm_username = data.get('winrm_username')
-    winrm_password = data.get('winrm_password')
     remove_temp_interface = data.get('remove_temp_interface')
     vlan = data.get('vlan')
-    
-    # Domain join parameters
+
+    # --- Resolve WinRM credentials server-side ---
+    # By default use the predefined credentials from config; only fall back to
+    # request-provided credentials when the operator explicitly opts out. Secrets
+    # are never echoed back to (or trusted from) the browser by default.
+    if data.get('use_predefined_winrm', True):
+        winrm_username = app.config.get('WINRM_USERNAME')
+        winrm_password = app.config.get('WINRM_PASSWORD')
+    else:
+        winrm_username = data.get('winrm_username')
+        winrm_password = data.get('winrm_password')
+
+    # --- Resolve domain-join parameters server-side ---
     join_domain = data.get('join_domain', False)
-    domain_name = data.get('domain_name')
-    domain_username = data.get('domain_username')
-    domain_password = data.get('domain_password')
+    domain_name = domain_username = domain_password = None
+    if join_domain:
+        if data.get('use_domain_profile_credentials', True):
+            profile_name = data.get('domain_profile')
+            profile = app.config.get('DOMAIN_PROFILES', {}).get(profile_name)
+            if not profile:
+                return jsonify({'error': f'Unknown domain profile: {profile_name!r}'}), 400
+            domain_name = profile.get('domain_name')
+            domain_username = profile.get('domain_username')
+            domain_password = profile.get('domain_password')
+        else:
+            domain_name = data.get('domain_name')
+            domain_username = data.get('domain_username')
+            domain_password = data.get('domain_password')
 
     # --- Start of IP selection logic for WinRM ---
     from app.proxmox import get_proxmox_api, _get_vm_node # Import necessary functions
