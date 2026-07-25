@@ -7,6 +7,89 @@ from flask_login import login_user, logout_user, login_required, current_user
 import uuid
 import logging
 
+
+def sanitized_domain_profiles():
+    """Domain profiles safe to send to the browser (credentials stripped)."""
+    return {
+        name: {k: v for k, v in details.items() if k not in ('domain_password', 'domain_username')}
+        for name, details in app.config.get('DOMAIN_PROFILES', {}).items()
+    }
+
+
+def _as_request_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ('true', '1', 't', 'yes', 'on')
+
+
+def apply_domain_profile_network(data):
+    """Apply DNS / VLAN from the selected domain profile (independent of join).
+
+    Selecting a profile is a network shortcut: it fills ``dns_servers`` and
+    ``vlan`` when those fields were left blank. Credentials are never applied
+    here — see ``resolve_domain_join_from_request``.
+
+    Returns ``(True, None)`` on success, or ``(False, (response, status))`` when
+    a non-empty profile name does not match a configured profile.
+    """
+    profile_name = (data.get('domain_profile') or '').strip()
+    if not profile_name:
+        return True, None
+    profile = app.config.get('DOMAIN_PROFILES', {}).get(profile_name)
+    if not profile:
+        return False, (
+            jsonify({'error': f'Unknown domain profile: {profile_name!r}'}),
+            400,
+        )
+    if not (data.get('dns_servers') or '').strip() and profile.get('dns_servers'):
+        data['dns_servers'] = profile.get('dns_servers')
+    if data.get('vlan') in (None, '', 'None') and profile.get('vlan') is not None:
+        data['vlan'] = profile.get('vlan')
+    if not (data.get('domain_ou') or '').strip() and profile.get('domain_ou'):
+        data['domain_ou'] = profile.get('domain_ou')
+    return True, None
+
+
+def resolve_domain_join_from_request(data):
+    """Resolve domain-join fields on ``data`` server-side.
+
+    Always applies network defaults from the selected profile (DNS/VLAN) first.
+    When ``join_domain`` is set and ``use_domain_profile_credentials`` is true
+    (the default), credentials and domain name are taken from ``DOMAIN_PROFILES``
+    — never from the request body.
+
+    Returns ``(True, None)`` on success, or ``(False, (response, status))`` when
+    the named profile is missing.
+    """
+    ok, err = apply_domain_profile_network(data)
+    if not ok:
+        return False, err
+
+    join_domain = _as_request_bool(data.get('join_domain'), False)
+    data['join_domain'] = join_domain
+    if not join_domain:
+        data.pop('domain_password', None)
+        return True, None
+
+    use_profile = _as_request_bool(data.get('use_domain_profile_credentials'), True)
+    data['use_domain_profile_credentials'] = use_profile
+    if use_profile:
+        profile_name = (data.get('domain_profile') or '').strip()
+        profile = app.config.get('DOMAIN_PROFILES', {}).get(profile_name)
+        if not profile:
+            return False, (
+                jsonify({'error': f'Unknown domain profile: {profile_name!r}'}),
+                400,
+            )
+        data['domain_name'] = profile.get('domain_name')
+        data['domain_username'] = profile.get('domain_username')
+        data['domain_password'] = profile.get('domain_password')
+    # else: domain_name / username / password come from the request body as typed
+    return True, None
+
+
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
@@ -60,12 +143,15 @@ def reconfigure_network(vmid, vm_uuid):
     # Never send secrets to the browser: strip domain credentials from the
     # profiles and do not pass WinRM credentials at all. The server resolves
     # the actual credentials in start_reconfigure_task.
-    sanitized_profiles = {
-        name: {k: v for k, v in details.items() if k not in ('domain_password', 'domain_username')}
-        for name, details in app.config['DOMAIN_PROFILES'].items()
-    }
-
-    return render_template('reconfigure_network.html', vmid=vmid, vm_uuid=vm_uuid, temp_ip_address=temp_ip_address, current_ip_address=current_ip_address, primary_mac_address=primary_mac_address, domain_profiles=sanitized_profiles)
+    return render_template(
+        'reconfigure_network.html',
+        vmid=vmid,
+        vm_uuid=vm_uuid,
+        temp_ip_address=temp_ip_address,
+        current_ip_address=current_ip_address,
+        primary_mac_address=primary_mac_address,
+        domain_profiles=sanitized_domain_profiles(),
+    )
 
 @app.route('/start_reconfigure_task', methods=['POST'], endpoint='start_reconfigure_task_endpoint')
 @login_required
@@ -94,21 +180,16 @@ def start_reconfigure_task():
         winrm_password = data.get('winrm_password')
 
     # --- Resolve domain-join parameters server-side ---
+    ok, err = resolve_domain_join_from_request(data)
+    if not ok:
+        return err
     join_domain = data.get('join_domain', False)
-    domain_name = domain_username = domain_password = None
-    if join_domain:
-        if data.get('use_domain_profile_credentials', True):
-            profile_name = data.get('domain_profile')
-            profile = app.config.get('DOMAIN_PROFILES', {}).get(profile_name)
-            if not profile:
-                return jsonify({'error': f'Unknown domain profile: {profile_name!r}'}), 400
-            domain_name = profile.get('domain_name')
-            domain_username = profile.get('domain_username')
-            domain_password = profile.get('domain_password')
-        else:
-            domain_name = data.get('domain_name')
-            domain_username = data.get('domain_username')
-            domain_password = data.get('domain_password')
+    domain_name = data.get('domain_name')
+    domain_username = data.get('domain_username')
+    domain_password = data.get('domain_password')
+    # Prefer DNS from the resolved data (may have been filled from the profile).
+    if data.get('dns_servers'):
+        dns_servers = data.get('dns_servers')
 
     # Determine the WinRM IP dynamically (first suitable address in WINRM_SUBNET).
     winrm_subnet_str = app.config.get('WINRM_SUBNET')
@@ -251,22 +332,31 @@ def workflow(task_id):
 def sysprep_form():
     template_vmid = request.form.get('template_vmid')
     bridges = get_network_bridges()
-    return render_template('sysprep_form.html', template_vmid=template_vmid, bridges=bridges)
+    return render_template(
+        'sysprep_form.html',
+        template_vmid=template_vmid,
+        bridges=bridges,
+        domain_profiles=sanitized_domain_profiles(),
+    )
 
 @app.route('/start_sysprep_workflow', methods=['POST'])
 @login_required
 def start_sysprep_workflow():
-    data = request.json
+    data = request.json or {}
+    ok, err = resolve_domain_join_from_request(data)
+    if not ok:
+        return err
+
     task_id = str(uuid.uuid4())
     vm_uuid = str(uuid.uuid4())
     hostname = data.get('hostname')
-    
+
     task = Task(id=task_id, name='Sysprep Workflow', description=f'Starting Sysprep workflow for {hostname}', vm_uuid=vm_uuid)
     db.session.add(task)
     db.session.commit()
 
     sysprep_workflow_task.delay(task_id, data)
-    
+
     return jsonify({'task_id': task_id})
 
 @app.route('/sysprep_existing_vm_form/<vmid>')
@@ -275,20 +365,28 @@ def sysprep_existing_vm_form(vmid):
     vm_details = get_vm_details(vmid)
     if not vm_details:
         return "VM not found", 404
-    return render_template('sysprep_existing_vm.html', vm=vm_details)
+    return render_template(
+        'sysprep_existing_vm.html',
+        vm=vm_details,
+        domain_profiles=sanitized_domain_profiles(),
+    )
 
 @app.route('/start_sysprep_existing_vm_task', methods=['POST'])
 @login_required
 def start_sysprep_existing_vm_task():
-    data = request.json
+    data = request.json or {}
+    ok, err = resolve_domain_join_from_request(data)
+    if not ok:
+        return err
+
     vmid = data.get('vmid')
     hostname = data.get('hostname')
     task_id = str(uuid.uuid4())
-    
+
     task = Task(id=task_id, name='Sysprep Existing VM', description=f'Starting Sysprep for VM {vmid} ({hostname})')
     db.session.add(task)
     db.session.commit()
 
     sysprep_existing_vm_task.delay(task_id, data)
-    
+
     return jsonify({'task_id': task_id})

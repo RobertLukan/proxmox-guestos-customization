@@ -1,3 +1,12 @@
+# Offline / air-gapped deploy: uses pre-loaded images only (no build).
+# Prerequisites:
+#   docker load -i proxmox-guestos-customization-offline.tar
+#   # or: gunzip -c ...tar.gz | docker load
+#   .env present in this directory
+#
+# Start:
+#   docker-compose -f docker-compose.offline.yml up -d
+
 services:
   redis:
     image: redis:7-alpine
@@ -6,10 +15,7 @@ services:
       - redis-data:/data
 
   web:
-    # Explicit image name so offline `docker load` + `up --no-build` works.
     image: proxmox-guestos-customization-web:latest
-    build: .
-    # Initialize the database (idempotent) then start the web server.
     command: sh -c "python init_db.py && gunicorn --bind 0.0.0.0:5001 wsgi:app"
     env_file: .env
     environment:
@@ -20,13 +26,11 @@ services:
     depends_on:
       - redis
     volumes:
-      # Persist the SQLite database (Flask-SQLAlchemy stores it under instance/).
       - app-instance:/app/instance
     restart: unless-stopped
 
   worker:
     image: proxmox-guestos-customization-worker:latest
-    build: .
     command: celery -A app.celery worker --loglevel=info
     env_file: .env
     environment:

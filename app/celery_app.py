@@ -246,12 +246,14 @@ def sysprep_workflow_task(self, task_id, data):
             # 3. Power on the VM
             update_task_progress(task_id, 50, "Powering on VM...")
             power_on_vm(new_vmid)
-            update_task_progress(task_id, 55, "Waiting 90 seconds for initial OS reboots...")
-            time.sleep(90)
+            # Win11 (and some Server builds) reboot several times before the
+            # guest agent stays up; give the first boot cycle room to settle.
+            update_task_progress(task_id, 55, "Waiting 3 minutes for initial OS reboots...")
+            time.sleep(180)
 
-            # 4. Wait for QEMU Guest Agent
-            update_task_progress(task_id, 60, "Waiting for QEMU Guest Agent...")
-            wait_for_guest_agent(new_vmid, timeout=600)
+            # 4. Wait for a *stable* QEMU Guest Agent (not just the first ping).
+            update_task_progress(task_id, 60, "Waiting for QEMU Guest Agent to stabilize...")
+            wait_for_guest_agent(new_vmid, timeout=1200, stable_for=60)
             update_task_progress(task_id, 70, "QEMU Guest Agent is ready.")
 
             # 5. Write the answer file + post-setup scripts to the guest.
@@ -267,7 +269,7 @@ def sysprep_workflow_task(self, task_id, data):
             # 7. Verify: wait for the shutdown, then boot back up and confirm the
             # guest agent responds before reporting success.
             update_task_progress(task_id, 92, "Sysprep issued. Waiting for VM to shut down...")
-            if not _wait_for_vm_stopped(new_vmid, timeout=900):
+            if not _wait_for_vm_stopped(new_vmid, timeout=1200):
                 task = Task.query.get(task_id)
                 task.status = 'FAILURE'
                 task.message = "Timed out waiting for the VM to shut down after Sysprep."
@@ -276,7 +278,8 @@ def sysprep_workflow_task(self, task_id, data):
 
             update_task_progress(task_id, 96, "VM shut down. Powering back on to verify...")
             power_on_vm(new_vmid)
-            wait_for_guest_agent(new_vmid, timeout=900)
+            # Post-sysprep OOBE on Win11 can take a long time before the agent returns.
+            wait_for_guest_agent(new_vmid, timeout=1800, stable_for=60)
 
             update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
             verify_summary = _verify_sysprep_result(
@@ -323,9 +326,9 @@ def sysprep_existing_vm_task(self, task_id, data):
             update_task_progress(task_id, 10, "Generating sysprep files...")
             unattended_xml, setup_ps1, setup_complete = _render_sysprep_files(data)
 
-            # 2. Wait for QEMU Guest Agent
-            update_task_progress(task_id, 25, "Waiting for QEMU Guest Agent...")
-            wait_for_guest_agent(vmid, timeout=300)
+            # 2. Wait for a stable QEMU Guest Agent
+            update_task_progress(task_id, 25, "Waiting for QEMU Guest Agent to stabilize...")
+            wait_for_guest_agent(vmid, timeout=1200, stable_for=60)
             update_task_progress(task_id, 40, "QEMU Guest Agent is ready.")
 
             # 3. Write the answer file + post-setup scripts to the guest.
@@ -340,7 +343,7 @@ def sysprep_existing_vm_task(self, task_id, data):
 
             # 5. Verify: wait for shutdown, boot back up, confirm the guest agent.
             update_task_progress(task_id, 88, "Sysprep issued. Waiting for VM to shut down...")
-            if not _wait_for_vm_stopped(vmid, timeout=900):
+            if not _wait_for_vm_stopped(vmid, timeout=1200):
                 task = Task.query.get(task_id)
                 task.status = 'FAILURE'
                 task.message = "Timed out waiting for the VM to shut down after Sysprep."
@@ -349,7 +352,7 @@ def sysprep_existing_vm_task(self, task_id, data):
 
             update_task_progress(task_id, 95, "VM shut down. Powering back on to verify...")
             power_on_vm(vmid)
-            wait_for_guest_agent(vmid, timeout=900)
+            wait_for_guest_agent(vmid, timeout=1800, stable_for=60)
 
             update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
             verify_summary = _verify_sysprep_result(

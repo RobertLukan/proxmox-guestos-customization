@@ -277,55 +277,131 @@ def power_on_vm(vmid):
                 return
         raise Exception(f"VM {vmid} failed to power on.")
 
-def wait_for_guest_agent(vmid, timeout=600):
-    """Waits for the QEMU Guest Agent to be responsive."""
+def wait_for_guest_agent(vmid, timeout=1200, stable_for=45):
+    """Wait until the QEMU Guest Agent is responsive *and stays up*.
+
+    Windows 11 (and sometimes Server) can briefly start the guest agent, then
+    reboot again during specialize/OOBE. Returning on the first successful poll
+    races those reboots and causes later file writes to fail with
+    "QEMU guest agent is not running".
+
+    ``stable_for`` is the number of consecutive seconds the agent must keep
+    answering before we treat it as ready.
+    """
     proxmox = get_proxmox_api()
     node = _get_vm_node(vmid)
     if not node:
         raise Exception(f"VM {vmid} not found.")
 
-    for _ in range(timeout // 10):
+    deadline = time.time() + timeout
+    ok_since = None
+    poll = 5
+    while time.time() < deadline:
         try:
-            if proxmox.nodes(node).qemu(vmid).agent.get('get-fsinfo'):
-                return
-        except Exception:
-            pass
-        time.sleep(10)
-    raise Exception(f"Timed out waiting for QEMU Guest Agent on VM {vmid}.")
+            if proxmox.nodes(node).qemu(vmid).agent.get('get-fsinfo') is not None:
+                now = time.time()
+                if ok_since is None:
+                    ok_since = now
+                    logging.info(
+                        f"Guest agent responded on VM {vmid}; "
+                        f"waiting {stable_for}s for stability..."
+                    )
+                elif now - ok_since >= stable_for:
+                    logging.info(f"Guest agent on VM {vmid} stable for {stable_for}s.")
+                    return
+            else:
+                ok_since = None
+        except Exception as e:
+            if ok_since is not None:
+                logging.info(
+                    f"Guest agent on VM {vmid} dropped during stability wait "
+                    f"(will keep waiting): {e}"
+                )
+            ok_since = None
+        time.sleep(poll)
+    raise Exception(
+        f"Timed out waiting for a stable QEMU Guest Agent on VM {vmid} "
+        f"(timeout={timeout}s, stable_for={stable_for}s)."
+    )
+
+
+def _is_transient_agent_error(exc):
+    """True when Proxmox reports the guest agent is temporarily unavailable."""
+    msg = str(exc).lower()
+    return (
+        'guest agent' in msg
+        or 'not running' in msg
+        or 'timeout' in msg
+        or 'connection refused' in msg
+    )
+
 
 def write_file_to_guest(vmid, content, file_path):
     """Writes a file to the guest OS via QEMU Guest Agent."""
-    proxmox = get_proxmox_api()
-    node = _get_vm_node(vmid)
-    if not node:
-        raise Exception(f"VM {vmid} not found.")
-
     content_b64 = base64.b64encode(content).decode('ascii')
 
-    command = f"powershell -command \"New-Item -ItemType Directory -Force -Path (Split-Path -Path '{file_path}' -Parent); [System.IO.File]::WriteAllBytes('{file_path}', [System.Convert]::FromBase64String('{content_b64}'))\""
+    command = (
+        "powershell -command \""
+        f"New-Item -ItemType Directory -Force -Path (Split-Path -Path '{file_path}' -Parent); "
+        f"[System.IO.File]::WriteAllBytes('{file_path}', "
+        f"[System.Convert]::FromBase64String('{content_b64}'))\""
+    )
     run_command_in_guest(vmid, command)
 
 
-def run_command_in_guest(vmid, command):
-    """Runs a command in the guest OS via QEMU Guest Agent."""
+def run_command_in_guest(vmid, command, retries=8, retry_delay=15):
+    """Run a command in the guest via QEMU Guest Agent, with retries.
+
+    Retries when the agent briefly disappears (common on Windows 11 during
+    early boot / specialize). Permanent command failures (non-zero exit) are
+    not retried.
+    """
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            return _run_command_in_guest_once(vmid, command)
+        except Exception as e:
+            last_err = e
+            # Non-zero exit from the guest command itself is not transient.
+            if 'exit code' in str(e).lower() or not _is_transient_agent_error(e):
+                raise
+            logging.warning(
+                f"Guest agent command failed on VM {vmid} "
+                f"(attempt {attempt}/{retries}): {e}"
+            )
+            if attempt == retries:
+                break
+            try:
+                wait_for_guest_agent(vmid, timeout=max(120, retry_delay * 4), stable_for=20)
+            except Exception as wait_err:
+                logging.warning(f"Re-wait for guest agent on VM {vmid}: {wait_err}")
+                time.sleep(retry_delay)
+    raise last_err
+
+
+def _run_command_in_guest_once(vmid, command):
+    """Single attempt to run a guest command via the QEMU Guest Agent."""
     proxmox = get_proxmox_api()
     node = _get_vm_node(vmid)
     if not node:
         raise Exception(f"VM {vmid} not found.")
-        
+
     result = proxmox.nodes(node).qemu(vmid).agent.exec.post(command=command)
     pid = result['pid']
-    
-    # Wait for the command to complete
+
     while True:
         status = proxmox.nodes(node).qemu(vmid).agent('exec-status').get(pid=pid)
         if status.get('exited'):
             if status.get('exitcode') != 0:
-                raise Exception(f"Command failed with exit code {status['exitcode']}: {status.get('err-data')}")
+                raise Exception(
+                    f"Command failed with exit code {status['exitcode']}: "
+                    f"{status.get('err-data')}"
+                )
             return status.get('out-data')
         time.sleep(2)
 
-def run_shutdown_command_in_guest(vmid, command, settle=30):
+
+def run_shutdown_command_in_guest(vmid, command, settle=30, retries=6):
     """Launch a guest command that is expected to power off/reboot the VM.
 
     Unlike ``run_command_in_guest``, this does NOT treat the guest agent
@@ -341,7 +417,27 @@ def run_shutdown_command_in_guest(vmid, command, settle=30):
     if not node:
         raise Exception(f"VM {vmid} not found.")
 
-    result = proxmox.nodes(node).qemu(vmid).agent.exec.post(command=command)
+    last_err = None
+    result = None
+    for attempt in range(1, retries + 1):
+        try:
+            result = proxmox.nodes(node).qemu(vmid).agent.exec.post(command=command)
+            break
+        except Exception as e:
+            last_err = e
+            if not _is_transient_agent_error(e) or attempt == retries:
+                raise
+            logging.warning(
+                f"Could not issue shutdown command on VM {vmid} "
+                f"(attempt {attempt}/{retries}): {e}"
+            )
+            try:
+                wait_for_guest_agent(vmid, timeout=180, stable_for=15)
+            except Exception:
+                time.sleep(15)
+    if result is None:
+        raise last_err
+
     pid = result.get('pid')
     deadline = time.time() + settle
     while time.time() < deadline:
@@ -349,12 +445,18 @@ def run_shutdown_command_in_guest(vmid, command, settle=30):
             status = proxmox.nodes(node).qemu(vmid).agent('exec-status').get(pid=pid)
         except Exception as e:
             # Agent unreachable -> the shutdown has begun. This is expected.
-            logging.info(f"Guest agent unreachable after issuing shutdown command on VM {vmid} (expected): {e}")
+            logging.info(
+                f"Guest agent unreachable after issuing shutdown command on "
+                f"VM {vmid} (expected): {e}"
+            )
             return
         if status.get('exited'):
             exitcode = status.get('exitcode')
             if exitcode not in (0, None):
-                raise Exception(f"Command failed with exit code {exitcode}: {status.get('err-data')}")
+                raise Exception(
+                    f"Command failed with exit code {exitcode}: "
+                    f"{status.get('err-data')}"
+                )
             return
         time.sleep(2)
     # Command still running after settle window; assume the shutdown is in

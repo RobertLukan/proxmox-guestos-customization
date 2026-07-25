@@ -57,6 +57,35 @@ if ($dns.Count -gt 0) {
 
 Write-Output "[setup.ps1] Network configuration complete."
 
+# --- Local accounts --------------------------------------------------------
+# Sysprep /generalize does NOT remove accounts that existed on the template
+# (e.g. an interactive "rl" user). Enable the built-in Administrator and drop
+# every other local account so clones boot to a clean admin-only local state.
+# Built-in / system accounts are left alone.
+Write-Output "[setup.ps1] Enabling built-in Administrator account."
+try {
+    Enable-LocalUser -Name 'Administrator' -ErrorAction Stop
+} catch {
+    # Fallback for editions where Enable-LocalUser is picky.
+    net user Administrator /active:yes | Out-Null
+}
+
+$keepLocalUsers = @(
+    'Administrator',
+    'Guest',
+    'DefaultAccount',
+    'WDAGUtilityAccount',
+    'defaultuser0'
+)
+Get-LocalUser | Where-Object { $keepLocalUsers -notcontains $_.Name } | ForEach-Object {
+    Write-Output "[setup.ps1] Removing leftover local user '$($_.Name)'."
+    try {
+        Remove-LocalUser -Name $_.Name -ErrorAction Stop
+    } catch {
+        Write-Output "[setup.ps1] Could not remove '$($_.Name)': $($_.Exception.Message)"
+    }
+}
+
 {% if join_domain %}
 # --- Domain join -----------------------------------------------------------
 # Credentials arrive as Base64(JSON{domain,username,password[,ou]}) so nothing

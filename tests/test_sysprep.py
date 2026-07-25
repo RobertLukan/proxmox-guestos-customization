@@ -80,6 +80,17 @@ def test_setup_ps1_contains_network_config():
     assert "'BC:24:11:AA:BB:CC'.Replace(':', '-').ToUpper()" in ps1
 
 
+def test_setup_ps1_enables_admin_and_removes_other_local_users():
+    data = _base_data()
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        _xml, ps1, _cmd = _render_sysprep_files(data)
+    ps1 = ps1.decode()
+    assert "Enable-LocalUser -Name 'Administrator'" in ps1
+    assert 'Remove-LocalUser' in ps1
+    assert 'keepLocalUsers' in ps1
+
+
 def test_setup_complete_invokes_setup_ps1():
     data = _base_data()
     with flask_app.app_context():

@@ -29,6 +29,9 @@
                 <SkipUserOOBE>true</SkipUserOOBE>
             </OOBE>
             <UserAccounts>
+                <!-- Sets the built-in Administrator password. Enabling the
+                     account and removing leftover template users (e.g. "rl")
+                     is done in setup.ps1 — Sysprep does not delete local users. -->
                 <AdministratorPassword>
                     <Value>{{ administrator_password }}</Value>
                     <PlainText>true</PlainText>
