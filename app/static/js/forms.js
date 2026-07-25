@@ -163,6 +163,8 @@
     }
     var hostname = form.querySelector('#hostname');
     if (hostname) add('Hostname', hostname.value);
+    var remote = form.querySelector('#remote_id, [name="remote_id"]');
+    if (remote && remote.value) add('Remote', remote.value);
     var cores = form.querySelector('#cores');
     if (cores) add('CPU cores', cores.value);
     var ram = form.querySelector('#ram');

@@ -229,8 +229,11 @@ Domain profiles are used by **both** WinRM reconfigure and Sysprep. Selecting a 
 ## Lab helper scripts
 
 ```bash
-# Read-only Proxmox connectivity / inventory check
+# Connectivity / config sanity (does not mutate VMs)
 venv/bin/python scripts/smoke_check.py
+
+# Machine API smoke from a PDM host (health, version, token)
+python3 scripts/pdm_api_smoke.py --base-url http://guestos:5001 --token "$GUESTOS_API_TOKEN"
 
 # Drive existing-VM sysprep synchronously (no Redis/web; generalizes the VM!)
 venv/bin/python scripts/sysprep_test.py \
@@ -243,6 +246,8 @@ venv/bin/python scripts/sysprep_test.py \
   --vmid 122 --hostname WIN11-T1 --network-mode dhcp \
   --dns 10.0.0.10 --admin-password '...' --yes
 ```
+
+PDM / integrator notes: [docs/PDM_INTEGRATION.md](docs/PDM_INTEGRATION.md).
 
 ## Usage
 
@@ -272,7 +277,9 @@ venv/bin/python scripts/sysprep_test.py \
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements-dev.txt
-pytest
+pytest                 # all tests
+pytest -m "not api"    # standalone / CSRF / wizards / core
+pytest -m api          # machine API (PDM surface)
 ```
 
 Coverage includes validators, injection-safe PowerShell helpers, WinRM IP selection, tags, CSRF/auth, sysprep template rendering (static/DHCP/domain blob), and domain-profile resolution. Proxmox/WinRM are mocked. CI runs the same suite on GitHub Actions (`pythonpath = .` in `pytest.ini`).

@@ -1,4 +1,7 @@
 """API token auth, CSRF exemption, and remote_id resolution for PDM integration."""
+import pytest
+
+pytestmark = pytest.mark.api
 
 
 def test_api_health_and_version(client):

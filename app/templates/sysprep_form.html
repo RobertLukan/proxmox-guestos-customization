@@ -7,6 +7,9 @@
 
 <form id="sysprep-form" data-wizard novalidate>
     <input type="hidden" name="template_vmid" value="{{ template_vmid }}">
+    {% if remote_id %}
+    <input type="hidden" name="remote_id" id="remote_id" value="{{ remote_id }}">
+    {% endif %}
 
     <ol class="wizard-steps" aria-label="Steps">
         <li data-step="0" class="is-active">Basics</li>

@@ -1,5 +1,9 @@
 import re
 
+import pytest
+
+pytestmark = pytest.mark.web
+
 
 def _csrf_token(html):
     match = re.search(rb'name="csrf_token" value="([^"]+)"', html)
@@ -133,6 +137,32 @@ def test_sysprep_existing_wizard_includes_payload_fields(client, monkeypatch):
     assert b'id="administrator_password_confirm"' in html
     assert b'name="network_mode"' in html
     assert b'id="use_domain_profile_credentials"' in html
+
+
+def test_sysprep_existing_deep_link_includes_remote_id(client, monkeypatch):
+    monkeypatch.setattr(
+        'app.routes.get_vm_details',
+        lambda vmid: {'vmid': int(vmid), 'name': 'EXISTING01'},
+    )
+    _login(client)
+    resp = client.get('/sysprep_existing_vm_form/121?remote_id=lab')
+    assert resp.status_code == 200
+    assert b'name="remote_id"' in resp.data
+    assert b'value="lab"' in resp.data
+
+
+def test_sysprep_form_get_deep_link(client, monkeypatch):
+    monkeypatch.setattr(
+        'app.routes.get_network_bridges',
+        lambda: [{'iface': 'vmbr0'}],
+    )
+    _login(client)
+    resp = client.get('/sysprep_form?template_vmid=100&remote_id=lab')
+    assert resp.status_code == 200
+    assert b'name="template_vmid"' in resp.data
+    assert b'value="100"' in resp.data
+    assert b'name="remote_id"' in resp.data
+    assert b'value="lab"' in resp.data
 
 
 def test_reconfigure_network_wizard_bootstrap5_and_fields(client, monkeypatch):

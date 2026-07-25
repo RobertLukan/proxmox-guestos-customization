@@ -344,16 +344,24 @@ def api_version():
 def workflow(task_id):
     return render_template('workflow.html', task_id=task_id)
 
-@app.route('/sysprep_form', methods=['POST'])
+@app.route('/sysprep_form', methods=['GET', 'POST'])
 @login_required
 def sysprep_form():
-    template_vmid = request.form.get('template_vmid')
+    if request.method == 'GET':
+        template_vmid = request.args.get('template_vmid')
+        if not template_vmid:
+            flash('Missing template_vmid')
+            return redirect(url_for('index'))
+    else:
+        template_vmid = request.form.get('template_vmid')
+    remote_id = (request.values.get('remote_id') or request.args.get('remote_id') or '').strip()
     bridges = get_network_bridges()
     return render_template(
         'sysprep_form.html',
         template_vmid=template_vmid,
         bridges=bridges,
         domain_profiles=sanitized_domain_profiles(),
+        remote_id=remote_id,
     )
 
 @app.route('/start_sysprep_workflow', methods=['POST'])
@@ -387,10 +395,12 @@ def sysprep_existing_vm_form(vmid):
     vm_details = get_vm_details(vmid)
     if not vm_details:
         return "VM not found", 404
+    remote_id = (request.args.get('remote_id') or '').strip()
     return render_template(
         'sysprep_existing_vm.html',
         vm=vm_details,
         domain_profiles=sanitized_domain_profiles(),
+        remote_id=remote_id,
     )
 
 @app.route('/start_sysprep_existing_vm_task', methods=['POST'])
