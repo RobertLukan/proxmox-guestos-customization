@@ -120,6 +120,10 @@ def main():
     if args.remote_id:
         payload['remote_id'] = args.remote_id
 
+    print(
+        f"     payload: vmid={payload['vmid']} hostname={payload['hostname']} "
+        f"network_mode=dhcp admin_password={'set' if payload['administrator_password'] else 'MISSING'}"
+    )
     code, body = _req('POST', f'{base}/start_sysprep_existing_vm_task', token=args.token, body=payload)
     if code != 200 or not body.get('task_id'):
         print(f'FAIL start: HTTP {code} {body}', file=sys.stderr)
