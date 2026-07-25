@@ -1,8 +1,10 @@
 from flask import render_template, request, Response, redirect, url_for, json, jsonify, flash
-from app import app, db, celery, login_manager
+from app import app, db, celery, login_manager, csrf
 from app.proxmox import get_template_vms, get_network_bridges, clone_vm_task, power_on_vm_task, wait_for_guest_agent_and_ip_task, reconfigure_vm_network_task, get_manageable_vms, get_vm_current_ip, prepare_reconfigure_task, get_vm_details, select_winrm_ip
 from app.celery_app import sysprep_workflow_task, sysprep_existing_vm_task
 from app.models import Task, User
+from app.api_auth import login_or_api_token_required, with_session_csrf
+from app.remotes import resolve_pve_remote
 from flask_login import login_user, logout_user, login_required, current_user
 import uuid
 import logging
@@ -322,12 +324,20 @@ def start_wait_for_ip_task():
     return jsonify({'task_id': task_id})
 
 @app.route('/task_status/<task_id>')
-@login_required
+@login_or_api_token_required
 def task_status(task_id):
     task = Task.query.get(task_id)
     if task:
         return jsonify(task.to_dict())
     return jsonify({'error': 'Task not found'}), 404
+
+@app.route('/api/health')
+def api_health():
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/version')
+def api_version():
+    return jsonify({'version': app.config.get('APP_VERSION', '0.0.0')})
 
 @app.route('/workflow/<task_id>')
 @login_required
@@ -347,10 +357,15 @@ def sysprep_form():
     )
 
 @app.route('/start_sysprep_workflow', methods=['POST'])
-@login_required
+@csrf.exempt
+@login_or_api_token_required
+@with_session_csrf
 def start_sysprep_workflow():
     data = request.json or {}
     ok, err = resolve_domain_join_from_request(data)
+    if not ok:
+        return err
+    ok, err = resolve_pve_remote(data, _json_field_error)
     if not ok:
         return err
 
@@ -379,10 +394,15 @@ def sysprep_existing_vm_form(vmid):
     )
 
 @app.route('/start_sysprep_existing_vm_task', methods=['POST'])
-@login_required
+@csrf.exempt
+@login_or_api_token_required
+@with_session_csrf
 def start_sysprep_existing_vm_task():
     data = request.json or {}
     ok, err = resolve_domain_join_from_request(data)
+    if not ok:
+        return err
+    ok, err = resolve_pve_remote(data, _json_field_error)
     if not ok:
         return err
 

@@ -209,12 +209,15 @@ See `.env.example`. Key variables:
 
 | Variable | Purpose |
 |----------|---------|
-| `PROXMOX_HOST` / `USER` / `PASSWORD` | Proxmox API |
+| `PROXMOX_HOST` / `USER` / `PASSWORD` | Proxmox API (default remote) |
 | `PROXMOX_VERIFY_SSL` | TLS verify for Proxmox API (default `False`) |
-| `WINRM_USERNAME` / `PASSWORD` | Default WinRM creds (server-side only) |
+| `GUESTOS_API_TOKEN` / `API_TOKENS` | Machine API auth for PDM/sysprep start+poll |
+| `PVE_REMOTES_JSON` | Optional named remotes (`remote_id` in sysprep JSON) |
+| `WINRM_USERNAME` / `PASSWORD` | Default WinRM creds (server-side only; standalone) |
 | `WINRM_SUBNET` | Allowed temp IP subnet for WinRM |
 | `PRIMARY_BRIDGE` / `TEMP_BRIDGE` | Final vs temporary bridges |
 | `SECRET_KEY` | **Required** — sessions + CSRF |
+| `APP_VERSION` | Optional override of `VERSION` file (shown in UI / `/api/version`) |
 | `BEHIND_REVERSE_PROXY` | ProxyFix + Secure cookies |
 | `DATABASE_URL` | SQLAlchemy URL (default SQLite under `instance/`) |
 | `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Redis (Compose overrides to `redis://redis:6379/0`) |

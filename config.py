@@ -14,6 +14,40 @@ except OSError:
     _file_version = '0.0.0'
 APP_VERSION = os.environ.get('APP_VERSION', _file_version) or _file_version
 
+# Machine API tokens for PDM / integrators (Bearer or X-Api-Token).
+# Prefer GUESTOS_API_TOKEN for a single token; API_TOKENS may be a comma list
+# or a JSON array of strings.
+_api_tokens = set()
+_single = (os.environ.get('GUESTOS_API_TOKEN') or '').strip()
+if _single:
+    _api_tokens.add(_single)
+_raw_tokens = (os.environ.get('API_TOKENS') or '').strip()
+if _raw_tokens:
+    try:
+        if _raw_tokens.startswith('['):
+            _parsed = json.loads(_raw_tokens)
+            if isinstance(_parsed, list):
+                _api_tokens.update(str(t).strip() for t in _parsed if str(t).strip())
+            else:
+                print('Warning: API_TOKENS JSON must be an array; ignoring.')
+        else:
+            _api_tokens.update(t.strip() for t in _raw_tokens.split(',') if t.strip())
+    except json.JSONDecodeError:
+        print('Warning: Could not decode API_TOKENS. Ignoring.')
+API_TOKENS = frozenset(_api_tokens)
+
+# Optional named Proxmox remotes for multi-cluster / PDM (JSON object).
+# Example: {"lab": {"host": "pve.lab", "user": "api@pve", "password": "...", "verify_ssl": false}}
+PVE_REMOTES_JSON = os.environ.get('PVE_REMOTES_JSON', '{}')
+try:
+    PVE_REMOTES = json.loads(PVE_REMOTES_JSON)
+    if not isinstance(PVE_REMOTES, dict):
+        print('Warning: PVE_REMOTES_JSON must be a JSON object. Using empty remotes.')
+        PVE_REMOTES = {}
+except json.JSONDecodeError:
+    print('Warning: Could not decode PVE_REMOTES_JSON. Using empty remotes.')
+    PVE_REMOTES = {}
+
 # Helper for parsing boolean environment variables.
 def _env_bool(name, default=False):
     return os.environ.get(name, str(default)).lower() in ('true', '1', 't', 'yes')

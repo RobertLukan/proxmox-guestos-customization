@@ -11,6 +11,7 @@ from app.proxmox import (
     get_proxmox_api,
     get_primary_mac_address,
     _get_vm_node,
+    use_pve_override,
 )
 from app.validators import (
     ValidationError,
@@ -210,167 +211,169 @@ def _wait_for_vm_stopped(vmid, timeout=900):
 @celery.task(bind=True)
 def sysprep_workflow_task(self, task_id, data):
     with app.app_context():
-        try:
-            # 0. Validate user-supplied network + domain values before templating.
+        with use_pve_override(data.get('_pve')):
             try:
-                _validate_sysprep_network(data)
-                _prepare_domain_join(data)
-            except ValidationError as e:
+                # 0. Validate user-supplied network + domain values before templating.
+                try:
+                    _validate_sysprep_network(data)
+                    _prepare_domain_join(data)
+                except ValidationError as e:
+                    task = Task.query.get(task_id)
+                    task.status = 'FAILURE'
+                    task.message = f"Invalid sysprep input: {e}"
+                    db.session.commit()
+                    return
+
+                # 1. Clone the VM
+                update_task_progress(task_id, 10, "Cloning VM...")
+                clone_result = clone_vm(
+                    data['template_vmid'],
+                    data['hostname'],
+                    data['cores'],
+                    data['ram'],
+                    data['bridge'],
+                    data.get('vlan') # Use .get() for the optional vlan
+                )
+                new_vmid = clone_result['vmid']
+                update_task_progress(task_id, 25, f"VM cloned successfully. New VMID: {new_vmid}")
+
+                # 2. Resolve the primary NIC MAC (for robust adapter selection) and
+                #    render the answer file + post-setup scripts.
+                update_task_progress(task_id, 35, "Generating sysprep files...")
+                mac = get_primary_mac_address(new_vmid)
+                if mac:
+                    data['primary_mac_address'] = validate_mac(mac)
+                unattended_xml, setup_ps1, setup_complete = _render_sysprep_files(data)
+
+                # 3. Power on the VM
+                update_task_progress(task_id, 50, "Powering on VM...")
+                power_on_vm(new_vmid)
+                # Win11 (and some Server builds) reboot several times before the
+                # guest agent stays up; give the first boot cycle room to settle.
+                update_task_progress(task_id, 55, "Waiting 3 minutes for initial OS reboots...")
+                time.sleep(180)
+
+                # 4. Wait for a *stable* QEMU Guest Agent (not just the first ping).
+                update_task_progress(task_id, 60, "Waiting for QEMU Guest Agent to stabilize...")
+                wait_for_guest_agent(new_vmid, timeout=1200, stable_for=60)
+                update_task_progress(task_id, 70, "QEMU Guest Agent is ready.")
+
+                # 5. Write the answer file + post-setup scripts to the guest.
+                update_task_progress(task_id, 80, "Writing sysprep files to guest...")
+                _write_sysprep_files(new_vmid, unattended_xml, setup_ps1, setup_complete)
+                update_task_progress(task_id, 85, "Sysprep files written successfully.")
+
+                # 6. Run Sysprep
+                update_task_progress(task_id, 88, "Running Sysprep...")
+                sysprep_command = r'cmd.exe /c "C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /unattend:C:\Windows\System32\Sysprep\unattended.xml"'
+                run_shutdown_command_in_guest(new_vmid, sysprep_command)
+
+                # 7. Verify: wait for the shutdown, then boot back up and confirm the
+                # guest agent responds before reporting success.
+                update_task_progress(task_id, 92, "Sysprep issued. Waiting for VM to shut down...")
+                if not _wait_for_vm_stopped(new_vmid, timeout=1200):
+                    task = Task.query.get(task_id)
+                    task.status = 'FAILURE'
+                    task.message = "Timed out waiting for the VM to shut down after Sysprep."
+                    db.session.commit()
+                    return
+
+                update_task_progress(task_id, 96, "VM shut down. Powering back on to verify...")
+                power_on_vm(new_vmid)
+                # Post-sysprep OOBE on Win11 can take a long time before the agent returns.
+                wait_for_guest_agent(new_vmid, timeout=1800, stable_for=60)
+
+                update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
+                verify_summary = _verify_sysprep_result(
+                    new_vmid,
+                    data.get('hostname'),
+                    expected_ip=None if data.get('use_dhcp') else data.get('ip_address'),
+                    expected_domain=data.get('domain_name') if data.get('join_domain') else None,
+                )
+
+                task = Task.query.get(task_id)
+                task.status = 'SUCCESS'
+                task.progress = 100
+                task.message = f"Sysprep workflow for {data['hostname']} completed. Verify: {verify_summary}"
+                db.session.commit()
+
+            except Exception as e:
+                app.logger.error(f"Task {task_id} failed: {e}", exc_info=True)
                 task = Task.query.get(task_id)
                 task.status = 'FAILURE'
-                task.message = f"Invalid sysprep input: {e}"
+                task.message = f"An error occurred: {e}"
                 db.session.commit()
-                return
-
-            # 1. Clone the VM
-            update_task_progress(task_id, 10, "Cloning VM...")
-            clone_result = clone_vm(
-                data['template_vmid'],
-                data['hostname'],
-                data['cores'],
-                data['ram'],
-                data['bridge'],
-                data.get('vlan') # Use .get() for the optional vlan
-            )
-            new_vmid = clone_result['vmid']
-            update_task_progress(task_id, 25, f"VM cloned successfully. New VMID: {new_vmid}")
-
-            # 2. Resolve the primary NIC MAC (for robust adapter selection) and
-            #    render the answer file + post-setup scripts.
-            update_task_progress(task_id, 35, "Generating sysprep files...")
-            mac = get_primary_mac_address(new_vmid)
-            if mac:
-                data['primary_mac_address'] = validate_mac(mac)
-            unattended_xml, setup_ps1, setup_complete = _render_sysprep_files(data)
-
-            # 3. Power on the VM
-            update_task_progress(task_id, 50, "Powering on VM...")
-            power_on_vm(new_vmid)
-            # Win11 (and some Server builds) reboot several times before the
-            # guest agent stays up; give the first boot cycle room to settle.
-            update_task_progress(task_id, 55, "Waiting 3 minutes for initial OS reboots...")
-            time.sleep(180)
-
-            # 4. Wait for a *stable* QEMU Guest Agent (not just the first ping).
-            update_task_progress(task_id, 60, "Waiting for QEMU Guest Agent to stabilize...")
-            wait_for_guest_agent(new_vmid, timeout=1200, stable_for=60)
-            update_task_progress(task_id, 70, "QEMU Guest Agent is ready.")
-
-            # 5. Write the answer file + post-setup scripts to the guest.
-            update_task_progress(task_id, 80, "Writing sysprep files to guest...")
-            _write_sysprep_files(new_vmid, unattended_xml, setup_ps1, setup_complete)
-            update_task_progress(task_id, 85, "Sysprep files written successfully.")
-
-            # 6. Run Sysprep
-            update_task_progress(task_id, 88, "Running Sysprep...")
-            sysprep_command = r'cmd.exe /c "C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /unattend:C:\Windows\System32\Sysprep\unattended.xml"'
-            run_shutdown_command_in_guest(new_vmid, sysprep_command)
-
-            # 7. Verify: wait for the shutdown, then boot back up and confirm the
-            # guest agent responds before reporting success.
-            update_task_progress(task_id, 92, "Sysprep issued. Waiting for VM to shut down...")
-            if not _wait_for_vm_stopped(new_vmid, timeout=1200):
-                task = Task.query.get(task_id)
-                task.status = 'FAILURE'
-                task.message = "Timed out waiting for the VM to shut down after Sysprep."
-                db.session.commit()
-                return
-
-            update_task_progress(task_id, 96, "VM shut down. Powering back on to verify...")
-            power_on_vm(new_vmid)
-            # Post-sysprep OOBE on Win11 can take a long time before the agent returns.
-            wait_for_guest_agent(new_vmid, timeout=1800, stable_for=60)
-
-            update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
-            verify_summary = _verify_sysprep_result(
-                new_vmid,
-                data.get('hostname'),
-                expected_ip=None if data.get('use_dhcp') else data.get('ip_address'),
-                expected_domain=data.get('domain_name') if data.get('join_domain') else None,
-            )
-
-            task = Task.query.get(task_id)
-            task.status = 'SUCCESS'
-            task.progress = 100
-            task.message = f"Sysprep workflow for {data['hostname']} completed. Verify: {verify_summary}"
-            db.session.commit()
-
-        except Exception as e:
-            app.logger.error(f"Task {task_id} failed: {e}", exc_info=True)
-            task = Task.query.get(task_id)
-            task.status = 'FAILURE'
-            task.message = f"An error occurred: {e}"
-            db.session.commit()
 
 @celery.task(bind=True)
 def sysprep_existing_vm_task(self, task_id, data):
     with app.app_context():
-        vmid = data.get('vmid')
-        try:
-            # 0. Resolve the primary NIC MAC (so setup.ps1 can target the adapter
-            #    reliably) and validate all user-supplied network values.
-            mac = get_primary_mac_address(vmid)
-            if mac:
-                data['primary_mac_address'] = mac
+        with use_pve_override(data.get('_pve')):
+            vmid = data.get('vmid')
             try:
-                _validate_sysprep_network(data)
-                _prepare_domain_join(data)
-            except ValidationError as e:
+                # 0. Resolve the primary NIC MAC (so setup.ps1 can target the adapter
+                #    reliably) and validate all user-supplied network values.
+                mac = get_primary_mac_address(vmid)
+                if mac:
+                    data['primary_mac_address'] = mac
+                try:
+                    _validate_sysprep_network(data)
+                    _prepare_domain_join(data)
+                except ValidationError as e:
+                    task = Task.query.get(task_id)
+                    task.status = 'FAILURE'
+                    task.message = f"Invalid sysprep input: {e}"
+                    db.session.commit()
+                    return
+
+                # 1. Render the answer file + post-setup scripts.
+                update_task_progress(task_id, 10, "Generating sysprep files...")
+                unattended_xml, setup_ps1, setup_complete = _render_sysprep_files(data)
+
+                # 2. Wait for a stable QEMU Guest Agent
+                update_task_progress(task_id, 25, "Waiting for QEMU Guest Agent to stabilize...")
+                wait_for_guest_agent(vmid, timeout=1200, stable_for=60)
+                update_task_progress(task_id, 40, "QEMU Guest Agent is ready.")
+
+                # 3. Write the answer file + post-setup scripts to the guest.
+                update_task_progress(task_id, 60, "Writing sysprep files to guest...")
+                _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete)
+                update_task_progress(task_id, 75, "Sysprep files written successfully.")
+
+                # 4. Run Sysprep
+                update_task_progress(task_id, 82, "Running Sysprep...")
+                sysprep_command = r'cmd.exe /c "C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /unattend:C:\Windows\System32\Sysprep\unattended.xml"'
+                run_shutdown_command_in_guest(vmid, sysprep_command)
+
+                # 5. Verify: wait for shutdown, boot back up, confirm the guest agent.
+                update_task_progress(task_id, 88, "Sysprep issued. Waiting for VM to shut down...")
+                if not _wait_for_vm_stopped(vmid, timeout=1200):
+                    task = Task.query.get(task_id)
+                    task.status = 'FAILURE'
+                    task.message = "Timed out waiting for the VM to shut down after Sysprep."
+                    db.session.commit()
+                    return
+
+                update_task_progress(task_id, 95, "VM shut down. Powering back on to verify...")
+                power_on_vm(vmid)
+                wait_for_guest_agent(vmid, timeout=1800, stable_for=60)
+
+                update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
+                verify_summary = _verify_sysprep_result(
+                    vmid,
+                    data.get('hostname'),
+                    expected_ip=None if data.get('use_dhcp') else data.get('ip_address'),
+                    expected_domain=data.get('domain_name') if data.get('join_domain') else None,
+                )
+
+                task = Task.query.get(task_id)
+                task.status = 'SUCCESS'
+                task.progress = 100
+                task.message = f"Sysprep for VM {vmid} completed. Verify: {verify_summary}"
+                db.session.commit()
+
+            except Exception as e:
+                app.logger.error(f"Task {task_id} failed: {e}", exc_info=True)
                 task = Task.query.get(task_id)
                 task.status = 'FAILURE'
-                task.message = f"Invalid sysprep input: {e}"
+                task.message = f"An error occurred: {e}"
                 db.session.commit()
-                return
-
-            # 1. Render the answer file + post-setup scripts.
-            update_task_progress(task_id, 10, "Generating sysprep files...")
-            unattended_xml, setup_ps1, setup_complete = _render_sysprep_files(data)
-
-            # 2. Wait for a stable QEMU Guest Agent
-            update_task_progress(task_id, 25, "Waiting for QEMU Guest Agent to stabilize...")
-            wait_for_guest_agent(vmid, timeout=1200, stable_for=60)
-            update_task_progress(task_id, 40, "QEMU Guest Agent is ready.")
-
-            # 3. Write the answer file + post-setup scripts to the guest.
-            update_task_progress(task_id, 60, "Writing sysprep files to guest...")
-            _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete)
-            update_task_progress(task_id, 75, "Sysprep files written successfully.")
-
-            # 4. Run Sysprep
-            update_task_progress(task_id, 82, "Running Sysprep...")
-            sysprep_command = r'cmd.exe /c "C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /unattend:C:\Windows\System32\Sysprep\unattended.xml"'
-            run_shutdown_command_in_guest(vmid, sysprep_command)
-
-            # 5. Verify: wait for shutdown, boot back up, confirm the guest agent.
-            update_task_progress(task_id, 88, "Sysprep issued. Waiting for VM to shut down...")
-            if not _wait_for_vm_stopped(vmid, timeout=1200):
-                task = Task.query.get(task_id)
-                task.status = 'FAILURE'
-                task.message = "Timed out waiting for the VM to shut down after Sysprep."
-                db.session.commit()
-                return
-
-            update_task_progress(task_id, 95, "VM shut down. Powering back on to verify...")
-            power_on_vm(vmid)
-            wait_for_guest_agent(vmid, timeout=1800, stable_for=60)
-
-            update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
-            verify_summary = _verify_sysprep_result(
-                vmid,
-                data.get('hostname'),
-                expected_ip=None if data.get('use_dhcp') else data.get('ip_address'),
-                expected_domain=data.get('domain_name') if data.get('join_domain') else None,
-            )
-
-            task = Task.query.get(task_id)
-            task.status = 'SUCCESS'
-            task.progress = 100
-            task.message = f"Sysprep for VM {vmid} completed. Verify: {verify_summary}"
-            db.session.commit()
-
-        except Exception as e:
-            app.logger.error(f"Task {task_id} failed: {e}", exc_info=True)
-            task = Task.query.get(task_id)
-            task.status = 'FAILURE'
-            task.message = f"An error occurred: {e}"
-            db.session.commit()

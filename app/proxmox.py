@@ -20,6 +20,11 @@ from flask import url_for
 import ipaddress
 import re
 import logging
+import contextvars
+from contextlib import contextmanager
+
+# Optional per-task Proxmox connection (set from data['_pve'] in Celery sysprep).
+_pve_override = contextvars.ContextVar('pve_override', default=None)
 
 
 def run_ps_with_params(session, script_body, params):
@@ -38,13 +43,38 @@ def run_ps_with_params(session, script_body, params):
     )
     return session.run_ps(prelude + script_body)
 
+
+@contextmanager
+def use_pve_override(override):
+    """Temporarily use remote-specific Proxmox credentials (or no-op)."""
+    if not override:
+        yield
+        return
+    token = _pve_override.set(override)
+    try:
+        yield
+    finally:
+        _pve_override.reset(token)
+
+
 def get_proxmox_api():
     try:
+        override = _pve_override.get()
+        if override:
+            host = override.get('host')
+            user = override.get('user')
+            password = override.get('password')
+            verify_ssl = override.get('verify_ssl', False)
+        else:
+            host = app.config['PROXMOX_HOST']
+            user = app.config['PROXMOX_USER']
+            password = app.config['PROXMOX_PASSWORD']
+            verify_ssl = app.config.get('PROXMOX_VERIFY_SSL', False)
         proxmox = ProxmoxAPI(
-            app.config['PROXMOX_HOST'],
-            user=app.config['PROXMOX_USER'],
-            password=app.config['PROXMOX_PASSWORD'],
-            verify_ssl=app.config.get('PROXMOX_VERIFY_SSL', False),
+            host,
+            user=user,
+            password=password,
+            verify_ssl=verify_ssl,
             timeout=300
         )
         return proxmox
