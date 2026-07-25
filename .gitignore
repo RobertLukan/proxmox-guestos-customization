@@ -14,8 +14,9 @@ instance/
 # Environment variables
 .env
 
-# Build artifacts
+# Build artifacts / offline image exports
 *.tar.gz
+dist/
 
 # OS-specific files
 .DS_Store

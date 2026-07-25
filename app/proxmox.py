@@ -1,8 +1,18 @@
 import hashlib
 import base64
+import json
 from proxmoxer import ProxmoxAPI
 from app import app, celery, db
 from app.models import Task
+from app.validators import (
+    ValidationError,
+    validate_dns_servers,
+    validate_hostname,
+    validate_ipv4,
+    validate_mac,
+    validate_netmask,
+    validate_vlan,
+)
 import time
 import uuid
 import winrm
@@ -11,18 +21,35 @@ import ipaddress
 import re
 import logging
 
+
+def run_ps_with_params(session, script_body, params):
+    """Run a PowerShell script, passing untrusted values via a Base64-encoded
+    JSON object decoded into a ``$p`` variable inside the guest.
+
+    User-controlled data is never interpolated into PowerShell syntax: the only
+    value placed in the script text is a Base64 string (``[A-Za-z0-9+/=]``),
+    which cannot break out of the surrounding single quotes. Scripts should
+    reference their inputs as ``$p.fieldName``.
+    """
+    blob = base64.b64encode(json.dumps(params).encode("utf-8")).decode("ascii")
+    prelude = (
+        "$p = ConvertFrom-Json ([System.Text.Encoding]::UTF8.GetString("
+        f"[System.Convert]::FromBase64String('{blob}')))\n"
+    )
+    return session.run_ps(prelude + script_body)
+
 def get_proxmox_api():
     try:
         proxmox = ProxmoxAPI(
             app.config['PROXMOX_HOST'],
             user=app.config['PROXMOX_USER'],
             password=app.config['PROXMOX_PASSWORD'],
-            verify_ssl=False,
+            verify_ssl=app.config.get('PROXMOX_VERIFY_SSL', False),
             timeout=300
         )
         return proxmox
     except Exception as e:
-        print(f"Error connecting to Proxmox: {e}")
+        logging.error(f"Error connecting to Proxmox: {e}")
         return None
 
 def get_template_vms():
@@ -56,6 +83,70 @@ def _get_vm_node(vmid):
     for vm in proxmox.cluster.resources.get(type='vm'):
         if str(vm.get('vmid')) == str(vmid):
             return vm.get('node')
+    return None
+
+def get_primary_mac_address(vmid, node=None, proxmox=None):
+    """Return the MAC address of the VM's primary NIC (net0), or None.
+
+    Used to key guest-side network configuration off a stable identifier rather
+    than a fragile adapter name.
+    """
+    proxmox = proxmox or get_proxmox_api()
+    if not proxmox:
+        return None
+    node = node or _get_vm_node(vmid)
+    if not node:
+        return None
+    try:
+        vm_config = proxmox.nodes(node).qemu(vmid).config.get()
+    except Exception as e:
+        logging.warning(f"Could not read config for VM {vmid}: {e}")
+        return None
+    net0 = vm_config.get('net0', '')
+    match = re.search(r'([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})', net0)
+    return match.group(1) if match else None
+
+def select_winrm_ip(vmid, node=None, proxmox=None):
+    """Return a VM's IPv4 address suitable for the WinRM connection.
+
+    Picks the first non-loopback, non-APIPA (169.254.x.x) IPv4 address reported
+    by the guest agent. When ``WINRM_SUBNET`` is configured, only an address
+    within that subnet is accepted; otherwise the first valid address is used.
+    Returns ``None`` if no suitable address is found (or on any error).
+    """
+    proxmox = proxmox or get_proxmox_api()
+    if not proxmox:
+        return None
+    node = node or _get_vm_node(vmid)
+    if not node:
+        return None
+
+    winrm_network = None
+    winrm_subnet_str = app.config.get('WINRM_SUBNET')
+    if winrm_subnet_str:
+        try:
+            winrm_network = ipaddress.ip_network(winrm_subnet_str)
+        except ValueError:
+            winrm_network = None  # Ignore a malformed subnet and match any IP.
+
+    try:
+        network_info = proxmox.nodes(node).qemu(vmid).agent.get('network-get-interfaces')
+    except Exception as e:
+        logging.warning(f"Could not get network info for VM {vmid}: {e}")
+        return None
+
+    for iface in network_info.get('result', []):
+        for ip_addr_obj in iface.get('ip-addresses', []):
+            if ip_addr_obj.get('ip-address-type') != 'ipv4':
+                continue
+            ip_candidate = ip_addr_obj.get('ip-address', '')
+            if ip_candidate.startswith('127.') or ip_candidate.startswith('169.254.'):
+                continue
+            if winrm_network:
+                if ipaddress.ip_address(ip_candidate) in winrm_network:
+                    return ip_candidate
+            else:
+                return ip_candidate
     return None
 
 def _update_vm_tags(vmid, node, tags_to_add=None, tags_to_remove=None):
@@ -102,7 +193,7 @@ def get_vm_current_ip(vmid):
                         if ip_addr['ip-address-type'] == 'ipv4' and not ip_addr['ip-address'].startswith('127.0.0.1') and not ip_addr['ip-address'].startswith('169.254.'):
                             return ip_addr['ip-address']
         except Exception as e:
-            print(f"Could not get current IP for VM {vmid} on attempt {i+1}: {e}")
+            logging.warning(f"Could not get current IP for VM {vmid} on attempt {i+1}: {e}")
         
         time.sleep(2)
         
@@ -186,53 +277,191 @@ def power_on_vm(vmid):
                 return
         raise Exception(f"VM {vmid} failed to power on.")
 
-def wait_for_guest_agent(vmid, timeout=600):
-    """Waits for the QEMU Guest Agent to be responsive."""
+def wait_for_guest_agent(vmid, timeout=1200, stable_for=45):
+    """Wait until the QEMU Guest Agent is responsive *and stays up*.
+
+    Windows 11 (and sometimes Server) can briefly start the guest agent, then
+    reboot again during specialize/OOBE. Returning on the first successful poll
+    races those reboots and causes later file writes to fail with
+    "QEMU guest agent is not running".
+
+    ``stable_for`` is the number of consecutive seconds the agent must keep
+    answering before we treat it as ready.
+    """
     proxmox = get_proxmox_api()
     node = _get_vm_node(vmid)
     if not node:
         raise Exception(f"VM {vmid} not found.")
 
-    for _ in range(timeout // 10):
+    deadline = time.time() + timeout
+    ok_since = None
+    poll = 5
+    while time.time() < deadline:
         try:
-            if proxmox.nodes(node).qemu(vmid).agent.get('get-fsinfo'):
-                return
-        except Exception:
-            pass
-        time.sleep(10)
-    raise Exception(f"Timed out waiting for QEMU Guest Agent on VM {vmid}.")
+            if proxmox.nodes(node).qemu(vmid).agent.get('get-fsinfo') is not None:
+                now = time.time()
+                if ok_since is None:
+                    ok_since = now
+                    logging.info(
+                        f"Guest agent responded on VM {vmid}; "
+                        f"waiting {stable_for}s for stability..."
+                    )
+                elif now - ok_since >= stable_for:
+                    logging.info(f"Guest agent on VM {vmid} stable for {stable_for}s.")
+                    return
+            else:
+                ok_since = None
+        except Exception as e:
+            if ok_since is not None:
+                logging.info(
+                    f"Guest agent on VM {vmid} dropped during stability wait "
+                    f"(will keep waiting): {e}"
+                )
+            ok_since = None
+        time.sleep(poll)
+    raise Exception(
+        f"Timed out waiting for a stable QEMU Guest Agent on VM {vmid} "
+        f"(timeout={timeout}s, stable_for={stable_for}s)."
+    )
+
+
+def _is_transient_agent_error(exc):
+    """True when Proxmox reports the guest agent is temporarily unavailable."""
+    msg = str(exc).lower()
+    return (
+        'guest agent' in msg
+        or 'not running' in msg
+        or 'timeout' in msg
+        or 'connection refused' in msg
+    )
+
 
 def write_file_to_guest(vmid, content, file_path):
     """Writes a file to the guest OS via QEMU Guest Agent."""
-    proxmox = get_proxmox_api()
-    node = _get_vm_node(vmid)
-    if not node:
-        raise Exception(f"VM {vmid} not found.")
-
     content_b64 = base64.b64encode(content).decode('ascii')
 
-    command = f"powershell -command \"New-Item -ItemType Directory -Force -Path (Split-Path -Path '{file_path}' -Parent); [System.IO.File]::WriteAllBytes('{file_path}', [System.Convert]::FromBase64String('{content_b64}'))\""
+    command = (
+        "powershell -command \""
+        f"New-Item -ItemType Directory -Force -Path (Split-Path -Path '{file_path}' -Parent); "
+        f"[System.IO.File]::WriteAllBytes('{file_path}', "
+        f"[System.Convert]::FromBase64String('{content_b64}'))\""
+    )
     run_command_in_guest(vmid, command)
 
 
-def run_command_in_guest(vmid, command):
-    """Runs a command in the guest OS via QEMU Guest Agent."""
+def run_command_in_guest(vmid, command, retries=8, retry_delay=15):
+    """Run a command in the guest via QEMU Guest Agent, with retries.
+
+    Retries when the agent briefly disappears (common on Windows 11 during
+    early boot / specialize). Permanent command failures (non-zero exit) are
+    not retried.
+    """
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            return _run_command_in_guest_once(vmid, command)
+        except Exception as e:
+            last_err = e
+            # Non-zero exit from the guest command itself is not transient.
+            if 'exit code' in str(e).lower() or not _is_transient_agent_error(e):
+                raise
+            logging.warning(
+                f"Guest agent command failed on VM {vmid} "
+                f"(attempt {attempt}/{retries}): {e}"
+            )
+            if attempt == retries:
+                break
+            try:
+                wait_for_guest_agent(vmid, timeout=max(120, retry_delay * 4), stable_for=20)
+            except Exception as wait_err:
+                logging.warning(f"Re-wait for guest agent on VM {vmid}: {wait_err}")
+                time.sleep(retry_delay)
+    raise last_err
+
+
+def _run_command_in_guest_once(vmid, command):
+    """Single attempt to run a guest command via the QEMU Guest Agent."""
     proxmox = get_proxmox_api()
     node = _get_vm_node(vmid)
     if not node:
         raise Exception(f"VM {vmid} not found.")
-        
+
     result = proxmox.nodes(node).qemu(vmid).agent.exec.post(command=command)
     pid = result['pid']
-    
-    # Wait for the command to complete
+
     while True:
         status = proxmox.nodes(node).qemu(vmid).agent('exec-status').get(pid=pid)
         if status.get('exited'):
             if status.get('exitcode') != 0:
-                raise Exception(f"Command failed with exit code {status['exitcode']}: {status.get('err-data')}")
+                raise Exception(
+                    f"Command failed with exit code {status['exitcode']}: "
+                    f"{status.get('err-data')}"
+                )
             return status.get('out-data')
         time.sleep(2)
+
+
+def run_shutdown_command_in_guest(vmid, command, settle=30, retries=6):
+    """Launch a guest command that is expected to power off/reboot the VM.
+
+    Unlike ``run_command_in_guest``, this does NOT treat the guest agent
+    becoming unreachable as an error: a command such as
+    ``sysprep ... /shutdown`` intentionally kills the agent when it powers the
+    machine down. We briefly poll ``exec-status`` so a command that exits
+    non-zero *before* the shutdown still surfaces as an error; once the agent
+    disappears (or ``settle`` seconds pass) we return and let the caller confirm
+    success by waiting for the VM to actually stop.
+    """
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not node:
+        raise Exception(f"VM {vmid} not found.")
+
+    last_err = None
+    result = None
+    for attempt in range(1, retries + 1):
+        try:
+            result = proxmox.nodes(node).qemu(vmid).agent.exec.post(command=command)
+            break
+        except Exception as e:
+            last_err = e
+            if not _is_transient_agent_error(e) or attempt == retries:
+                raise
+            logging.warning(
+                f"Could not issue shutdown command on VM {vmid} "
+                f"(attempt {attempt}/{retries}): {e}"
+            )
+            try:
+                wait_for_guest_agent(vmid, timeout=180, stable_for=15)
+            except Exception:
+                time.sleep(15)
+    if result is None:
+        raise last_err
+
+    pid = result.get('pid')
+    deadline = time.time() + settle
+    while time.time() < deadline:
+        try:
+            status = proxmox.nodes(node).qemu(vmid).agent('exec-status').get(pid=pid)
+        except Exception as e:
+            # Agent unreachable -> the shutdown has begun. This is expected.
+            logging.info(
+                f"Guest agent unreachable after issuing shutdown command on "
+                f"VM {vmid} (expected): {e}"
+            )
+            return
+        if status.get('exited'):
+            exitcode = status.get('exitcode')
+            if exitcode not in (0, None):
+                raise Exception(
+                    f"Command failed with exit code {exitcode}: "
+                    f"{status.get('err-data')}"
+                )
+            return
+        time.sleep(2)
+    # Command still running after settle window; assume the shutdown is in
+    # progress and let the caller verify via VM status.
+    return
 
 def get_vm_ip(vmid, timeout=300):
     """Gets the IP address of a VM."""
@@ -318,12 +547,11 @@ def wait_for_guest_agent_and_ip_task(self, task_id, vmid, vm_uuid):
         _update_vm_tags(vmid, node, tags_to_add=['lifecycle-waiting_for_ip'])
         
         try:
-            # Get WINRM_SUBNET from config
+            # Validate WINRM_SUBNET up front so a misconfiguration fails clearly.
             winrm_subnet_str = app.config.get('WINRM_SUBNET')
-            winrm_network = None
             if winrm_subnet_str:
                 try:
-                    winrm_network = ipaddress.ip_network(winrm_subnet_str)
+                    ipaddress.ip_network(winrm_subnet_str)
                 except ValueError as e:
                     task.update_status('FAILURE', 100, f"Invalid WINRM_SUBNET configured: {e}")
                     return
@@ -332,27 +560,7 @@ def wait_for_guest_agent_and_ip_task(self, task_id, vmid, vm_uuid):
             max_attempts = 30 # Increased attempts for robustness
             for attempt in range(max_attempts):
                 task.update_status('PROGRESS', int((attempt / max_attempts) * 100), f"Waiting for WinRM IP... (Attempt {attempt+1}/{max_attempts})")
-                try:
-                    network_info = get_proxmox_api().nodes(node).qemu(vmid).agent.get('network-get-interfaces')
-                    for iface in network_info['result']:
-                        if 'ip-addresses' in iface:
-                            for ip_addr_obj in iface['ip-addresses']:
-                                if ip_addr_obj['ip-address-type'] == 'ipv4':
-                                    current_ip = ip_addr_obj['ip-address']
-                                    # Exclude loopback and APIPA addresses
-                                    if not current_ip.startswith('127.') and not current_ip.startswith('169.254.'):
-                                        if winrm_network:
-                                            if ipaddress.ip_address(current_ip) in winrm_network:
-                                                selected_ip_address = current_ip
-                                                break # Found a suitable IP
-                                        else: # If no WINRM_SUBNET is configured, take the first valid IP
-                                            selected_ip_address = current_ip
-                                            break
-                            if selected_ip_address:
-                                break # Found a suitable IP from any interface
-                except Exception as e:
-                    logging.warning(f"Attempt {attempt+1}: Could not get network info for VM {vmid}: {e}")
-                
+                selected_ip_address = select_winrm_ip(vmid, node=node)
                 if selected_ip_address:
                     break
                 time.sleep(10) # Wait before retrying
@@ -397,6 +605,23 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
                     task.update_status('FAILURE', 100, f"Invalid WINRM_SUBNET or temporary IP address: {e}")
                     return
 
+            # Validate all user-supplied values before they are sent to the guest.
+            try:
+                validate_ipv4(temp_ip_address, field="temporary IP address")
+                new_ip_address = validate_ipv4(new_ip_address, field="new IP address")
+                gateway = validate_ipv4(gateway, field="gateway")
+                netmask = validate_netmask(netmask)
+                vlan = validate_vlan(vlan)
+                dns_list = validate_dns_servers(dns_servers)
+                primary_mac_address = validate_mac(primary_mac_address)
+                if join_domain:
+                    if not domain_name or not domain_username or domain_password is None:
+                        raise ValidationError("Domain join requires domain name, username and password.")
+            except ValidationError as e:
+                task.update_status('FAILURE', 100, f"Invalid reconfiguration input: {e}")
+                _update_vm_tags(vmid, _get_vm_node(vmid), tags_to_add=['lifecycle-failed'])
+                return
+
             task.update_status('PROGRESS', 6, "Establishing insecure WinRM connection...")
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -410,38 +635,57 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
             proxmox = get_proxmox_api()
             node = _get_vm_node(vmid)
             vm_config = proxmox.nodes(node).qemu(vmid).config.get()
-            hostname = vm_config.get('name').split('.')[0]
-            
+            try:
+                hostname = validate_hostname(vm_config.get('name'))
+            except ValidationError as e:
+                task.update_status('FAILURE', 100, f"VM name is not a valid hostname: {e}")
+                _update_vm_tags(vmid, node, tags_to_add=['lifecycle-failed'])
+                return
+
             task.update_status('PROGRESS', 10, "Identifying primary network adapter...")
-            adapter_name_cmd = f"(Get-NetAdapter -Physical | Where-Object {{$_.MacAddress -eq '{primary_mac_address.replace(':', '-')}'}}).Name"
-            r = session.run_ps(adapter_name_cmd)
+            r = run_ps_with_params(
+                session,
+                "(Get-NetAdapter -Physical | Where-Object { $_.MacAddress -eq $p.mac }).Name",
+                {"mac": primary_mac_address.replace(':', '-')},
+            )
             if r.status_code != 0:
                 task.update_status('FAILURE', 100, f"Error getting network adapter: {r.std_err.decode('utf-8')}")
                 return
             adapter_name = r.std_out.decode('utf-8').strip()
 
             task.update_status('PROGRESS', 20, "Clearing existing IP configuration...")
-            r = session.run_ps(f'Get-NetIPAddress -InterfaceAlias "{adapter_name}" | Remove-NetIPAddress -Confirm:$false')
-            if r.status_code != 0: print(f"Warning: Non-zero status when clearing IP: {r.std_err.decode('utf-8')}")
-            r = session.run_ps(f'Get-NetRoute -InterfaceAlias "{adapter_name}" | Where-Object {{$_.DestinationPrefix -eq "0.0.0.0/0"}} | Remove-NetRoute -Confirm:$false')
-            if r.status_code != 0: print(f"Warning: Non-zero status when clearing gateway: {r.std_err.decode('utf-8')}")
+            r = run_ps_with_params(session, 'Get-NetIPAddress -InterfaceAlias $p.adapter | Remove-NetIPAddress -Confirm:$false', {"adapter": adapter_name})
+            if r.status_code != 0: logging.warning(f"Non-zero status when clearing IP: {r.std_err.decode('utf-8')}")
+            r = run_ps_with_params(session, 'Get-NetRoute -InterfaceAlias $p.adapter | Where-Object { $_.DestinationPrefix -eq "0.0.0.0/0" } | Remove-NetRoute -Confirm:$false', {"adapter": adapter_name})
+            if r.status_code != 0: logging.warning(f"Non-zero status when clearing gateway: {r.std_err.decode('utf-8')}")
 
             task.update_status('PROGRESS', 30, f"Setting new IP: {new_ip_address}...")
-            r = session.run_ps(f'New-NetIPAddress -InterfaceAlias "{adapter_name}" -IPAddress "{new_ip_address}" -PrefixLength {netmask}')
+            r = run_ps_with_params(
+                session,
+                'New-NetIPAddress -InterfaceAlias $p.adapter -IPAddress $p.ip -PrefixLength $p.prefix',
+                {"adapter": adapter_name, "ip": new_ip_address, "prefix": netmask},
+            )
             if r.status_code != 0:
                 task.update_status('FAILURE', 100, f"Error setting static IP: {r.std_err.decode('utf-8')}")
                 return
 
             task.update_status('PROGRESS', 40, f"Setting new gateway: {gateway}...")
-            r = session.run_ps(f'New-NetRoute -InterfaceAlias "{adapter_name}" -DestinationPrefix "0.0.0.0/0" -NextHop "{gateway}"')
+            r = run_ps_with_params(
+                session,
+                'New-NetRoute -InterfaceAlias $p.adapter -DestinationPrefix "0.0.0.0/0" -NextHop $p.gateway',
+                {"adapter": adapter_name, "gateway": gateway},
+            )
             if r.status_code != 0:
                 task.update_status('FAILURE', 100, f"Error setting gateway: {r.std_err.decode('utf-8')}")
                 return
 
-            if dns_servers:
-                task.update_status('PROGRESS', 50, f"Setting DNS servers: {dns_servers}...")
-                dns_list = ",".join([f'"{s.strip()}"' for s in dns_servers.split(',')])
-                r = session.run_ps(f'Set-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -ServerAddresses ({dns_list})')
+            if dns_list:
+                task.update_status('PROGRESS', 50, f"Setting DNS servers: {', '.join(dns_list)}...")
+                r = run_ps_with_params(
+                    session,
+                    'Set-DnsClientServerAddress -InterfaceAlias $p.adapter -ServerAddresses $p.dns',
+                    {"adapter": adapter_name, "dns": dns_list},
+                )
                 if r.status_code != 0:
                     task.update_status('FAILURE', 100, f"Error setting DNS: {r.std_err.decode('utf-8')}")
                     return
@@ -458,9 +702,9 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
             
             task.update_status('PROGRESS', 60, f"Renaming computer to '{hostname}' and rebooting...")
             try:
-                session.run_ps(f'Rename-Computer -NewName "{hostname}" -Force -Restart')
+                run_ps_with_params(session, 'Rename-Computer -NewName $p.hostname -Force -Restart', {"hostname": hostname})
             except Exception as e:
-                print(f"Ignoring expected error during reboot after rename: {e}")
+                logging.info(f"Ignoring expected error during reboot after rename: {e}")
 
             task.update_status('PROGRESS', 65, "Waiting for VM to reboot and for new hostname to apply...")
             max_attempts_rename = 30
@@ -483,7 +727,7 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
                             rename_verified = True
                             break
                 except Exception as e:
-                    print(f"Could not connect or verify hostname yet (Attempt {i+1}/{max_attempts_rename}): {e}")
+                    logging.info(f"Could not connect or verify hostname yet (Attempt {i+1}/{max_attempts_rename}): {e}")
             
             if not rename_verified:
                 task.update_status('FAILURE', 100, "Timed out verifying hostname change after reboot.")
@@ -492,14 +736,16 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
 
             if join_domain:
                 task.update_status('PROGRESS', 78, f"Joining domain '{domain_name}'...")
-                ps_script = f'''
-                $domainName = "{domain_name}"
-                $username = "{domain_username}"
-                $password = "{domain_password}" | ConvertTo-SecureString -asPlainText -Force
-                $credential = New-Object System.Management.Automation.PSCredential($username, $password)
-                Add-Computer -DomainName $domainName -Credential $credential -Force -ErrorAction Stop
+                ps_script = '''
+                $password = $p.password | ConvertTo-SecureString -AsPlainText -Force
+                $credential = New-Object System.Management.Automation.PSCredential($p.username, $password)
+                Add-Computer -DomainName $p.domainName -Credential $credential -Force -ErrorAction Stop
                 '''
-                r = session.run_ps(ps_script)
+                r = run_ps_with_params(session, ps_script, {
+                    "domainName": domain_name,
+                    "username": domain_username,
+                    "password": domain_password,
+                })
                 if r.status_code != 0:
                     task.update_status('FAILURE', 100, f"Error joining domain: {r.std_err.decode('utf-8')}")
                     return
@@ -508,7 +754,7 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
             try:
                 session.run_ps("Stop-Computer -Force")
             except Exception as e:
-                print(f"Ignoring expected error during shutdown: {e}")
+                logging.info(f"Ignoring expected error during shutdown: {e}")
 
             # Wait for VM to stop
             for _ in range(30): # 5 minutes timeout
@@ -526,7 +772,7 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
                 try:
                     proxmox.nodes(node).qemu(vmid).config.post(delete='net1')
                 except Exception as e:
-                    print(f"Warning: Failed to remove net1 while VM was stopped: {e}")
+                    logging.warning(f"Failed to remove net1 while VM was stopped: {e}")
             
             task.update_status('PROGRESS', 87, "Starting VM...")
             proxmox.nodes(node).qemu(vmid).status.start.post()
@@ -565,47 +811,15 @@ def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, n
                     ip_match = current_ip == new_ip_address
 
                     if ip_match:
-                                                # task.update_status('PROGRESS', 97, "Scheduling WinRM deactivation...")
-                        disable_winrm_script = """
-                        # --- Configuration ---
-                        $taskName = "Disable WinRM Service Temporary"
-
-                        # --- 1. Create the Self-Destruct Command ---
-                        # This command now properly stops and disables the service, waits, then unregisters the task.
-                        $finalCommand = "Stop-Service -Name WinRM -Force; Set-Service -Name WinRM -StartupType Disabled; Start-Sleep -Seconds 5; Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false"
-
-                        # We encode the command in Base64 to avoid all nested quoting issues.
-                        $encodedFinalCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($finalCommand))
-
-                        # --- 2. Create the Main Task Action ---
-                        # This action launches our main command in a new, hidden process.
-                        # This allows the scheduled task to end immediately, releasing its lock so it can be deleted.
-                        $mainArgument = "-NoProfile -WindowStyle Hidden -EncodedCommand $encodedFinalCommand"
-
-                        # --- 3. Define and Register the Scheduled Task ---
-                        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $mainArgument
-
-                        $time = (Get-Date).AddMinutes(1).ToString("s")
-                        $trigger = New-ScheduledTaskTrigger -Once -At $time
-
-                        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-
-                        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -User "NT AUTHORITY\System" -RunLevel Highest -Force
-                        """
-                                                # try:
-                        #     session.run_ps(disable_winrm_script)
-                        # except Exception as e:
-                        #     print(f"Warning: Failed to schedule WinRM deactivation: {e}")
-
-                        # The temporary interface is now removed during the power-cycle, so this is no longer needed.
-                        
+                        # WinRM is disabled centrally via Group Policy, so no
+                        # in-guest deactivation step is needed here. The temporary
+                        # interface was already removed during the power-cycle.
                         task.update_status('SUCCESS', 100, f"Reconfiguration successful. IP: {current_ip}, Hostname: {current_hostname}.", result_ip_address=current_ip)
                         _update_vm_tags(vmid, node, tags_to_add=['lifecycle-reconfigured'])
                         return
                 
                 except Exception as e:
-                    print(f"Error during verification (Attempt {i+1}/{max_attempts}): {e}")
-                    pass
+                    logging.warning(f"Error during verification (Attempt {i+1}/{max_attempts}): {e}")
             
             task.update_status('FAILURE', 100, "Timed out verifying reconfiguration after reboot.")
             _update_vm_tags(vmid, node, tags_to_add=['lifecycle-failed'])

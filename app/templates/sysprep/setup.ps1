@@ -1,8 +1,125 @@
-$ip = '{{ ip_address }}'
-$netmask = '{{ netmask_cidr }}'
-$gateway = '{{ gateway }}'
-$dns1 = '{{ dns_servers.split(',')[0] }}'
-$dns2 = '{{ dns_servers.split(',')[1] if dns_servers.split(',')|length > 1 else '' }}'
+# Post-Sysprep configuration applied by SetupComplete.cmd.
+#
+# NOTE: this file is NOT autoescaped by Jinja (it is not HTML/XML). Every value
+# interpolated below is validated server-side before rendering:
+#   * IPv4 addresses, an integer prefix length and a DNS list (network),
+#   * a MAC address (adapter selection),
+#   * domain-join credentials are passed as a Base64-encoded JSON blob so no
+#     credential bytes are ever interpolated into PowerShell syntax.
+# Do not add unvalidated fields.
 
-Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | New-NetIPAddress -IPAddress $ip -PrefixLength $netmask -DefaultGateway $gateway
-Set-DnsClientServerAddress -InterfaceIndex (Get-NetAdapter | Where-Object {$_.Status -eq 'Up'}).InterfaceIndex -ServerAddresses ($dns1, $dns2)
+$ErrorActionPreference = 'Stop'
+
+$mac = '{{ primary_mac_address | default("", true) }}'.Replace(':', '-').ToUpper()
+
+# Select the target adapter by MAC; fall back to the first physical adapter so a
+# single-NIC VM still configures correctly even if the MAC could not be resolved.
+$adapter = $null
+if ($mac) {
+    $adapter = Get-NetAdapter -Physical | Where-Object { $_.MacAddress.ToUpper() -eq $mac } | Select-Object -First 1
+}
+if (-not $adapter) {
+    Write-Output "[setup.ps1] MAC '$mac' not matched; falling back to first physical adapter."
+    $adapter = Get-NetAdapter -Physical | Sort-Object ifIndex | Select-Object -First 1
+}
+if (-not $adapter) { throw "No physical network adapter found." }
+
+$ifIndex = $adapter.ifIndex
+Write-Output "[setup.ps1] Using adapter '$($adapter.Name)' (ifIndex $ifIndex, MAC $($adapter.MacAddress))."
+
+# Clear any existing IPv4 address / default route first so re-runs are idempotent.
+Remove-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetRoute     -InterfaceIndex $ifIndex -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
+
+{% if use_dhcp %}
+Write-Output "[setup.ps1] Enabling DHCP on ifIndex $ifIndex."
+Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Enabled
+{% if dns_list %}
+# Explicit DNS override (e.g. to reach the domain controller) even under DHCP.
+Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @({% for d in dns_list %}'{{ d }}'{% if not loop.last %}, {% endif %}{% endfor %})
+{% else %}
+Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses
+{% endif %}
+{% else %}
+$ip      = '{{ ip_address }}'
+$prefix  = {{ netmask_cidr }}
+$gateway = '{{ gateway }}'
+$dns     = @({% for d in dns_list %}'{{ d }}'{% if not loop.last %}, {% endif %}{% endfor %})
+Write-Output "[setup.ps1] Static IP=$ip/$prefix GW=$gateway DNS=$($dns -join ',')"
+Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Disabled
+New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $ip -PrefixLength $prefix -DefaultGateway $gateway | Out-Null
+if ($dns.Count -gt 0) {
+    Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $dns
+} else {
+    Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses
+}
+{% endif %}
+
+Write-Output "[setup.ps1] Network configuration complete."
+
+# --- Local accounts --------------------------------------------------------
+# Sysprep /generalize does NOT remove accounts that existed on the template
+# (e.g. an interactive "rl" user). Enable the built-in Administrator and drop
+# every other local account so clones boot to a clean admin-only local state.
+# Built-in / system accounts are left alone.
+Write-Output "[setup.ps1] Enabling built-in Administrator account."
+try {
+    Enable-LocalUser -Name 'Administrator' -ErrorAction Stop
+} catch {
+    # Fallback for editions where Enable-LocalUser is picky.
+    net user Administrator /active:yes | Out-Null
+}
+
+$keepLocalUsers = @(
+    'Administrator',
+    'Guest',
+    'DefaultAccount',
+    'WDAGUtilityAccount',
+    'defaultuser0'
+)
+Get-LocalUser | Where-Object { $keepLocalUsers -notcontains $_.Name } | ForEach-Object {
+    Write-Output "[setup.ps1] Removing leftover local user '$($_.Name)'."
+    try {
+        Remove-LocalUser -Name $_.Name -ErrorAction Stop
+    } catch {
+        Write-Output "[setup.ps1] Could not remove '$($_.Name)': $($_.Exception.Message)"
+    }
+}
+
+{% if join_domain %}
+# --- Domain join -----------------------------------------------------------
+# Credentials arrive as Base64(JSON{domain,username,password[,ou]}) so nothing
+# sensitive is interpolated into PowerShell syntax and the password is never
+# written to the log.
+$blob = '{{ domain_join_b64 }}'
+$j = ConvertFrom-Json ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($blob)))
+$sec = ConvertTo-SecureString $j.password -AsPlainText -Force
+$cred = New-Object System.Management.Automation.PSCredential($j.username, $sec)
+
+# Wait for the network/DNS to be usable, then join with a few retries.
+$joined = $false
+for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
+    try {
+        {% if domain_ou %}
+        Add-Computer -DomainName $j.domain -OUPath $j.ou -Credential $cred -Force -ErrorAction Stop
+        {% else %}
+        Add-Computer -DomainName $j.domain -Credential $cred -Force -ErrorAction Stop
+        {% endif %}
+        $joined = $true
+        Write-Output "[setup.ps1] Joined domain $($j.domain)."
+    } catch {
+        Write-Output "[setup.ps1] Domain join attempt $($i + 1) failed: $($_.Exception.Message)"
+        Start-Sleep -Seconds 15
+    }
+}
+
+# Scrub the credential-bearing script from disk regardless of outcome.
+Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+
+if ($joined) {
+    Write-Output "[setup.ps1] Restarting to finalize domain membership."
+    shutdown /r /t 5
+} else {
+    Write-Output "[setup.ps1] Domain join FAILED after retries; leaving machine in workgroup."
+}
+{% endif %}

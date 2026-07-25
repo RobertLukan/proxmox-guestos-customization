@@ -1,75 +1,63 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Clone VM</title>
-    <link href="{{ url_for('static', filename='css/bootstrap-5.3.0.min.css') }}" rel="stylesheet">
-    <style>
-        body {
-            background-color: #f8f9fa;
-        }
-        .container {
-            margin-top: 50px;
-        }
-        .card {
-            padding: 30px;
-            border-radius: 15px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="card shadow-sm">
-            <h1 class="text-center mb-4">Clone VM from Template</h1>
-            <form id="clone-form">
-                <input type="hidden" name="template_vmid" value="{{ template_vmid }}">
-                <div class="mb-3">
-                    <label for="hostname" class="form-label">New Hostname:</label>
-                    <input type="text" name="hostname" id="hostname" class="form-control" required>
-                </div>
-                <div class="mb-3">
-                    <label for="cores" class="form-label">CPU Cores:</label>
-                    <input type="number" name="cores" id="cores" class="form-control" required>
-                </div>
-                <div class="mb-3">
-                    <label for="ram" class="form-label">RAM (MB):</label>
-                    <input type="number" name="ram" id="ram" class="form-control" required>
-                </div>
-                <div class="d-grid">
-                    <button type="submit" class="btn btn-primary">Clone VM</button>
-                </div>
-            </form>
-        </div>
+{% extends "base.html" %}
+{% block title %}Clone VM{% endblock %}
+{% block content %}
+<h1>Clone VM from Template</h1>
+<p class="page-lead">Create a new VM from template {{ template_vmid }}.</p>
+<div id="form-alert" class="alert alert-danger" role="alert"></div>
+<form id="clone-form" novalidate>
+    <input type="hidden" name="template_vmid" value="{{ template_vmid }}">
+    <div class="mb-3">
+        <label for="hostname" class="form-label">New Hostname</label>
+        <input type="text" name="hostname" id="hostname" class="form-control" required data-validate="hostname" maxlength="15">
+        <div class="form-text">NetBIOS-safe: 1–15 letters, digits, or hyphens.</div>
+        <div class="invalid-feedback"></div>
     </div>
-    <script src="{{ url_for('static', filename='js/bootstrap-5.3.0.bundle.min.js') }}"></script>
-    <script>
-        document.getElementById('clone-form').addEventListener('submit', async function(event) {
-            event.preventDefault();
-
-            const formData = new FormData(this);
-            const data = Object.fromEntries(formData.entries());
-
-            try {
-                const response = await fetch('{{ url_for('start_clone_task_endpoint') }}', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(data)
-                });
-
-                if (response.ok) {
-                    const result = await response.json();
-                    window.location.href = `{{ url_for('workflow', task_id='') }}${result.task_id}`;
-                } else {
-                    alert('Error starting clone task.');
-                }
-            } catch (error) {
-                console.error('Error:', error);
-                alert('An error occurred while starting the clone task.');
+    <div class="mb-3">
+        <label for="cores" class="form-label">CPU Cores</label>
+        <input type="number" name="cores" id="cores" class="form-control" required min="1" value="2">
+        <div class="invalid-feedback"></div>
+    </div>
+    <div class="mb-3">
+        <label for="ram" class="form-label">RAM (MB)</label>
+        <input type="number" name="ram" id="ram" class="form-control" required min="512" value="4096">
+        <div class="invalid-feedback"></div>
+    </div>
+    <div class="d-grid gap-2">
+        <button type="submit" class="btn btn-primary">Clone VM</button>
+        <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Back</a>
+    </div>
+</form>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/validate.js') }}"></script>
+<script>
+(function () {
+    var form = document.getElementById('clone-form');
+    var alertBox = document.getElementById('form-alert');
+    GuestOSValidate.bindLive(form);
+    form.addEventListener('submit', async function (event) {
+        event.preventDefault();
+        alertBox.textContent = '';
+        if (!GuestOSValidate.validateForm(form)) return;
+        var data = Object.fromEntries(new FormData(form).entries());
+        try {
+            var response = await fetch('{{ url_for('start_clone_task_endpoint') }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            if (response.ok) {
+                var result = await response.json();
+                window.location.href = `{{ url_for('workflow', task_id='') }}${result.task_id}`;
+            } else {
+                var err = await response.json().catch(function () { return {}; });
+                alertBox.textContent = err.error || 'Error starting clone task.';
             }
-        });
-    </script>
-</body>
-</html>
+        } catch (error) {
+            console.error(error);
+            alertBox.textContent = 'An error occurred while starting the clone task.';
+        }
+    });
+})();
+</script>
+{% endblock %}

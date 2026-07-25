@@ -1,44 +1,23 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Proxmox VM Templates</title>
-    <link href="{{ url_for('static', filename='css/bootstrap-5.3.0.min.css') }}" rel="stylesheet">
-    <style>
-        body {
-            background-color: #f8f9fa;
-        }
-        .container {
-            margin-top: 50px;
-        }
-        .card {
-            padding: 30px;
-            border-radius: 15px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="card shadow-sm">
-            <h1 class="text-center mb-4">Select a Proxmox VM Template</h1>
-            <form action="{{ url_for('select_template') }}" method="post">
-                <div class="mb-3">
-                    <label for="template" class="form-label">Choose a template:</label>
-                    <select name="template_vmid" id="template" class="form-select">
-                        {% for template in templates %}
-                        <option value="{{ template.vmid }}">{{ template.name }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-                <div class="d-grid gap-2">
-                    <button type="submit" class="btn btn-primary">Start Complete Workflow (Clone & Configure)</button>
-                    <button type="submit" formaction="{{ url_for('sysprep_form') }}" class="btn btn-info">New VM with Sysprep</button>
-                    <a href="{{ url_for('reconfigure_existing_vm') }}" class="btn btn-secondary">Reconfigure Existing VM</a>
-                </div>
-            </form>
-        </div>
+{% extends "base.html" %}
+{% block title %}Proxmox VM Templates{% endblock %}
+{% block content %}
+<h1>Select a Proxmox VM Template</h1>
+<p class="page-lead">Clone and configure via WinRM, or customize with Sysprep (guest agent).</p>
+<form action="{{ url_for('select_template') }}" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="mb-3">
+        <label for="template" class="form-label">Template</label>
+        <select name="template_vmid" id="template" class="form-select">
+            {% for template in templates %}
+            <option value="{{ template.vmid }}">{{ template.name }}</option>
+            {% endfor %}
+        </select>
+        <div class="form-text">Choose a prepared Windows template with the QEMU guest agent installed.</div>
     </div>
-    <script src="{{ url_for('static', filename='js/bootstrap-5.3.0.bundle.min.js') }}"></script>
-</body>
-</html>
+    <div class="d-grid gap-2">
+        <button type="submit" class="btn btn-primary">Start Complete Workflow (Clone &amp; Configure)</button>
+        <button type="submit" formaction="{{ url_for('sysprep_form') }}" class="btn btn-outline-primary">New VM with Sysprep</button>
+        <a href="{{ url_for('reconfigure_existing_vm') }}" class="btn btn-outline-secondary">Reconfigure Existing VM</a>
+    </div>
+</form>
+{% endblock %}
