@@ -53,7 +53,12 @@ def main():
     p.add_argument('--remote-id', default='')
     p.add_argument('--admin-password', default='ChangeMe123!')
     p.add_argument('--poll', action='store_true', help='Poll task_status after --start-existing.')
-    p.add_argument('--poll-seconds', type=int, default=30)
+    p.add_argument(
+        '--poll-seconds',
+        type=int,
+        default=1800,
+        help='Max seconds to poll (default 1800). Sysprep often needs 10–30+ minutes.',
+    )
     args = p.parse_args()
     base = args.base_url.rstrip('/')
 
@@ -133,7 +138,13 @@ def main():
             if st.get('status') in ('SUCCESS', 'FAILURE'):
                 return 0 if st.get('status') == 'SUCCESS' else 2
             time.sleep(5)
-        print('FAIL poll timeout', file=sys.stderr)
+        print(
+            f'FAIL poll timeout after {args.poll_seconds}s '
+            f'(task may still be running — check UI workflow or: '
+            f'curl -H "Authorization: Bearer $GUESTOS_API_TOKEN" '
+            f'"{base}/task_status/{task_id}")',
+            file=sys.stderr,
+        )
         return 2
 
     return 0
