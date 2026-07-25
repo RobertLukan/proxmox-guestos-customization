@@ -5,19 +5,32 @@ on:
   pull_request:
 
 jobs:
-  test:
+  test-web:
+    name: Standalone web / CSRF
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
+      - name: Run web + core tests
+        run: pytest -m "not api"
 
-      - name: Run tests
-        run: pytest
+  test-api:
+    name: Machine API / PDM surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run API tests
+        run: pytest -m api

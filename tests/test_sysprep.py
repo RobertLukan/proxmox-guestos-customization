@@ -115,6 +115,7 @@ def test_dhcp_mode_skips_static_and_enables_dhcp():
     ps1 = ps1.decode()
     assert '-Dhcp Enabled' in ps1
     assert 'New-NetIPAddress' not in ps1  # no static addressing
+    assert 'ipconfig /renew' in ps1  # must re-acquire lease after clearing IPs
 
 
 def test_dhcp_with_dns_override_sets_servers():

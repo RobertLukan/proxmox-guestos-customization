@@ -40,6 +40,23 @@ Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @({% for d 
 {% else %}
 Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses
 {% endif %}
+# Remove-NetIPAddress above clears the old lease; enabling DHCP alone often does
+# not request a new one. Renew so the guest is not left without an IPv4 address.
+Write-Output "[setup.ps1] Renewing DHCP lease on '$($adapter.Name)'."
+cmd /c "ipconfig /renew `"$($adapter.Name)`"" 2>&1 | Out-String | Write-Output
+for ($i = 0; $i -lt 12; $i++) {
+    $lease = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notlike '127.*' } |
+        Select-Object -First 1
+    if ($lease) {
+        Write-Output "[setup.ps1] DHCP lease: $($lease.IPAddress)"
+        break
+    }
+    Start-Sleep -Seconds 5
+}
+if (-not $lease) {
+    Write-Output "[setup.ps1] WARNING: no DHCP lease yet; Windows may still be acquiring one."
+}
 {% else %}
 $ip      = '{{ ip_address }}'
 $prefix  = {{ netmask_cidr }}

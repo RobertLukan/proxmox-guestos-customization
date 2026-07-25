@@ -209,12 +209,15 @@ See `.env.example`. Key variables:
 
 | Variable | Purpose |
 |----------|---------|
-| `PROXMOX_HOST` / `USER` / `PASSWORD` | Proxmox API |
+| `PROXMOX_HOST` / `USER` / `PASSWORD` | Proxmox API (default remote) |
 | `PROXMOX_VERIFY_SSL` | TLS verify for Proxmox API (default `False`) |
-| `WINRM_USERNAME` / `PASSWORD` | Default WinRM creds (server-side only) |
+| `GUESTOS_API_TOKEN` / `API_TOKENS` | Machine API auth for PDM/sysprep start+poll |
+| `PVE_REMOTES_JSON` | Optional named remotes (`remote_id` in sysprep JSON) |
+| `WINRM_USERNAME` / `PASSWORD` | Default WinRM creds (server-side only; standalone) |
 | `WINRM_SUBNET` | Allowed temp IP subnet for WinRM |
 | `PRIMARY_BRIDGE` / `TEMP_BRIDGE` | Final vs temporary bridges |
 | `SECRET_KEY` | **Required** — sessions + CSRF |
+| `APP_VERSION` | Optional override of `VERSION` file (shown in UI / `/api/version`) |
 | `BEHIND_REVERSE_PROXY` | ProxyFix + Secure cookies |
 | `DATABASE_URL` | SQLAlchemy URL (default SQLite under `instance/`) |
 | `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Redis (Compose overrides to `redis://redis:6379/0`) |
@@ -226,8 +229,11 @@ Domain profiles are used by **both** WinRM reconfigure and Sysprep. Selecting a 
 ## Lab helper scripts
 
 ```bash
-# Read-only Proxmox connectivity / inventory check
+# Connectivity / config sanity (does not mutate VMs)
 venv/bin/python scripts/smoke_check.py
+
+# Machine API smoke from a PDM host (health, version, token)
+python3 scripts/pdm_api_smoke.py --base-url http://guestos:5001 --token "$GUESTOS_API_TOKEN"
 
 # Drive existing-VM sysprep synchronously (no Redis/web; generalizes the VM!)
 venv/bin/python scripts/sysprep_test.py \
@@ -240,6 +246,8 @@ venv/bin/python scripts/sysprep_test.py \
   --vmid 122 --hostname WIN11-T1 --network-mode dhcp \
   --dns 10.0.0.10 --admin-password '...' --yes
 ```
+
+PDM / integrator notes: [docs/PDM_INTEGRATION.md](docs/PDM_INTEGRATION.md).
 
 ## Usage
 
@@ -269,7 +277,9 @@ venv/bin/python scripts/sysprep_test.py \
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements-dev.txt
-pytest
+pytest                 # all tests
+pytest -m "not api"    # standalone / CSRF / wizards / core
+pytest -m api          # machine API (PDM surface)
 ```
 
 Coverage includes validators, injection-safe PowerShell helpers, WinRM IP selection, tags, CSRF/auth, sysprep template rendering (static/DHCP/domain blob), and domain-profile resolution. Proxmox/WinRM are mocked. CI runs the same suite on GitHub Actions (`pythonpath = .` in `pytest.ini`).
