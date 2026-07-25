@@ -3,7 +3,10 @@
 {% block main_class %}app-main-wide{% endblock %}
 {% block content %}
 <h1>Select a VM to Reconfigure</h1>
-<p class="page-lead">Running VMs with a lifecycle tag can be reconfigured over WinRM or Sysprep’d in place.</p>
+<p class="page-lead">
+    WinRM network/hostname changes for lifecycle-tagged clones only.
+    Sysprep customization is available only from a <strong>Windows template</strong> (Clone + Sysprep).
+</p>
 {% if vms %}
 <ul class="list-group list-group-flush mb-3">
     {% for vm in vms %}
@@ -14,7 +17,6 @@
         </div>
         <div class="btn-group">
             <button type="button" class="btn btn-primary btn-sm reconfigure-btn" data-vmid="{{ vm.vmid }}" data-uuid="{{ vm.uuid }}">Reconfigure</button>
-            <a href="{{ url_for('sysprep_existing_vm_form', vmid=vm.vmid) }}" class="btn btn-outline-primary btn-sm">Sysprep</a>
         </div>
     </li>
     {% endfor %}

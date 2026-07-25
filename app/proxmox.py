@@ -82,15 +82,99 @@ def get_proxmox_api():
         logging.error(f"Error connecting to Proxmox: {e}")
         return None
 
+# Proxmox QEMU ostype values for Windows guests (see qm.conf / PVE docs).
+_WINDOWS_OSTYPES = frozenset({
+    'wxp', 'w2k', 'w2k3', 'w2k8', 'wvista', 'win7', 'win8', 'win10', 'win11',
+})
+
+
+def is_windows_ostype(ostype):
+    """True when ``ostype`` is a Proxmox Windows guest type."""
+    if not ostype:
+        return False
+    return str(ostype).strip().lower() in _WINDOWS_OSTYPES
+
+
+def get_vm_ostype(vmid, node=None, proxmox=None):
+    """Return the QEMU ``ostype`` for ``vmid``, or None on failure."""
+    proxmox = proxmox or get_proxmox_api()
+    if not proxmox:
+        return None
+    node = node or _get_vm_node(vmid)
+    if not node:
+        return None
+    try:
+        cfg = proxmox.nodes(node).qemu(vmid).config.get()
+    except Exception as e:
+        logging.warning(f"Could not read ostype for VM {vmid}: {e}")
+        return None
+    return cfg.get('ostype')
+
+
+def require_windows_guest(vmid, node=None, proxmox=None):
+    """Raise ``ValueError`` unless ``vmid`` has a Windows ``ostype``."""
+    ostype = get_vm_ostype(vmid, node=node, proxmox=proxmox)
+    if not is_windows_ostype(ostype):
+        raise ValueError(
+            f"VM {vmid} is not a Windows guest (ostype={ostype!r}). "
+            "GuestOS only supports Windows templates and VMs."
+        )
+    return ostype
+
+
+def is_proxmox_template(vmid, proxmox=None):
+    """True when cluster resources mark ``vmid`` as a QEMU template."""
+    proxmox = proxmox or get_proxmox_api()
+    if not proxmox:
+        return False
+    for vm in proxmox.cluster.resources.get(type='vm'):
+        if str(vm.get('vmid')) == str(vmid):
+            return vm.get('template') == 1
+    return False
+
+
+def require_sysprep_template(template_vmid, proxmox=None):
+    """Windows Proxmox template suitable as a golden image for clone+Sysprep.
+
+    In-place Sysprep of ordinary VMs is not allowed (protects production guests).
+    """
+    proxmox = proxmox or get_proxmox_api()
+    if not is_proxmox_template(template_vmid, proxmox=proxmox):
+        raise ValueError(
+            f"VMID {template_vmid} is not a Proxmox template. "
+            "GuestOS customization clones a golden-image template and runs Sysprep "
+            "on the clone only — never on an existing/production VM."
+        )
+    return require_windows_guest(template_vmid, proxmox=proxmox)
+
+
+def require_sysprep_existing_target(vmid, node=None, proxmox=None):
+    """Always reject: in-place Sysprep of existing VMs is disabled."""
+    raise ValueError(
+        f"In-place Sysprep of VM {vmid} is disabled. "
+        "Use a Windows template with Clone + Sysprep (golden image → clone → customize)."
+    )
+
+
 def get_template_vms():
     proxmox = get_proxmox_api()
-    if proxmox:
-        templates = []
-        for vm in proxmox.cluster.resources.get(type='vm'):
-            if vm.get('template') == 1:
-                templates.append(vm)
-        return templates
-    return []
+    if not proxmox:
+        return []
+    templates = []
+    for vm in proxmox.cluster.resources.get(type='vm'):
+        if vm.get('template') != 1:
+            continue
+        node = vm.get('node')
+        vmid = vm.get('vmid')
+        try:
+            cfg = proxmox.nodes(node).qemu(vmid).config.get()
+        except Exception as e:
+            logging.warning(f"Skipping template {vmid}: cannot read config ({e})")
+            continue
+        if not is_windows_ostype(cfg.get('ostype')):
+            continue
+        templates.append(vm)
+    return templates
 
 def get_network_bridges():
     proxmox = get_proxmox_api()
@@ -230,7 +314,7 @@ def get_vm_current_ip(vmid):
     return None
 
 def get_manageable_vms():
-    """Gets all running, non-template VMs with a 'lifecycle-' tag."""
+    """Gets running, non-template Windows VMs with a 'lifecycle-' tag."""
     proxmox = get_proxmox_api()
     if not proxmox:
         return []
@@ -249,6 +333,16 @@ def get_manageable_vms():
         if not any(tag.startswith('lifecycle-') for tag in vm_tags):
             continue
 
+        node = vm.get('node')
+        vmid = vm.get('vmid')
+        try:
+            cfg = proxmox.nodes(node).qemu(vmid).config.get()
+        except Exception as e:
+            logging.warning(f"Skipping VM {vmid}: cannot read config ({e})")
+            continue
+        if not is_windows_ostype(cfg.get('ostype')):
+            continue
+
         manageable_vms.append({
             'vmid': vm.get('vmid'),
             'name': vm.get('name'),
@@ -260,7 +354,7 @@ def get_manageable_vms():
     return manageable_vms
 
 def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan):
-    """Clones a VM and returns the new VMID."""
+    """Clones a Windows template VM and returns the new VMID."""
     proxmox = get_proxmox_api()
     if not proxmox:
         raise Exception("Failed to connect to Proxmox.")
@@ -268,8 +362,11 @@ def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan):
     template_info = next((vm for vm in proxmox.cluster.resources.get(type='vm') if str(vm.get('vmid')) == str(template_vmid)), None)
     if not template_info:
         raise Exception(f"Template with VMID {template_vmid} not found.")
+    if template_info.get('template') != 1:
+        raise Exception(f"VMID {template_vmid} is not a Proxmox template.")
 
     node = template_info['node']
+    require_windows_guest(template_vmid, node=node, proxmox=proxmox)
     new_vmid = proxmox.cluster.nextid.get()
     
     clone_params = {'newid': new_vmid, 'name': hostname, 'full': 1}
@@ -284,8 +381,16 @@ def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan):
 
     vm_uuid = str(uuid.uuid4())
     _update_vm_tags(new_vmid, node, tags_to_add=[f'uuid:{vm_uuid}', 'lifecycle-cloning'])
-    
-    net0_config = f'virtio,bridge={bridge}' + (f',tag={vlan}' if vlan else '')
+
+    # Preserve the cloned NIC MAC; only retarget bridge/VLAN (and ensure virtio).
+    existing_net0 = proxmox.nodes(node).qemu(new_vmid).config.get().get('net0', '') or ''
+    mac_match = re.search(r'([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})', existing_net0)
+    if mac_match:
+        net0_config = f'virtio={mac_match.group(1)},bridge={bridge}'
+    else:
+        net0_config = f'virtio,bridge={bridge}'
+    if vlan:
+        net0_config += f',tag={vlan}'
     proxmox.nodes(node).qemu(new_vmid).config.post(cores=cores, memory=ram, net0=net0_config, agent=1)
     
     return {'vmid': new_vmid, 'uuid': vm_uuid}
@@ -529,9 +634,17 @@ def clone_vm_task(self, task_id, template_vmid, hostname, cores, ram, bridge, vl
             new_vmid = clone_result['vmid']
             vm_uuid = clone_result['uuid']
             
-            task.update_status('SUCCESS', 100, f"Successfully cloned to VM {new_vmid}.", result_vmid=new_vmid, vm_uuid=vm_uuid)
+            # Stop after clone. Power-on / WinRM wait-for-IP are started only from
+            # the workflow UI (or explicit API), so operators can clone now and
+            # Sysprep or reconfigure later without an automatic chain.
+            task.update_status(
+                'SUCCESS',
+                100,
+                f"Successfully cloned to VM {new_vmid}.",
+                result_vmid=new_vmid,
+                vm_uuid=vm_uuid,
+            )
             _update_vm_tags(new_vmid, _get_vm_node(new_vmid), tags_to_add=['lifecycle-configured'])
-            power_on_vm_task.delay(task_id, new_vmid, vm_uuid)
         except Exception as e:
             task.update_status('FAILURE', 100, f"An error occurred during cloning: {e}")
 

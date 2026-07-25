@@ -2,22 +2,41 @@
 {% block title %}Proxmox VM Templates{% endblock %}
 {% block content %}
 <h1>Select a Proxmox VM Template</h1>
-<p class="page-lead">Clone and configure via WinRM, or customize with Sysprep (guest agent).</p>
+<p class="page-lead">
+    Guest OS customization matches the VMware model: take a <strong>Windows template</strong>
+    (golden image), <strong>clone</strong> it, then <strong>Sysprep</strong> the clone.
+    In-place Sysprep of existing VMs is not allowed.
+</p>
+{% if templates %}
 <form action="{{ url_for('select_template') }}" method="post">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="mb-3">
-        <label for="template" class="form-label">Template</label>
+        <label for="template" class="form-label">Windows template</label>
         <select name="template_vmid" id="template" class="form-select">
             {% for template in templates %}
             <option value="{{ template.vmid }}">{{ template.name }}</option>
             {% endfor %}
         </select>
-        <div class="form-text">Choose a prepared Windows template with the QEMU guest agent installed.</div>
+        <div class="form-text">Windows templates only (Proxmox ostype win10/win11/…). Guest agent required on the clone.</div>
     </div>
     <div class="d-grid gap-2">
-        <button type="submit" class="btn btn-primary">Start Complete Workflow (Clone &amp; Configure)</button>
-        <button type="submit" formaction="{{ url_for('sysprep_form') }}" class="btn btn-outline-primary">New VM with Sysprep</button>
-        <a href="{{ url_for('reconfigure_existing_vm') }}" class="btn btn-outline-secondary">Reconfigure Existing VM</a>
+        <button type="submit" name="purpose" value="sysprep_now" formaction="{{ url_for('sysprep_form') }}" class="btn btn-primary">Clone + Sysprep (customize)</button>
+        <button type="submit" name="purpose" value="winrm" class="btn btn-outline-primary">Clone &amp; Configure (WinRM only)</button>
+        <a href="{{ url_for('reconfigure_existing_vm') }}" class="btn btn-outline-secondary">Existing VMs (WinRM reconfigure)</a>
     </div>
 </form>
+{% else %}
+<div class="alert alert-warning" role="alert">
+    No Windows templates found. Set the VM <code>ostype</code> to a Windows value (e.g. <code>win10</code>, <code>win11</code>) and convert to a Proxmox template.
+</div>
+<div class="d-grid gap-2">
+    <a href="{{ url_for('reconfigure_existing_vm') }}" class="btn btn-outline-secondary">Existing VMs (WinRM reconfigure)</a>
+</div>
+{# Keep a CSRF field for forms that post from this page context / tests. #}
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+{% endif %}
+<p class="form-text mt-3 mb-0">
+    <strong>Clone + Sysprep</strong> is the supported customization path (template → clone → generalize/OOBE).
+    WinRM reconfigure never runs Sysprep and can be used on lifecycle-tagged clones only.
+</p>
 {% endblock %}

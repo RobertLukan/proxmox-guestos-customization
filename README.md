@@ -41,22 +41,37 @@ Two complementary approaches:
 
 ### WinRM path (clone + reconfigure)
 
-1. Clone from a prepared template (hostname used for Proxmox name and later Windows rename).
-2. Attach a temporary NIC on `TEMP_BRIDGE` (DHCP).
+1. **Clone & Configure (WinRM)** → clone from a prepared template (hostname used for Proxmox name and later Windows rename).
+2. On the task page, choose **Power On VM** when ready (adds temp NIC on `TEMP_BRIDGE`).
 3. Wait for an IP in `WINRM_SUBNET`.
 4. Connect with WinRM; apply primary NIC settings (and optional domain join).
 5. Reboot; optionally remove the temporary NIC.
 
 ### Sysprep path
 
-1. Clone from a template **or** pick an existing running VM.
-2. Optionally select a **domain profile** (fills DNS/VLAN); choose static or DHCP; optionally join a domain.
-3. App waits for a **stable** QEMU guest agent, then writes:
+**Clone then Sysprep later (preferred when you want a pause):**
+
+1. **Clone for Sysprep later** → clone only (does not run `sysprep.exe`).
+2. Power the VM on in Proxmox when ready.
+3. **Existing VMs → Sysprep** on that guest.
+
+**All-in-one:**
+
+1. **Clone + Sysprep now** → clone, power on, write answer files, run `sysprep /generalize` in one job.
+
+**Existing VM only:**
+
+1. Pick a running lifecycle-tagged VM → Sysprep (same guest-agent steps without cloning).
+
+Shared Sysprep steps after the guest is up:
+
+1. Optionally select a **domain profile** (fills DNS/VLAN); choose static or DHCP; optionally join a domain.
+2. App waits for a **stable** QEMU guest agent, then writes:
     -   `C:\Windows\System32\Sysprep\unattended.xml`
     -   `C:\Windows\Setup\Scripts\setup.ps1`
     -   `C:\Windows\Setup\Scripts\SetupComplete.cmd` (Windows runs this after setup)
-4. Runs `sysprep /generalize /oobe /shutdown` with the answer file.
-5. Powers the VM back on, waits for the guest agent again, and verifies hostname / IP (and domain membership when requested).
+3. Runs `sysprep /generalize /oobe /shutdown` with the answer file.
+4. Powers the VM back on, waits for the guest agent again, and verifies hostname / IP (and domain membership when requested).
 
 `setup.ps1` also enables the built-in **Administrator** account and removes other leftover local users from the template (Sysprep itself does not delete them).
 
@@ -82,6 +97,8 @@ Cloud-Init on Windows needs Cloudbase-Init. This project prefers native WinRM fo
 -   API user with privileges to clone, configure, start/stop VMs, and use the guest agent.
 
 ### Templates
+
+GuestOS lists and accepts **Windows templates/VMs only**, based on Proxmox QEMU `ostype` (`win10`, `win11`, `win8`, …). Linux (`l26`) and other types are hidden from the UI and rejected by clone/sysprep APIs.
 
 #### WinRM reconfigure template
 

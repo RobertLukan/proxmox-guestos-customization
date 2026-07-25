@@ -51,9 +51,10 @@ def test_verify_dhcp_reports_ip_not_assigned(monkeypatch):
     monkeypatch.setattr(ca, 'run_command_in_guest', lambda *a, **k: 'LABTEST01\n')
     monkeypatch.setattr(ca.time, 'sleep', lambda _s: None)
 
-    summary = ca._verify_sysprep_result(
+    summary, ok = ca._verify_sysprep_result(
         126, 'LABTEST01', expected_ip=None, timeout=15,
     )
+    assert ok is True  # DHCP missing lease is informational
     assert 'hostname=LABTEST01 (ok)' in summary
     assert 'IP not assigned (no DHCP lease detected)' in summary
 
@@ -65,7 +66,8 @@ def test_verify_static_reports_missing_expected_ip(monkeypatch):
     monkeypatch.setattr(ca, 'run_command_in_guest', lambda *a, **k: 'LABTEST01\n')
     monkeypatch.setattr(ca.time, 'sleep', lambda _s: None)
 
-    summary = ca._verify_sysprep_result(
+    summary, ok = ca._verify_sysprep_result(
         126, 'LABTEST01', expected_ip='10.0.0.50', timeout=15,
     )
+    assert ok is False
     assert 'IP not assigned (expected 10.0.0.50 not visible)' in summary

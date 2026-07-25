@@ -37,6 +37,7 @@ def test_sysprep_start_with_api_token_skips_csrf(client, app, monkeypatch):
             captured['data'] = data
 
     monkeypatch.setattr('app.routes.sysprep_workflow_task', _Task)
+    monkeypatch.setattr('app.routes.require_windows_guest', lambda vmid, **kw: 'win11')
     resp = client.post(
         '/start_sysprep_workflow',
         json={
@@ -105,7 +106,26 @@ def test_sysprep_unknown_remote_id(client, app, monkeypatch):
     assert 'remote_id' in body.get('errors', {})
 
 
-def test_sysprep_known_remote_id_attaches_pve(client, app, monkeypatch):
+def test_sysprep_existing_api_disabled(client, app):
+    app.config['API_TOKENS'] = frozenset({'good-token'})
+    resp = client.post(
+        '/start_sysprep_existing_vm_task',
+        json={
+            'vmid': 121,
+            'hostname': 'EXIST01',
+            'network_mode': 'dhcp',
+            'administrator_password': 'password123',
+            'timezone': 'UTC',
+            'join_domain': False,
+            'remote_id': 'lab',
+        },
+        headers={'Authorization': 'Bearer good-token'},
+    )
+    assert resp.status_code == 403
+    assert 'disabled' in resp.get_json().get('error', '').lower()
+
+
+def test_sysprep_workflow_known_remote_id_attaches_pve(client, app, monkeypatch):
     app.config['API_TOKENS'] = frozenset({'good-token'})
     app.config['PVE_REMOTES'] = {
         'lab': {
@@ -122,12 +142,15 @@ def test_sysprep_known_remote_id_attaches_pve(client, app, monkeypatch):
         def delay(task_id, data):
             captured['data'] = data
 
-    monkeypatch.setattr('app.routes.sysprep_existing_vm_task', _Task)
+    monkeypatch.setattr('app.routes.sysprep_workflow_task', _Task)
+    monkeypatch.setattr('app.routes.require_sysprep_template', lambda vmid, **kw: 'win10')
     resp = client.post(
-        '/start_sysprep_existing_vm_task',
+        '/start_sysprep_workflow',
         json={
-            'vmid': 121,
-            'hostname': 'EXIST01',
+            'template_vmid': 120,
+            'hostname': 'CLONE01',
+            'cores': 2,
+            'ram': 4096,
             'network_mode': 'dhcp',
             'administrator_password': 'password123',
             'timezone': 'UTC',

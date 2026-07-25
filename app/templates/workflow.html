@@ -13,7 +13,8 @@
     <div id="result-alert" class="alert" role="alert"></div>
     <div class="d-grid gap-2">
         <a href="{{ url_for('index') }}" class="btn btn-primary">Back to Template Selection</a>
-        <button id="power-on-btn" class="btn btn-success" style="display: none;">Power On VM</button>
+        <a id="existing-vms-link" href="{{ url_for('reconfigure_existing_vm') }}" class="btn btn-outline-primary" style="display: none;">Existing VMs (Sysprep later)</a>
+        <button id="power-on-btn" class="btn btn-success" style="display: none;">Power On VM (WinRM path)</button>
         <button id="wait-for-ip-btn" class="btn btn-info" style="display: none;">Wait for IP</button>
     </div>
 </div>
@@ -27,6 +28,7 @@
     const resultAlert = document.getElementById('result-alert');
     const statusContainer = document.getElementById('status-container');
     const powerOnBtn = document.getElementById('power-on-btn');
+    const existingVmsLink = document.getElementById('existing-vms-link');
 
     const urlParts = window.location.pathname.split('/');
     const taskId = urlParts[urlParts.length - 1];
@@ -53,6 +55,14 @@
 
                 if (data.status === 'SUCCESS') {
                     resultAlert.classList.add('alert-success');
+                    if (data.name === 'Clone for Sysprep') {
+                        const newVmid = data.result_vmid;
+                        resultAlert.innerText = (data.message || '') +
+                            '\n\nClone finished. Power the VM on in Proxmox when ready, then open Existing VMs and choose Sysprep' +
+                            (newVmid ? ' for VMID ' + newVmid + '.' : '.');
+                        existingVmsLink.style.display = 'block';
+                        return;
+                    }
                     if (data.name === 'Clone VM') {
                         const newVmid = data.result_vmid;
                         const vmUuid = data.vm_uuid;

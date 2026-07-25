@@ -47,12 +47,16 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--base-url', default=os.environ.get('GUESTOS_URL', 'http://127.0.0.1:5001'))
     p.add_argument('--token', default=os.environ.get('GUESTOS_API_TOKEN', ''))
-    p.add_argument('--start-existing', action='store_true', help='POST start_sysprep_existing_vm_task (destructive).')
-    p.add_argument('--vmid', type=int)
+    p.add_argument(
+        '--start-workflow',
+        action='store_true',
+        help='POST start_sysprep_workflow (destructive: clone template + Sysprep).',
+    )
+    p.add_argument('--template-vmid', type=int, help='Template VMID for --start-workflow.')
     p.add_argument('--hostname', default='LABTEST01')
     p.add_argument('--remote-id', default='')
     p.add_argument('--admin-password', default='ChangeMe123!')
-    p.add_argument('--poll', action='store_true', help='Poll task_status after --start-existing.')
+    p.add_argument('--poll', action='store_true', help='Poll task_status after --start-workflow.')
     p.add_argument(
         '--poll-seconds',
         type=int,
@@ -75,7 +79,7 @@ def main():
         return 1
     print(f'OK   version: {ver["version"]}')
 
-    code, _ = _req('POST', f'{base}/start_sysprep_existing_vm_task', body={'hostname': 'X'})
+    code, _ = _req('POST', f'{base}/start_sysprep_workflow', body={'hostname': 'X'})
     if code != 401:
         print(f'FAIL expected 401 without token, got {code}', file=sys.stderr)
         return 1
@@ -85,7 +89,19 @@ def main():
         print('SKIP authenticated checks (set --token or GUESTOS_API_TOKEN)')
         return 0
 
-    if not args.start_existing:
+    # Existing-VM Sysprep must stay disabled (protect production).
+    code, body = _req(
+        'POST',
+        f'{base}/start_sysprep_existing_vm_task',
+        token=args.token,
+        body={'vmid': 1, 'hostname': 'X', 'join_domain': False},
+    )
+    if code != 403:
+        print(f'FAIL expected 403 for existing-VM sysprep, got {code} {body}', file=sys.stderr)
+        return 1
+    print('OK   existing-VM sysprep disabled (403)')
+
+    if not args.start_workflow:
         # Lightweight auth check: bad profile still proves token + CSRF skip.
         code, body = _req(
             'POST',
@@ -102,16 +118,18 @@ def main():
             print(f'FAIL token auth smoke: HTTP {code} {body}', file=sys.stderr)
             return 1
         print('OK   token accepted (got expected domain_profile 400)')
-        print('Done (pass --start-existing to enqueue a real job).')
+        print('Done (pass --start-workflow --template-vmid N to enqueue a real job).')
         return 0
 
-    if not args.vmid:
-        print('--start-existing requires --vmid', file=sys.stderr)
+    if not args.template_vmid:
+        print('--start-workflow requires --template-vmid', file=sys.stderr)
         return 1
 
     payload = {
-        'vmid': args.vmid,
+        'template_vmid': args.template_vmid,
         'hostname': args.hostname,
+        'cores': 2,
+        'ram': 4096,
         'network_mode': 'dhcp',
         'administrator_password': args.admin_password,
         'timezone': 'Central European Standard Time',
@@ -121,10 +139,10 @@ def main():
         payload['remote_id'] = args.remote_id
 
     print(
-        f"     payload: vmid={payload['vmid']} hostname={payload['hostname']} "
+        f"     payload: template_vmid={payload['template_vmid']} hostname={payload['hostname']} "
         f"network_mode=dhcp admin_password={'set' if payload['administrator_password'] else 'MISSING'}"
     )
-    code, body = _req('POST', f'{base}/start_sysprep_existing_vm_task', token=args.token, body=payload)
+    code, body = _req('POST', f'{base}/start_sysprep_workflow', token=args.token, body=payload)
     if code != 200 or not body.get('task_id'):
         print(f'FAIL start: HTTP {code} {body}', file=sys.stderr)
         return 1

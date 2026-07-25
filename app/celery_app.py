@@ -12,6 +12,8 @@ from app.proxmox import (
     get_primary_mac_address,
     _get_vm_node,
     use_pve_override,
+    require_windows_guest,
+    require_sysprep_existing_target,
 )
 from app.validators import (
     ValidationError,
@@ -115,9 +117,15 @@ def _render_sysprep_files(data):
 
 
 def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
-    """Write the answer file and post-setup scripts into the guest."""
+    """Write the answer file and post-setup scripts into the guest.
+
+    ``setup.ps1`` is stored under ``C:\\ProgramData\\GuestOS\\`` because Sysprep
+    ``/generalize`` often removes ``C:\\Windows\\Setup\\Scripts`` (observed on
+    Windows Server 2019). Unattend FirstLogonCommands invokes the ProgramData
+    copy; SetupComplete.cmd is still written as a best-effort secondary path.
+    """
     write_file_to_guest(vmid, unattended_xml, r'C:\Windows\System32\Sysprep\unattended.xml')
-    write_file_to_guest(vmid, setup_ps1, r'C:\Windows\Setup\Scripts\setup.ps1')
+    write_file_to_guest(vmid, setup_ps1, r'C:\ProgramData\GuestOS\setup.ps1')
     write_file_to_guest(vmid, setup_complete, r'C:\Windows\Setup\Scripts\SetupComplete.cmd')
 
 
@@ -125,26 +133,21 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
                            expected_domain=None, timeout=None, on_progress=None):
     """Best-effort post-sysprep verification via the QEMU guest agent (no WinRM).
 
-    Reads back the hostname and an IPv4 address (the specific ``expected_ip`` for
-    static configs, or any routable address for DHCP), and — when a domain join
-    was requested — the domain membership. Returns a human-readable summary
-    string; never raises (verification issues should not fail an otherwise
-    successful workflow).
-
-    Missing IP is reported clearly (e.g. no DHCP on the segment) and does **not**
-    keep the task pending — DHCP only gets a short look; static waits longer for
-    the configured address to appear.
+    Returns ``(summary, ok)``. ``ok`` is False when a required static IP never
+    appears or the hostname does not match — callers should treat that as failure
+    for static customization.
     """
     # DHCP: brief check only — no lease must not look like a hang.
-    # Static: give the guest more time to apply the address from setup.ps1.
+    # Static: give the guest more time to apply the address from setup.ps1
+    # (FirstLogonCommands runs after AutoLogon).
     if timeout is None:
-        timeout = 600 if expected_ip else 45
+        timeout = 900 if expected_ip else 45
     poll = 15 if expected_ip else 5
 
     proxmox = get_proxmox_api()
     node = _get_vm_node(vmid)
     if not proxmox or not node:
-        return "verification skipped (VM not found)"
+        return "verification skipped (VM not found)", False
 
     def _progress(msg):
         if on_progress:
@@ -197,16 +200,19 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
         f"({'ok' if hostname_ok else 'expected ' + str(expected_hostname)})"
     ]
 
+    ip_ok = True
     if expected_ip:
         if found_ip:
             parts.append(f"IP {expected_ip} present")
         else:
             parts.append(f"IP not assigned (expected {expected_ip} not visible)")
+            ip_ok = False
     else:
         if found_ip:
             parts.append(f"DHCP IP={found_ip}")
         else:
             parts.append("IP not assigned (no DHCP lease detected)")
+            # DHCP lease absence is informational — guest may be offline from DHCP.
 
     if expected_domain:
         domain_info = "unknown"
@@ -219,7 +225,8 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
             app.logger.warning(f"Could not read domain membership for VM {vmid}: {e}")
         parts.append(f"domain[{expected_domain}]: {domain_info}")
 
-    return "; ".join(parts)
+    ok = hostname_ok and ip_ok
+    return "; ".join(parts), ok
 
 
 def _guest_agent_responsive(proxmox, node, vmid):
@@ -355,12 +362,19 @@ def sysprep_workflow_task(self, task_id, data):
             try:
                 # 0. Validate user-supplied network + domain values before templating.
                 try:
+                    require_windows_guest(data['template_vmid'])
                     _validate_sysprep_network(data)
                     _prepare_domain_join(data)
                 except ValidationError as e:
                     task = Task.query.get(task_id)
                     task.status = 'FAILURE'
                     task.message = f"Invalid sysprep input: {e}"
+                    db.session.commit()
+                    return
+                except ValueError as e:
+                    task = Task.query.get(task_id)
+                    task.status = 'FAILURE'
+                    task.message = str(e)
                     db.session.commit()
                     return
 
@@ -420,7 +434,7 @@ def sysprep_workflow_task(self, task_id, data):
                     return
 
                 update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
-                verify_summary = _verify_sysprep_result(
+                verify_summary, verify_ok = _verify_sysprep_result(
                     new_vmid,
                     data.get('hostname'),
                     expected_ip=None if data.get('use_dhcp') else data.get('ip_address'),
@@ -429,9 +443,17 @@ def sysprep_workflow_task(self, task_id, data):
                 )
 
                 task = Task.query.get(task_id)
-                task.status = 'SUCCESS'
-                task.progress = 100
-                task.message = f"Sysprep workflow for {data['hostname']} completed. Verify: {verify_summary}"
+                if verify_ok:
+                    task.status = 'SUCCESS'
+                    task.progress = 100
+                    task.message = f"Sysprep workflow for {data['hostname']} completed. Verify: {verify_summary}"
+                else:
+                    task.status = 'FAILURE'
+                    task.progress = 100
+                    task.message = (
+                        f"Sysprep finished but verification failed for {data['hostname']}: "
+                        f"{verify_summary}"
+                    )
                 db.session.commit()
 
             except Exception as e:
@@ -449,6 +471,14 @@ def sysprep_existing_vm_task(self, task_id, data):
             try:
                 # 0. Resolve the primary NIC MAC (so setup.ps1 can target the adapter
                 #    reliably) and validate all user-supplied network values.
+                try:
+                    require_sysprep_existing_target(vmid)
+                except ValueError as e:
+                    task = Task.query.get(task_id)
+                    task.status = 'FAILURE'
+                    task.message = str(e)
+                    db.session.commit()
+                    return
                 mac = get_primary_mac_address(vmid)
                 if mac:
                     data['primary_mac_address'] = mac
@@ -492,7 +522,7 @@ def sysprep_existing_vm_task(self, task_id, data):
                     return
 
                 update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
-                verify_summary = _verify_sysprep_result(
+                verify_summary, verify_ok = _verify_sysprep_result(
                     vmid,
                     data.get('hostname'),
                     expected_ip=None if data.get('use_dhcp') else data.get('ip_address'),
@@ -501,9 +531,17 @@ def sysprep_existing_vm_task(self, task_id, data):
                 )
 
                 task = Task.query.get(task_id)
-                task.status = 'SUCCESS'
-                task.progress = 100
-                task.message = f"Sysprep for VM {vmid} completed. Verify: {verify_summary}"
+                if verify_ok:
+                    task.status = 'SUCCESS'
+                    task.progress = 100
+                    task.message = f"Sysprep for VM {vmid} completed. Verify: {verify_summary}"
+                else:
+                    task.status = 'FAILURE'
+                    task.progress = 100
+                    task.message = (
+                        f"Sysprep finished but verification failed for VM {vmid}: "
+                        f"{verify_summary}"
+                    )
                 db.session.commit()
 
             except Exception as e:

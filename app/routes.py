@@ -1,7 +1,7 @@
 from flask import render_template, request, Response, redirect, url_for, json, jsonify, flash
 from app import app, db, celery, login_manager, csrf
-from app.proxmox import get_template_vms, get_network_bridges, clone_vm_task, power_on_vm_task, wait_for_guest_agent_and_ip_task, reconfigure_vm_network_task, get_manageable_vms, get_vm_current_ip, prepare_reconfigure_task, get_vm_details, select_winrm_ip
-from app.celery_app import sysprep_workflow_task, sysprep_existing_vm_task
+from app.proxmox import get_template_vms, get_network_bridges, clone_vm_task, power_on_vm_task, wait_for_guest_agent_and_ip_task, reconfigure_vm_network_task, get_manageable_vms, get_vm_current_ip, prepare_reconfigure_task, get_vm_details, select_winrm_ip, require_windows_guest, require_sysprep_template, require_sysprep_existing_target, is_proxmox_template, use_pve_override
+from app.celery_app import sysprep_workflow_task
 from app.models import Task, User
 from app.api_auth import login_or_api_token_required, with_session_csrf
 from app.remotes import resolve_pve_remote
@@ -253,11 +253,56 @@ def index():
     templates = get_template_vms()
     return render_template('index.html', templates=templates)
 
+def _reject_non_windows_template(template_vmid):
+    """Flash + redirect home when template_vmid is missing or not Windows."""
+    if not template_vmid:
+        flash('Missing template_vmid')
+        return redirect(url_for('index'))
+    try:
+        require_windows_guest(template_vmid)
+    except ValueError as e:
+        flash(str(e))
+        return redirect(url_for('index'))
+    return None
+
+
+def _reject_non_sysprep_template(template_vmid):
+    """Flash + redirect home unless VMID is a Windows Proxmox template (golden image)."""
+    if not template_vmid:
+        flash('Missing template_vmid')
+        return redirect(url_for('index'))
+    try:
+        require_sysprep_template(template_vmid)
+    except ValueError as e:
+        flash(str(e))
+        return redirect(url_for('index'))
+    return None
+
 @app.route('/select', methods=['POST'])
 @login_required
 def select_template():
     template_vmid = request.form.get('template_vmid')
-    return render_template('clone.html', template_vmid=template_vmid, domain_profiles=app.config['DOMAIN_PROFILES'])
+    purpose = (request.form.get('purpose') or 'winrm').strip()
+    # Sysprep customization always uses the golden-image wizard (clone + sysprep).
+    if purpose == 'sysprep_now' or purpose == 'sysprep_later':
+        rejected = _reject_non_sysprep_template(template_vmid)
+        if rejected:
+            return rejected
+        return redirect(url_for('sysprep_form', template_vmid=template_vmid))
+    rejected = _reject_non_windows_template(template_vmid)
+    if rejected:
+        return rejected
+    if not is_proxmox_template(template_vmid):
+        flash(f'VMID {template_vmid} is not a Proxmox template.')
+        return redirect(url_for('index'))
+    if purpose not in ('winrm',):
+        purpose = 'winrm'
+    return render_template(
+        'clone.html',
+        template_vmid=template_vmid,
+        purpose=purpose,
+        domain_profiles=app.config['DOMAIN_PROFILES'],
+    )
 
 @app.route('/start_clone_task', methods=['POST'], endpoint='start_clone_task_endpoint')
 @login_required
@@ -270,10 +315,19 @@ def start_clone_task():
         ram = int(data.get('ram'))
         bridge = app.config['PRIMARY_BRIDGE']
         vlan = data.get('vlan')
+        purpose = (data.get('purpose') or 'winrm').strip()
+        if purpose not in ('winrm', 'sysprep_later'):
+            purpose = 'winrm'
 
         task_id = str(uuid.uuid4())
         vm_uuid = str(uuid.uuid4()) # Generate unique VM identifier
-        task = Task(id=task_id, name='Clone VM', description=f'Cloning VM {hostname} from template {template_vmid}', vm_uuid=vm_uuid)
+        if purpose == 'sysprep_later':
+            task_name = 'Clone for Sysprep'
+            task_desc = f'Cloning VM {hostname} from template {template_vmid} (sysprep later)'
+        else:
+            task_name = 'Clone VM'
+            task_desc = f'Cloning VM {hostname} from template {template_vmid}'
+        task = Task(id=task_id, name=task_name, description=task_desc, vm_uuid=vm_uuid)
         
         try:
             db.session.add(task)
@@ -347,13 +401,14 @@ def workflow(task_id):
 @app.route('/sysprep_form', methods=['GET', 'POST'])
 @login_required
 def sysprep_form():
+    """Golden-image path: Windows template → clone → Sysprep (VMware-style)."""
     if request.method == 'GET':
         template_vmid = request.args.get('template_vmid')
-        if not template_vmid:
-            flash('Missing template_vmid')
-            return redirect(url_for('index'))
     else:
         template_vmid = request.form.get('template_vmid')
+    rejected = _reject_non_sysprep_template(template_vmid)
+    if rejected:
+        return rejected
     remote_id = (request.values.get('remote_id') or request.args.get('remote_id') or '').strip()
     bridges = get_network_bridges()
     return render_template(
@@ -377,6 +432,15 @@ def start_sysprep_workflow():
     if not ok:
         return err
 
+    template_vmid = data.get('template_vmid')
+    if not template_vmid:
+        return _json_field_error('template_vmid is required.', template_vmid='Required.')
+    with use_pve_override(data.get('_pve')):
+        try:
+            require_sysprep_template(template_vmid)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
     task_id = str(uuid.uuid4())
     vm_uuid = str(uuid.uuid4())
     hostname = data.get('hostname')
@@ -389,41 +453,67 @@ def start_sysprep_workflow():
 
     return jsonify({'task_id': task_id})
 
+@app.route('/clone_form')
+@login_required
+def clone_form():
+    """Deep-link: WinRM clone from a Windows template (legacy sysprep_later → full customize)."""
+    template_vmid = request.args.get('template_vmid')
+    purpose = (request.args.get('purpose') or 'winrm').strip()
+    remote_id = (request.args.get('remote_id') or '').strip()
+    # Old PDM/bookmarks: sysprep_later → full clone+Sysprep wizard (golden image path).
+    if purpose == 'sysprep_later':
+        return redirect(url_for(
+            'sysprep_form',
+            template_vmid=template_vmid,
+            remote_id=remote_id or None,
+        ))
+    rejected = _reject_non_windows_template(template_vmid)
+    if rejected:
+        return rejected
+    if not is_proxmox_template(template_vmid):
+        flash(f'VMID {template_vmid} is not a Proxmox template.')
+        return redirect(url_for('index'))
+    if purpose not in ('winrm',):
+        purpose = 'winrm'
+    return render_template(
+        'clone.html',
+        template_vmid=template_vmid,
+        purpose=purpose,
+        domain_profiles=app.config['DOMAIN_PROFILES'],
+    )
+
+
 @app.route('/sysprep_existing_vm_form/<vmid>')
 @login_required
 def sysprep_existing_vm_form(vmid):
-    vm_details = get_vm_details(vmid)
-    if not vm_details:
-        return "VM not found", 404
+    """Disabled: in-place Sysprep risks production VMs. Templates → clone+Sysprep."""
     remote_id = (request.args.get('remote_id') or '').strip()
-    return render_template(
-        'sysprep_existing_vm.html',
-        vm=vm_details,
-        domain_profiles=sanitized_domain_profiles(),
-        remote_id=remote_id,
+    if is_proxmox_template(vmid):
+        flash(
+            f'VMID {vmid} is a template. Starting Clone + Sysprep '
+            '(golden image → clone → customize).'
+        )
+        return redirect(url_for(
+            'sysprep_form',
+            template_vmid=vmid,
+            remote_id=remote_id or None,
+        ))
+    flash(
+        'In-place Sysprep of existing VMs is disabled to protect production guests. '
+        'Use a Windows template with Clone + Sysprep.'
     )
+    return redirect(url_for('index'))
 
 @app.route('/start_sysprep_existing_vm_task', methods=['POST'])
 @csrf.exempt
 @login_or_api_token_required
 @with_session_csrf
 def start_sysprep_existing_vm_task():
+    """Always reject: in-place Sysprep of existing/production VMs is not allowed."""
     data = request.json or {}
-    ok, err = resolve_domain_join_from_request(data)
-    if not ok:
-        return err
-    ok, err = resolve_pve_remote(data, _json_field_error)
-    if not ok:
-        return err
-
     vmid = data.get('vmid')
-    hostname = data.get('hostname')
-    task_id = str(uuid.uuid4())
-
-    task = Task(id=task_id, name='Sysprep Existing VM', description=f'Starting Sysprep for VM {vmid} ({hostname})')
-    db.session.add(task)
-    db.session.commit()
-
-    sysprep_existing_vm_task.delay(task_id, data)
-
-    return jsonify({'task_id': task_id})
+    try:
+        require_sysprep_existing_target(vmid or '?')
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 403
+    return jsonify({'error': 'In-place Sysprep is disabled.'}), 403

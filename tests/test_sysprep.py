@@ -64,6 +64,10 @@ def test_unattend_sets_hostname_and_timezone():
     xml = xml.decode()
     assert '<ComputerName>WINSRV19-01</ComputerName>' in xml
     assert '<TimeZone>Central European Standard Time</TimeZone>' in xml
+    assert 'FirstLogonCommands' in xml
+    assert r'C:\ProgramData\GuestOS\setup.ps1' in xml
+    assert '<AutoLogon>' in xml
+    assert 'net user Administrator /active:yes' in xml
 
 
 def test_setup_ps1_contains_network_config():
@@ -78,6 +82,10 @@ def test_setup_ps1_contains_network_config():
     assert "@('10.0.5.1', '8.8.8.8')" in ps1
     # MAC is normalized to dash-separated uppercase inside PowerShell.
     assert "'BC:24:11:AA:BB:CC'.Replace(':', '-').ToUpper()" in ps1
+    # Server-safe static path: address and default route are separate.
+    assert 'New-NetRoute' in ps1
+    assert '-DefaultGateway' not in ps1
+    assert r"C:\ProgramData\GuestOS\setup.log" in ps1
 
 
 def test_setup_ps1_enables_admin_and_removes_other_local_users():
@@ -91,13 +99,13 @@ def test_setup_ps1_enables_admin_and_removes_other_local_users():
     assert 'keepLocalUsers' in ps1
 
 
-def test_setup_complete_invokes_setup_ps1():
+def test_setup_complete_invokes_programdata_setup_ps1():
     data = _base_data()
     with flask_app.app_context():
         _validate_sysprep_network(data)
         _xml, _ps1, cmd = _render_sysprep_files(data)
     cmd = cmd.decode()
-    assert 'setup.ps1' in cmd
+    assert r'C:\ProgramData\GuestOS\setup.ps1' in cmd
     assert 'powershell.exe' in cmd
 
 

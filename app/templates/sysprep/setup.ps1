@@ -10,6 +10,11 @@
 
 $ErrorActionPreference = 'Stop'
 
+New-Item -ItemType Directory -Force -Path 'C:\ProgramData\GuestOS' | Out-Null
+try {
+    Start-Transcript -Path 'C:\ProgramData\GuestOS\setup.log' -Append | Out-Null
+} catch {}
+
 $mac = '{{ primary_mac_address | default("", true) }}'.Replace(':', '-').ToUpper()
 
 # Select the target adapter by MAC; fall back to the first physical adapter so a
@@ -28,8 +33,16 @@ $ifIndex = $adapter.ifIndex
 Write-Output "[setup.ps1] Using adapter '$($adapter.Name)' (ifIndex $ifIndex, MAC $($adapter.MacAddress))."
 
 # Clear any existing IPv4 address / default route first so re-runs are idempotent.
-Remove-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
-Remove-NetRoute     -InterfaceIndex $ifIndex -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
+Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -notlike '127.*' } |
+    ForEach-Object {
+        Remove-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+    }
+Get-NetRoute -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' -or $_.NextHop -ne '0.0.0.0' } |
+    ForEach-Object {
+        Remove-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix $_.DestinationPrefix -Confirm:$false -ErrorAction SilentlyContinue
+    }
 
 {% if use_dhcp %}
 Write-Output "[setup.ps1] Enabling DHCP on ifIndex $ifIndex."
@@ -40,8 +53,7 @@ Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @({% for d 
 {% else %}
 Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses
 {% endif %}
-# Remove-NetIPAddress above clears the old lease; enabling DHCP alone often does
-# not request a new one. Renew so the guest is not left without an IPv4 address.
+# Clearing addresses above drops the lease; renew so the guest is not left without IPv4.
 Write-Output "[setup.ps1] Renewing DHCP lease on '$($adapter.Name)'."
 cmd /c "ipconfig /renew `"$($adapter.Name)`"" 2>&1 | Out-String | Write-Output
 for ($i = 0; $i -lt 12; $i++) {
@@ -63,8 +75,32 @@ $prefix  = {{ netmask_cidr }}
 $gateway = '{{ gateway }}'
 $dns     = @({% for d in dns_list %}'{{ d }}'{% if not loop.last %}, {% endif %}{% endfor %})
 Write-Output "[setup.ps1] Static IP=$ip/$prefix GW=$gateway DNS=$($dns -join ',')"
-Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Disabled
-New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $ip -PrefixLength $prefix -DefaultGateway $gateway | Out-Null
+Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Disabled -ErrorAction SilentlyContinue
+# Server 2016/2019: combining -DefaultGateway with New-NetIPAddress often fails when a
+# residual default route exists. Set address and route as separate steps with retries.
+$configured = $false
+for ($i = 0; $i -lt 5 -and -not $configured; $i++) {
+    try {
+        $existing = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -eq $ip }
+        if (-not $existing) {
+            New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $ip -PrefixLength $prefix -ErrorAction Stop | Out-Null
+        }
+        $route = Get-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+            Where-Object { $_.NextHop -eq $gateway } | Select-Object -First 1
+        if (-not $route) {
+            New-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -NextHop $gateway -ErrorAction Stop | Out-Null
+        }
+        $configured = $true
+        Write-Output "[setup.ps1] Static addressing applied."
+    } catch {
+        Write-Output "[setup.ps1] Static IP attempt $($i + 1) failed: $($_.Exception.Message)"
+        Start-Sleep -Seconds 5
+    }
+}
+if (-not $configured) {
+    throw "Failed to apply static IP $ip/$prefix via gateway $gateway."
+}
 if ($dns.Count -gt 0) {
     Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $dns
 } else {
@@ -103,6 +139,13 @@ Get-LocalUser | Where-Object { $keepLocalUsers -notcontains $_.Name } | ForEach-
     }
 }
 
+# One-shot AutoLogon from unattend — clear so later reboots stay at the logon screen.
+try {
+    $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+    Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value '0' -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path $winlogon -Name DefaultPassword -ErrorAction SilentlyContinue
+} catch {}
+
 {% if join_domain %}
 # --- Domain join -----------------------------------------------------------
 # Credentials arrive as Base64(JSON{domain,username,password[,ou]}) so nothing
@@ -135,8 +178,12 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 
 if ($joined) {
     Write-Output "[setup.ps1] Restarting to finalize domain membership."
+    try { Stop-Transcript | Out-Null } catch {}
     shutdown /r /t 5
 } else {
     Write-Output "[setup.ps1] Domain join FAILED after retries; leaving machine in workgroup."
+    try { Stop-Transcript | Out-Null } catch {}
 }
+{% else %}
+try { Stop-Transcript | Out-Null } catch {}
 {% endif %}

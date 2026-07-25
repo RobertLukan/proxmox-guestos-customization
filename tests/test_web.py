@@ -73,7 +73,11 @@ def _login(client):
     client.post('/login', data={'password': 'changeme', 'csrf_token': token})
 
 
-def test_index_uses_base_layout_with_csrf_meta(client):
+def test_index_uses_base_layout_with_csrf_meta(client, monkeypatch):
+    monkeypatch.setattr(
+        'app.routes.get_template_vms',
+        lambda: [{'vmid': 100, 'name': 'Win11-Template'}],
+    )
     _login(client)
     resp = client.get('/')
     assert resp.status_code == 200
@@ -83,6 +87,53 @@ def test_index_uses_base_layout_with_csrf_meta(client):
     assert b'Proxmox GuestOS' in resp.data
     assert b'app-version' in resp.data
     assert b'v' + client.application.config['APP_VERSION'].encode() in resp.data
+    assert b'Clone + Sysprep (customize)' in resp.data
+    assert b'Clone &amp; Configure (WinRM only)' in resp.data
+    assert b'Windows template' in resp.data
+    assert b'In-place Sysprep' in resp.data or b'not allowed' in resp.data
+
+
+def test_select_template_sysprep_later_redirects_to_sysprep_form(client, monkeypatch):
+    monkeypatch.setattr('app.routes.require_sysprep_template', lambda vmid, **kw: 'win11')
+    monkeypatch.setattr(
+        'app.routes.get_network_bridges',
+        lambda: [{'iface': 'vmbr0'}],
+    )
+    monkeypatch.setattr(
+        'app.routes.get_template_vms',
+        lambda: [{'vmid': 100, 'name': 'Win11-Template'}],
+    )
+    _login(client)
+    token = _csrf_token(client.get('/').data)
+    resp = client.post('/select', data={
+        'template_vmid': '100',
+        'purpose': 'sysprep_later',
+        'csrf_token': token,
+    }, follow_redirects=True)
+    assert resp.status_code == 200
+    assert b'name="template_vmid"' in resp.data
+    assert b'value="100"' in resp.data
+    assert b'data-wizard' in resp.data
+
+
+def test_select_template_rejects_non_windows(client, monkeypatch):
+    monkeypatch.setattr(
+        'app.routes.get_template_vms',
+        lambda: [{'vmid': 100, 'name': 'Win11-Template'}],
+    )
+    def _reject(vmid, **_kw):
+        raise ValueError(f'VM {vmid} is not a Windows guest (ostype="l26").')
+    monkeypatch.setattr('app.routes.require_windows_guest', _reject)
+    monkeypatch.setattr('app.routes.is_proxmox_template', lambda vmid, **kw: True)
+    _login(client)
+    token = _csrf_token(client.get('/').data)
+    resp = client.post('/select', data={
+        'template_vmid': '50',
+        'purpose': 'winrm',
+        'csrf_token': token,
+    }, follow_redirects=True)
+    assert resp.status_code == 200
+    assert b'not a Windows guest' in resp.data
 
 
 def test_login_shows_app_version(client):
@@ -97,6 +148,7 @@ def test_sysprep_form_wizard_includes_csrf_and_payload_fields(client, monkeypatc
         'app.routes.get_network_bridges',
         lambda: [{'iface': 'vmbr0'}],
     )
+    monkeypatch.setattr('app.routes.require_sysprep_template', lambda vmid, **kw: 'win11')
     _login(client)
     token = _csrf_token(client.get('/').data)
     resp = client.post('/sysprep_form', data={
@@ -120,34 +172,30 @@ def test_sysprep_form_wizard_includes_csrf_and_payload_fields(client, monkeypatc
     assert b'wizard-panel' in html
 
 
-def test_sysprep_existing_wizard_includes_payload_fields(client, monkeypatch):
+def test_sysprep_existing_form_redirects_non_template(client, monkeypatch):
+    monkeypatch.setattr('app.routes.is_proxmox_template', lambda vmid, **kw: False)
     monkeypatch.setattr(
-        'app.routes.get_vm_details',
-        lambda vmid: {'vmid': int(vmid), 'name': 'EXISTING01'},
+        'app.routes.get_template_vms',
+        lambda: [{'vmid': 100, 'name': 'Win11-Template'}],
     )
     _login(client)
-    resp = client.get('/sysprep_existing_vm_form/121')
+    resp = client.get('/sysprep_existing_vm_form/121', follow_redirects=True)
     assert resp.status_code == 200
-    html = resp.data
-    assert b'csrf-token' in html
-    assert b'data-wizard' in html
-    assert b'name="vmid"' in html
-    assert b'name="hostname"' in html
-    assert b'name="administrator_password"' in html
-    assert b'id="administrator_password_confirm"' in html
-    assert b'name="network_mode"' in html
-    assert b'id="use_domain_profile_credentials"' in html
+    assert b'disabled' in resp.data.lower() or b'not allowed' in resp.data.lower() or b'protect' in resp.data.lower()
 
 
-def test_sysprep_existing_deep_link_includes_remote_id(client, monkeypatch):
+def test_sysprep_existing_form_template_redirects_to_sysprep_form(client, monkeypatch):
+    monkeypatch.setattr('app.routes.is_proxmox_template', lambda vmid, **kw: True)
+    monkeypatch.setattr('app.routes.require_sysprep_template', lambda vmid, **kw: 'win10')
     monkeypatch.setattr(
-        'app.routes.get_vm_details',
-        lambda vmid: {'vmid': int(vmid), 'name': 'EXISTING01'},
+        'app.routes.get_network_bridges',
+        lambda: [{'iface': 'vmbr0'}],
     )
     _login(client)
-    resp = client.get('/sysprep_existing_vm_form/121?remote_id=lab')
+    resp = client.get('/sysprep_existing_vm_form/120?remote_id=lab', follow_redirects=True)
     assert resp.status_code == 200
-    assert b'name="remote_id"' in resp.data
+    assert b'name="template_vmid"' in resp.data
+    assert b'value="120"' in resp.data
     assert b'value="lab"' in resp.data
 
 
@@ -156,6 +204,7 @@ def test_sysprep_form_get_deep_link(client, monkeypatch):
         'app.routes.get_network_bridges',
         lambda: [{'iface': 'vmbr0'}],
     )
+    monkeypatch.setattr('app.routes.require_sysprep_template', lambda vmid, **kw: 'win11')
     _login(client)
     resp = client.get('/sysprep_form?template_vmid=100&remote_id=lab')
     assert resp.status_code == 200
@@ -163,7 +212,6 @@ def test_sysprep_form_get_deep_link(client, monkeypatch):
     assert b'value="100"' in resp.data
     assert b'name="remote_id"' in resp.data
     assert b'value="lab"' in resp.data
-
 
 def test_reconfigure_network_wizard_bootstrap5_and_fields(client, monkeypatch):
     monkeypatch.setattr('app.routes.select_winrm_ip', lambda vmid: '192.168.100.10')

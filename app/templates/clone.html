@@ -2,10 +2,15 @@
 {% block title %}Clone VM{% endblock %}
 {% block content %}
 <h1>Clone VM from Template</h1>
-<p class="page-lead">Create a new VM from template {{ template_vmid }}.</p>
+{% if purpose == 'sysprep_later' %}
+<p class="page-lead">Clone only from template {{ template_vmid }}. Sysprep runs later from Existing VMs — this step does not generalize the guest.</p>
+{% else %}
+<p class="page-lead">Create a new VM from template {{ template_vmid }}, then power on and configure via WinRM when you choose.</p>
+{% endif %}
 <div id="form-alert" class="alert alert-danger" role="alert"></div>
 <form id="clone-form" novalidate>
     <input type="hidden" name="template_vmid" value="{{ template_vmid }}">
+    <input type="hidden" name="purpose" value="{{ purpose|default('winrm') }}">
     <div class="mb-3">
         <label for="hostname" class="form-label">New Hostname</label>
         <input type="text" name="hostname" id="hostname" class="form-control" required data-validate="hostname" maxlength="15">

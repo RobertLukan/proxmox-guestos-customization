@@ -137,3 +137,113 @@ def test_update_vm_tags_replaces_lifecycle_and_keeps_others(monkeypatch):
     assert 'lifecycle-ready' in tags
     assert 'lifecycle-cloning' not in tags  # previous lifecycle tag replaced
     assert 'uuid:abc' in tags  # non-lifecycle tags preserved
+
+
+def test_is_windows_ostype():
+    assert pm.is_windows_ostype('win11') is True
+    assert pm.is_windows_ostype('WIN10') is True
+    assert pm.is_windows_ostype('l26') is False
+    assert pm.is_windows_ostype(None) is False
+    assert pm.is_windows_ostype('') is False
+
+
+class _FakeConfigGet:
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    def get(self):
+        return self._cfg
+
+
+class _FakeQemuConfig:
+    def __init__(self, configs):
+        self._configs = configs
+        self.config = None
+
+    def __call__(self, vmid):
+        self.config = _FakeConfigGet(self._configs[int(vmid)])
+        return self
+
+
+class _FakeNodeConfig:
+    def __init__(self, configs):
+        self._qemu = _FakeQemuConfig(configs)
+
+    def qemu(self, vmid):
+        return self._qemu(vmid)
+
+
+class _FakeNodesConfig:
+    def __init__(self, configs):
+        self._node = _FakeNodeConfig(configs)
+
+    def __call__(self, _node):
+        return self._node
+
+
+class _FakeClusterResources:
+    def __init__(self, vms):
+        self._vms = vms
+
+    def get(self, type=None):
+        return self._vms
+
+
+class _FakeProxmoxTemplates:
+    def __init__(self, vms, configs):
+        self.cluster = type('C', (), {'resources': _FakeClusterResources(vms)})()
+        self.nodes = _FakeNodesConfig(configs)
+
+
+def test_get_template_vms_windows_only(monkeypatch):
+    vms = [
+        {'vmid': 100, 'name': 'win-tpl', 'template': 1, 'node': 'pve'},
+        {'vmid': 101, 'name': 'linux-tpl', 'template': 1, 'node': 'pve'},
+        {'vmid': 102, 'name': 'not-tpl', 'template': 0, 'node': 'pve'},
+    ]
+    configs = {
+        100: {'ostype': 'win11'},
+        101: {'ostype': 'l26'},
+        102: {'ostype': 'win10'},
+    }
+    monkeypatch.setattr(pm, 'get_proxmox_api', lambda: _FakeProxmoxTemplates(vms, configs))
+    out = pm.get_template_vms()
+    assert [t['vmid'] for t in out] == [100]
+
+
+def test_require_windows_guest_rejects_linux(monkeypatch):
+    configs = {50: {'ostype': 'l26'}}
+    monkeypatch.setattr(pm, 'get_proxmox_api', lambda: _FakeProxmoxTemplates([], configs))
+    monkeypatch.setattr(pm, '_get_vm_node', lambda vmid: 'pve')
+    try:
+        pm.require_windows_guest(50)
+        assert False, 'expected ValueError'
+    except ValueError as e:
+        assert 'not a Windows guest' in str(e)
+
+
+def test_require_sysprep_existing_always_rejects(monkeypatch):
+    try:
+        pm.require_sysprep_existing_target(121)
+        assert False, 'expected ValueError'
+    except ValueError as e:
+        assert 'disabled' in str(e).lower()
+
+
+def test_require_sysprep_template_rejects_non_template(monkeypatch):
+    vms = [{'vmid': 121, 'name': 'prod', 'template': 0, 'node': 'pve'}]
+    configs = {121: {'ostype': 'win10'}}
+    monkeypatch.setattr(pm, 'get_proxmox_api', lambda: _FakeProxmoxTemplates(vms, configs))
+    try:
+        pm.require_sysprep_template(121)
+        assert False, 'expected ValueError'
+    except ValueError as e:
+        assert 'not a proxmox template' in str(e).lower()
+
+
+def test_require_sysprep_template_accepts_windows_template(monkeypatch):
+    vms = [{'vmid': 120, 'name': 'tpl', 'template': 1, 'node': 'pve'}]
+    configs = {120: {'ostype': 'win10'}}
+    monkeypatch.setattr(pm, 'get_proxmox_api', lambda: _FakeProxmoxTemplates(vms, configs))
+    monkeypatch.setattr(pm, '_get_vm_node', lambda vmid: 'pve')
+    assert pm.require_sysprep_template(120) == 'win10'
