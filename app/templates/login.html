@@ -1,49 +1,16 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login</title>
-    <link href="{{ url_for('static', filename='css/bootstrap-5.3.0.min.css') }}" rel="stylesheet">
-    <style>
-        body {
-            background-color: #f8f9fa;
-        }
-        .container {
-            margin-top: 50px;
-            max-width: 500px;
-        }
-        .card {
-            padding: 30px;
-            border-radius: 15px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="card shadow-sm">
-            <h1 class="text-center mb-4">Login</h1>
-            {% with messages = get_flashed_messages() %}
-            {% if messages %}
-                <div class="alert alert-warning" role="alert">
-                    {% for message in messages %}
-                    {{ message }}
-                    {% endfor %}
-                </div>
-            {% endif %}
-            {% endwith %}
-            <form method="POST" action="{{ url_for('login') }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <div class="mb-3">
-                    <label for="password" class="form-label">Password</label>
-                    <input type="password" class="form-control" id="password" name="password" required>
-                </div>
-                <div class="d-grid">
-                    <button type="submit" class="btn btn-primary">Login</button>
-                </div>
-            </form>
-        </div>
+{% extends "base.html" %}
+{% block title %}Login{% endblock %}
+{% block content %}
+<h1>Login</h1>
+<p class="page-lead">Sign in to manage Proxmox guest customization.</p>
+<form method="POST" action="{{ url_for('login') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="mb-3">
+        <label for="password" class="form-label">Password</label>
+        <input type="password" class="form-control" id="password" name="password" required autocomplete="current-password">
     </div>
-    <script src="{{ url_for('static', filename='js/bootstrap-5.3.0.bundle.min.js') }}"></script>
-</body>
-</html>
+    <div class="d-grid">
+        <button type="submit" class="btn btn-primary">Login</button>
+    </div>
+</form>
+{% endblock %}

@@ -24,6 +24,14 @@ def _as_request_bool(value, default=False):
     return str(value).strip().lower() in ('true', '1', 't', 'yes', 'on')
 
 
+def _json_field_error(message, **field_errors):
+    """Additive 400 JSON: keep ``error`` string and optional ``errors`` map."""
+    payload = {'error': message}
+    if field_errors:
+        payload['errors'] = field_errors
+    return jsonify(payload), 400
+
+
 def apply_domain_profile_network(data):
     """Apply DNS / VLAN from the selected domain profile (independent of join).
 
@@ -39,10 +47,8 @@ def apply_domain_profile_network(data):
         return True, None
     profile = app.config.get('DOMAIN_PROFILES', {}).get(profile_name)
     if not profile:
-        return False, (
-            jsonify({'error': f'Unknown domain profile: {profile_name!r}'}),
-            400,
-        )
+        msg = f'Unknown domain profile: {profile_name!r}'
+        return False, _json_field_error(msg, domain_profile=msg)
     if not (data.get('dns_servers') or '').strip() and profile.get('dns_servers'):
         data['dns_servers'] = profile.get('dns_servers')
     if data.get('vlan') in (None, '', 'None') and profile.get('vlan') is not None:
@@ -79,10 +85,11 @@ def resolve_domain_join_from_request(data):
         profile_name = (data.get('domain_profile') or '').strip()
         profile = app.config.get('DOMAIN_PROFILES', {}).get(profile_name)
         if not profile:
-            return False, (
-                jsonify({'error': f'Unknown domain profile: {profile_name!r}'}),
-                400,
-            )
+            if not profile_name:
+                msg = 'Select a domain profile when using profile credentials.'
+            else:
+                msg = f'Unknown domain profile: {profile_name!r}'
+            return False, _json_field_error(msg, domain_profile=msg)
         data['domain_name'] = profile.get('domain_name')
         data['domain_username'] = profile.get('domain_username')
         data['domain_password'] = profile.get('domain_password')
