@@ -1,0 +1,155 @@
+/*!
+ * GuestOS shared styles — light polish inspired by migrate-engine density.
+ * Keeps Bootstrap 5; adds constrained layout, muted hints, wizard chrome.
+ */
+:root {
+  --gos-bg: #f4f6f8;
+  --gos-panel: #ffffff;
+  --gos-border: #dde3ea;
+  --gos-text: #1a2332;
+  --gos-muted: #6b7c93;
+  --gos-accent: #0d6efd;
+  --gos-radius: 10px;
+  --gos-max: 40rem;
+  --gos-max-wide: 48rem;
+}
+
+body.app-body {
+  background-color: var(--gos-bg);
+  color: var(--gos-text);
+  min-height: 100vh;
+}
+
+.app-navbar {
+  background: var(--gos-panel);
+  border-bottom: 1px solid var(--gos-border);
+}
+
+.app-navbar .navbar-brand {
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--gos-text);
+}
+
+.app-version {
+  font-size: 0.75rem;
+  color: var(--gos-muted);
+  font-variant-numeric: tabular-nums;
+  user-select: all;
+}
+
+.app-main {
+  max-width: var(--gos-max);
+  margin: 0 auto;
+  padding: 1.75rem 1rem 3rem;
+}
+
+.app-main.app-main-wide {
+  max-width: var(--gos-max-wide);
+}
+
+.app-card {
+  background: var(--gos-panel);
+  border: 1px solid var(--gos-border);
+  border-radius: var(--gos-radius);
+  padding: 1.5rem 1.5rem 1.25rem;
+  box-shadow: 0 1px 2px rgba(26, 35, 50, 0.04);
+}
+
+.app-card h1 {
+  font-size: 1.35rem;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.app-card .page-lead {
+  color: var(--gos-muted);
+  font-size: 0.9rem;
+  margin-bottom: 1.25rem;
+}
+
+.app-card h2,
+.app-card .step-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+}
+
+.form-label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--gos-text);
+}
+
+.form-text,
+.field-hint {
+  font-size: 0.8rem;
+  color: var(--gos-muted);
+}
+
+/* Wizard */
+.wizard-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+  padding: 0;
+  list-style: none;
+}
+
+.wizard-steps li {
+  flex: 1 1 0;
+  min-width: 5.5rem;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--gos-muted);
+  padding: 0.4rem 0.35rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.wizard-steps li.is-active {
+  color: var(--gos-accent);
+  border-color: rgba(13, 110, 253, 0.35);
+  background: rgba(13, 110, 253, 0.06);
+  font-weight: 600;
+}
+
+.wizard-steps li.is-done {
+  color: var(--gos-text);
+}
+
+.wizard-panel[hidden] {
+  display: none !important;
+}
+
+.wizard-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--gos-border);
+}
+
+.review-dl {
+  font-size: 0.9rem;
+}
+
+.review-dl dt {
+  color: var(--gos-muted);
+  font-weight: 500;
+  font-size: 0.8rem;
+}
+
+.review-dl dd {
+  margin-bottom: 0.65rem;
+}
+
+#form-alert:empty {
+  display: none;
+}
+
+.invalid-feedback {
+  font-size: 0.8rem;
+}

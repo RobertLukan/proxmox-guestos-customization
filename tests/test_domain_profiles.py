@@ -77,6 +77,26 @@ def test_resolve_domain_join_unknown_profile(app):
     assert not ok
     response, status = err
     assert status == 400
+    body = response.get_json()
+    assert 'error' in body
+    assert 'errors' in body
+    assert 'domain_profile' in body['errors']
+
+
+def test_resolve_domain_join_requires_profile_when_using_profile_creds(app):
+    flask_app.config['DOMAIN_PROFILES'] = PROFILES
+    data = {
+        'join_domain': True,
+        'use_domain_profile_credentials': True,
+        'domain_profile': '',
+    }
+    with flask_app.app_context():
+        ok, err = resolve_domain_join_from_request(data)
+    assert not ok
+    response, status = err
+    assert status == 400
+    body = response.get_json()
+    assert 'domain_profile' in body.get('errors', {})
 
 
 def test_resolve_domain_join_manual_credentials(app):

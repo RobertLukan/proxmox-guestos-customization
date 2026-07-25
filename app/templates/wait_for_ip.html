@@ -1,88 +1,67 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Waiting for VM IP...</title>
-    <link href="{{ url_for('static', filename='css/bootstrap-5.3.0.min.css') }}" rel="stylesheet">
-    <style>
-        body {
-            background-color: #f8f9fa;
-        }
-        .container {
-            margin-top: 50px;
-        }
-        .card {
-            padding: 30px;
-            border-radius: 15px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="card shadow-sm">
-            <h1 class="text-center mb-4">Waiting for VM to boot and get IP</h1>
-            <div id="status-container">
-                <div class="progress mb-3">
-                    <div id="progress-bar" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
-                </div>
-                <p id="status-message" class="text-center"></p>
-            </div>
-            <div id="result-container" style="display: none;">
-                <div id="result-alert" class="alert" role="alert"></div>
-                <div class="d-grid gap-2">
-                    <a href="{{ url_for('index') }}" class="btn btn-primary">Back to Template Selection</a>
-                    <button id="configure-network-btn" class="btn btn-success" style="display: none;">Configure Network</button>
-                </div>
-            </div>
-        </div>
+{% extends "base.html" %}
+{% block title %}Waiting for VM IP{% endblock %}
+{% block content %}
+<h1>Waiting for VM to boot and get IP</h1>
+<p class="page-lead">Polling guest agent status for this VM.</p>
+<div id="status-container">
+    <div class="progress mb-3" style="height: 0.65rem;">
+        <div id="progress-bar" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
     </div>
+    <p id="status-message" class="text-muted mb-0"></p>
+</div>
+<div id="result-container" style="display: none;">
+    <div id="result-alert" class="alert" role="alert"></div>
+    <div class="d-grid gap-2">
+        <a href="{{ url_for('index') }}" class="btn btn-primary">Back to Template Selection</a>
+        <button id="configure-network-btn" class="btn btn-success" style="display: none;">Configure Network</button>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+    const progressBar = document.getElementById('progress-bar');
+    const statusMessage = document.getElementById('status-message');
+    const resultContainer = document.getElementById('result-container');
+    const resultAlert = document.getElementById('result-alert');
+    const statusContainer = document.getElementById('status-container');
 
-    <script>
-        const progressBar = document.getElementById('progress-bar');
-        const statusMessage = document.getElementById('status-message');
-        const resultContainer = document.getElementById('result-container');
-        const resultAlert = document.getElementById('result-alert');
-        const statusContainer = document.getElementById('status-container');
+    const urlParams = new URLSearchParams(window.location.search);
+    const vmid = urlParams.get('vmid');
 
-        const urlParams = new URLSearchParams(window.location.search);
-        const vmid = urlParams.get('vmid');
+    const eventSource = new EventSource(`{{ url_for('start_wait_for_ip_task') }}?vmid=${vmid}`);
 
-        const eventSource = new EventSource(`{{ url_for('start_wait_for_ip_task') }}?vmid=${vmid}`);
+    eventSource.onmessage = function (event) {
+        const data = JSON.parse(event.data);
+        progressBar.style.width = data.progress + '%';
+        progressBar.setAttribute('aria-valuenow', data.progress);
+        statusMessage.innerText = data.message;
 
-        eventSource.onmessage = function(event) {
-            const data = JSON.parse(event.data);
-            progressBar.style.width = data.progress + '%';
-            progressBar.setAttribute('aria-valuenow', data.progress);
-            statusMessage.innerText = data.message;
-
-            if (data.progress === 100) {
-                eventSource.close();
-                statusContainer.style.display = 'none';
-                resultContainer.style.display = 'block';
-                if (data.success) {
-                    resultAlert.classList.add('alert-success');
-                    if (data.ip_address) {
-                        resultAlert.innerText = `VM is online with IP: ${data.ip_address}`;
-                        const configureNetworkBtn = document.getElementById('configure-network-btn');
-                        configureNetworkBtn.style.display = 'block';
-                        configureNetworkBtn.onclick = function() {
-                            // Redirect to network configuration page, passing VMID and IP
-                            window.location.href = `{{ url_for('reconfigure_network', vmid=vmid, vm_uuid='', temp_ip_address=data.ip_address, primary_mac_address='') }}`;
-                        };
-                    }
-                } else {
-                    resultAlert.classList.add('alert-danger');
-                    resultAlert.innerText = data.message;
-                }
-            }
-        };
-
-        eventSource.onerror = function(err) {
-            console.error("EventSource failed:", err);
+        if (data.progress === 100) {
             eventSource.close();
-        };
-    </script>
-    <script src="{{ url_for('static', filename='js/bootstrap-5.3.0.bundle.min.js') }}"></script>
-</body>
-</html>
+            statusContainer.style.display = 'none';
+            resultContainer.style.display = 'block';
+            if (data.success) {
+                resultAlert.classList.add('alert-success');
+                if (data.ip_address) {
+                    resultAlert.innerText = `VM is online with IP: ${data.ip_address}`;
+                    const configureNetworkBtn = document.getElementById('configure-network-btn');
+                    configureNetworkBtn.style.display = 'block';
+                    configureNetworkBtn.onclick = function () {
+                        window.location.href = `{{ url_for('reconfigure_network', vmid=vmid, vm_uuid='', temp_ip_address=data.ip_address, primary_mac_address='') }}`;
+                    };
+                }
+            } else {
+                resultAlert.classList.add('alert-danger');
+                resultAlert.innerText = data.message;
+            }
+        }
+    };
+
+    eventSource.onerror = function (err) {
+        console.error('EventSource failed:', err);
+        eventSource.close();
+    };
+})();
+</script>
+{% endblock %}

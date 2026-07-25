@@ -62,3 +62,119 @@ def test_change_password_rejects_wrong_current(client):
     })
     assert resp.status_code == 200  # stays on the form
     assert b'Current password is incorrect' in resp.data
+
+
+def _login(client):
+    token = _csrf_token(client.get('/login').data)
+    client.post('/login', data={'password': 'changeme', 'csrf_token': token})
+
+
+def test_index_uses_base_layout_with_csrf_meta(client):
+    _login(client)
+    resp = client.get('/')
+    assert resp.status_code == 200
+    assert b'csrf-token' in resp.data
+    assert b'js/csrf.js' in resp.data
+    assert b'css/app.css' in resp.data
+    assert b'Proxmox GuestOS' in resp.data
+    assert b'app-version' in resp.data
+    assert b'v' + client.application.config['APP_VERSION'].encode() in resp.data
+
+
+def test_login_shows_app_version(client):
+    resp = client.get('/login')
+    assert resp.status_code == 200
+    assert b'app-version' in resp.data
+    assert client.application.config['APP_VERSION'].encode() in resp.data
+
+
+def test_sysprep_form_wizard_includes_csrf_and_payload_fields(client, monkeypatch):
+    monkeypatch.setattr(
+        'app.routes.get_network_bridges',
+        lambda: [{'iface': 'vmbr0'}],
+    )
+    _login(client)
+    token = _csrf_token(client.get('/').data)
+    resp = client.post('/sysprep_form', data={
+        'template_vmid': '100',
+        'csrf_token': token,
+    })
+    assert resp.status_code == 200
+    html = resp.data
+    assert b'csrf-token' in html
+    assert b'data-wizard' in html
+    assert b'name="hostname"' in html
+    assert b'name="administrator_password"' in html
+    assert b'id="administrator_password_confirm"' in html
+    assert b'name="network_mode"' in html
+    assert b'name="ip_address"' in html
+    assert b'name="domain_profile"' in html
+    assert b'id="join_domain_checkbox"' in html
+    assert b'id="use_domain_profile_credentials"' in html
+    assert b'js/validate.js' in html
+    assert b'js/wizard.js' in html
+    assert b'wizard-panel' in html
+
+
+def test_sysprep_existing_wizard_includes_payload_fields(client, monkeypatch):
+    monkeypatch.setattr(
+        'app.routes.get_vm_details',
+        lambda vmid: {'vmid': int(vmid), 'name': 'EXISTING01'},
+    )
+    _login(client)
+    resp = client.get('/sysprep_existing_vm_form/121')
+    assert resp.status_code == 200
+    html = resp.data
+    assert b'csrf-token' in html
+    assert b'data-wizard' in html
+    assert b'name="vmid"' in html
+    assert b'name="hostname"' in html
+    assert b'name="administrator_password"' in html
+    assert b'id="administrator_password_confirm"' in html
+    assert b'name="network_mode"' in html
+    assert b'id="use_domain_profile_credentials"' in html
+
+
+def test_reconfigure_network_wizard_bootstrap5_and_fields(client, monkeypatch):
+    monkeypatch.setattr('app.routes.select_winrm_ip', lambda vmid: '192.168.100.10')
+    _login(client)
+    resp = client.get('/reconfigure_network/121/test-uuid?temp_ip_address=10.0.0.5&primary_mac_address=aa:bb:cc:dd:ee:ff')
+    assert resp.status_code == 200
+    html = resp.data
+    assert b'csrf-token' in html
+    assert b'data-wizard' in html
+    assert b'bootstrap-5.3.0' in html or b'bootstrap-5.3.0.min.css' in html
+    assert b'form-group' not in html  # BS4 class island removed
+    assert b'name="new_ip_address"' in html
+    assert b'name="netmask"' in html
+    assert b'name="gateway"' in html
+    assert b'id="use_predefined_winrm"' in html
+    assert b'id="join_domain_checkbox"' in html
+    assert b'id="remove_temp_interface"' in html
+    assert b'js/forms.js' in html
+
+
+def test_start_sysprep_unknown_profile_returns_field_errors(client, monkeypatch):
+    class _Task:
+        @staticmethod
+        def delay(*args, **kwargs):
+            return None
+
+    monkeypatch.setattr('app.routes.sysprep_workflow_task', _Task)
+    _login(client)
+    # CSRF for JSON: Flask-WTF expects header from csrf.js; use cookie/token pattern
+    token = _csrf_token(client.get('/').data)
+    resp = client.post(
+        '/start_sysprep_workflow',
+        json={
+            'hostname': 'TESTHOST',
+            'join_domain': True,
+            'use_domain_profile_credentials': True,
+            'domain_profile': 'does-not-exist',
+        },
+        headers={'X-CSRFToken': token},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert 'error' in body
+    assert body.get('errors', {}).get('domain_profile')
