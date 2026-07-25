@@ -1,9 +1,18 @@
 import os
 import json
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Application version (VERSION file at repo root; overridable via APP_VERSION).
+_VERSION_FILE = Path(__file__).resolve().parent / 'VERSION'
+try:
+    _file_version = _VERSION_FILE.read_text(encoding='utf-8').strip()
+except OSError:
+    _file_version = '0.0.0'
+APP_VERSION = os.environ.get('APP_VERSION', _file_version) or _file_version
 
 # Helper for parsing boolean environment variables.
 def _env_bool(name, default=False):

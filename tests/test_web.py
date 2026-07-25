@@ -77,6 +77,15 @@ def test_index_uses_base_layout_with_csrf_meta(client):
     assert b'js/csrf.js' in resp.data
     assert b'css/app.css' in resp.data
     assert b'Proxmox GuestOS' in resp.data
+    assert b'app-version' in resp.data
+    assert b'v' + client.application.config['APP_VERSION'].encode() in resp.data
+
+
+def test_login_shows_app_version(client):
+    resp = client.get('/login')
+    assert resp.status_code == 200
+    assert b'app-version' in resp.data
+    assert client.application.config['APP_VERSION'].encode() in resp.data
 
 
 def test_sysprep_form_wizard_includes_csrf_and_payload_fields(client, monkeypatch):
@@ -95,6 +104,8 @@ def test_sysprep_form_wizard_includes_csrf_and_payload_fields(client, monkeypatc
     assert b'csrf-token' in html
     assert b'data-wizard' in html
     assert b'name="hostname"' in html
+    assert b'name="administrator_password"' in html
+    assert b'id="administrator_password_confirm"' in html
     assert b'name="network_mode"' in html
     assert b'name="ip_address"' in html
     assert b'name="domain_profile"' in html
@@ -118,6 +129,8 @@ def test_sysprep_existing_wizard_includes_payload_fields(client, monkeypatch):
     assert b'data-wizard' in html
     assert b'name="vmid"' in html
     assert b'name="hostname"' in html
+    assert b'name="administrator_password"' in html
+    assert b'id="administrator_password_confirm"' in html
     assert b'name="network_mode"' in html
     assert b'id="use_domain_profile_credentials"' in html
 
