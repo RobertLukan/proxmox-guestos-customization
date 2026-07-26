@@ -153,3 +153,22 @@ body.app-body {
 .invalid-feedback {
   font-size: 0.8rem;
 }
+
+/* Brief password peek (eye toggle) */
+.password-reveal-group .password-reveal-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.5rem;
+  color: var(--gos-muted);
+}
+
+.password-reveal-group .password-reveal-btn[aria-pressed="true"] {
+  color: var(--gos-accent);
+  border-color: rgba(13, 110, 253, 0.45);
+  background: rgba(13, 110, 253, 0.06);
+}
+
+.password-reveal-group .password-reveal-btn:focus-visible {
+  box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.25);
+}
