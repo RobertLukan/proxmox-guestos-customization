@@ -1,8 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Select VM to Reconfigure{% endblock %}
+{% block title %}Select VM to Reconfigure (Legacy){% endblock %}
 {% block main_class %}app-main-wide{% endblock %}
 {% block content %}
 <h1>Select a VM to Reconfigure</h1>
+<div class="alert alert-warning" role="alert">
+    <strong>Legacy / deprecated.</strong> WinRM reconfigure is kept for older lifecycle-tagged clones.
+    New guests should use <a href="{{ url_for('index') }}" class="alert-link">Clone + Sysprep</a> from a Windows template.
+</div>
 <p class="page-lead">
     WinRM network/hostname changes for lifecycle-tagged clones only.
     Sysprep customization is available only from a <strong>Windows template</strong> (Clone + Sysprep).
@@ -16,7 +20,7 @@
             <span class="text-muted small">VMID {{ vm.vmid }}</span>
         </div>
         <div class="btn-group">
-            <button type="button" class="btn btn-primary btn-sm reconfigure-btn" data-vmid="{{ vm.vmid }}" data-uuid="{{ vm.uuid }}">Reconfigure</button>
+            <button type="button" class="btn btn-outline-secondary btn-sm reconfigure-btn" data-vmid="{{ vm.vmid }}" data-uuid="{{ vm.uuid }}">Reconfigure (legacy)</button>
         </div>
     </li>
     {% endfor %}

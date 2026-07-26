@@ -1,8 +1,12 @@
 # PDM / machine API integration (sysprep-only)
 
-GuestOS stays one app. **Standalone** keeps WinRM reconfigure in the browser UI.
-**PDM / integrators** use the machine API for **template → clone → Sysprep** only
-(VMware-style guest OS customization). In-place Sysprep of existing/production VMs is disabled.
+GuestOS is one app. **Sysprep customize** (template → clone → guest agent) is the
+supported path for PDM and new standalone use.
+
+**WinRM reconfigure** remains in the standalone browser UI as **legacy / deprecated**
+(lifecycle-tagged clones only). Do not build PDM or new automation on WinRM routes.
+
+In-place Sysprep of existing/production VMs is disabled.
 
 Current app version is in [`VERSION`](../VERSION) and `GET /api/version`.
 
@@ -40,7 +44,7 @@ docker compose up -d --build
 
 `POST /start_sysprep_existing_vm_task` returns **403** (disabled — protects production VMs).
 
-Do **not** call reconfigure/WinRM routes from PDM.
+Do **not** call reconfigure/WinRM routes from PDM (legacy standalone only; deprecated).
 
 ## One-click launch (browser)
 

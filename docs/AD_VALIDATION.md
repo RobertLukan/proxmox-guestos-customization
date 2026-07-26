@@ -2,16 +2,15 @@
 
 GuestOS can join clones to AD from `setup.ps1` using credentials from `DOMAIN_PROFILES_JSON` (or form fields when profile credentials are disabled).
 
-## Lab status (2026-07-25)
+## Lab status (2026-07-26)
 
 | Check | Result |
 |-------|--------|
 | Profile JSON loads | OK (2 profiles in lab `.env`) |
 | Profile shape (domain, user, password) | OK |
-| Placeholder detection | **Both lab profiles are placeholders** (`corp.example.com`, `lab.local`) |
-| DNS for placeholder domains | FAIL as expected (`No address associated` / `Name or service not known`) |
-| DNS server IPs listed in profiles | Resolve as bare IPs (OK) |
-| Live Sysprep+join on Server 2019 / Win11 | **Blocked** until real AD profiles replace placeholders |
+| Placeholder detection | Lab may still have placeholders — replace before production |
+| Live Sysprep+join on **Windows Server 2019** | **OK** (confirmed) |
+| Live Sysprep+join on Windows 11 | Run when convenient; code path same as Server 2019 |
 
 Dry-run command used:
 

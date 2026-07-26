@@ -179,6 +179,7 @@ def change_password():
 @app.route('/reconfigure_network/<vmid>/<vm_uuid>')
 @login_required
 def reconfigure_network(vmid, vm_uuid):
+    """Legacy WinRM reconfigure form (deprecated; prefer Clone + Sysprep)."""
     temp_ip_address = request.args.get('temp_ip_address')
     primary_mac_address = request.args.get('primary_mac_address') # New parameter
 
@@ -200,6 +201,7 @@ def reconfigure_network(vmid, vm_uuid):
 @app.route('/start_reconfigure_task', methods=['POST'], endpoint='start_reconfigure_task_endpoint')
 @login_required
 def start_reconfigure_task():
+    """Legacy WinRM reconfigure start (deprecated; prefer Clone + Sysprep)."""
     data = request.json
     vmid = data.get('vmid')
     vm_uuid = data.get('vm_uuid')
@@ -279,6 +281,7 @@ def start_prepare_reconfigure_task():
 @app.route('/reconfigure_existing_vm')
 @login_required
 def reconfigure_existing_vm():
+    """Legacy WinRM VM picker (deprecated; prefer Clone + Sysprep from a template)."""
     vms = get_manageable_vms()
     return render_template('reconfigure_selection.html', vms=vms)
 

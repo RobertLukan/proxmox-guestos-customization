@@ -221,7 +221,7 @@ def get_primary_mac_address(vmid, node=None, proxmox=None):
     return match.group(1) if match else None
 
 def select_winrm_ip(vmid, node=None, proxmox=None):
-    """Return a VM's IPv4 address suitable for the WinRM connection.
+    """Return a VM IPv4 for the legacy WinRM path (deprecated; prefer Sysprep).
 
     Picks the first non-loopback, non-APIPA (169.254.x.x) IPv4 address reported
     by the guest agent. When ``WINRM_SUBNET`` is configured, only an address
@@ -730,6 +730,7 @@ def wait_for_guest_agent_and_ip_task(self, task_id, vmid, vm_uuid):
 
 @celery.task(bind=True)
 def reconfigure_vm_network_task(self, task_id, vmid, vm_uuid, temp_ip_address, new_ip_address, netmask, gateway, dns_servers, winrm_username, winrm_password, primary_mac_address, remove_temp_interface, join_domain, domain_name, domain_username, domain_password, vlan):
+    """Legacy WinRM network/hostname reconfigure (deprecated; prefer Sysprep)."""
     with app.app_context():
         task = Task.query.get(task_id)
         if not task: return

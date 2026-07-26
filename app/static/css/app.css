@@ -172,3 +172,36 @@ body.app-body {
 .password-reveal-group .password-reveal-btn:focus-visible {
   box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.25);
 }
+
+/* Collapsed legacy / deprecated WinRM actions on the home page */
+.legacy-panel {
+  border: 1px dashed var(--gos-border);
+  border-radius: var(--gos-radius);
+  padding: 0.65rem 0.85rem 0.85rem;
+  background: rgba(255, 193, 7, 0.06);
+}
+
+.legacy-summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: var(--gos-muted);
+  user-select: none;
+}
+
+.legacy-summary::-webkit-details-marker {
+  display: none;
+}
+
+.legacy-summary::before {
+  content: "▸";
+  color: var(--gos-muted);
+  font-size: 0.75rem;
+}
+
+.legacy-panel[open] .legacy-summary::before {
+  content: "▾";
+}

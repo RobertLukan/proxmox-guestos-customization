@@ -13,8 +13,8 @@
     <div id="result-alert" class="alert" role="alert"></div>
     <div class="d-grid gap-2">
         <a href="{{ url_for('index') }}" class="btn btn-primary">Back to Template Selection</a>
-        <a id="existing-vms-link" href="{{ url_for('reconfigure_existing_vm') }}" class="btn btn-outline-primary" style="display: none;">Existing VMs (Sysprep later)</a>
-        <button id="power-on-btn" class="btn btn-success" style="display: none;">Power On VM (WinRM path)</button>
+        <a id="existing-vms-link" href="{{ url_for('reconfigure_existing_vm') }}" class="btn btn-outline-secondary" style="display: none;">Existing VMs (legacy WinRM)</a>
+        <button id="power-on-btn" class="btn btn-outline-secondary" style="display: none;">Power On VM (legacy WinRM)</button>
         <button id="wait-for-ip-btn" class="btn btn-info" style="display: none;">Wait for IP</button>
     </div>
 </div>

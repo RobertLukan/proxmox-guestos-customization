@@ -72,11 +72,12 @@ except json.JSONDecodeError:
     print("Warning: Could not decode DOMAIN_PROFILES_JSON. Using empty profiles.")
     DOMAIN_PROFILES = {}
 
-# WinRM Credentials
+# WinRM credentials (legacy / deprecated standalone reconfigure path).
+# Prefer Sysprep customize; these are unused by the PDM machine API.
 WINRM_USERNAME = os.environ.get('WINRM_USERNAME', 'Administrator')
 WINRM_PASSWORD = os.environ.get('WINRM_PASSWORD')
 
-# WinRM Subnet for finding the temporary IP
+# WinRM temp-NIC subnet (legacy). Leave unset if you only use Sysprep.
 WINRM_SUBNET = os.environ.get('WINRM_SUBNET')
 
 # Network Configuration

@@ -88,7 +88,9 @@ def test_index_uses_base_layout_with_csrf_meta(client, monkeypatch):
     assert b'app-version' in resp.data
     assert b'v' + client.application.config['APP_VERSION'].encode() in resp.data
     assert b'Clone + Sysprep (customize)' in resp.data
+    assert b'Legacy' in resp.data
     assert b'Clone &amp; Configure (WinRM only)' in resp.data
+    assert b'deprecated' in resp.data
     assert b'Windows template' in resp.data
     assert b'In-place Sysprep' in resp.data or b'not allowed' in resp.data
 
