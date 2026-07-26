@@ -138,20 +138,118 @@ def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
     write_file_to_guest(vmid, setup_complete, r'C:\Windows\Setup\Scripts\SetupComplete.cmd')
 
 
+def _parse_domain_membership(raw):
+    """Parse Domain / PartOfDomain from guest command output.
+
+    Accepts WMIC ``/value`` lines, PowerShell ``ConvertTo-Json``, or a simple
+    ``Domain\\tPartOfDomain`` line.
+    """
+    if not raw:
+        return None, None
+    text = raw.strip()
+    domain = None
+    part = None
+
+    # JSON from ConvertTo-Json (single object).
+    if text.startswith('{'):
+        try:
+            obj = json.loads(text)
+            domain = obj.get('Domain') or obj.get('domain')
+            part = obj.get('PartOfDomain')
+            if part is None:
+                part = obj.get('partOfDomain')
+        except Exception:  # noqa: BLE001
+            pass
+
+    if domain is None or part is None:
+        for line in text.replace('\r', '\n').split('\n'):
+            line = line.strip()
+            if not line or '=' not in line:
+                continue
+            key, _, val = line.partition('=')
+            key = key.strip().lower()
+            val = val.strip()
+            if key == 'domain':
+                domain = val
+            elif key == 'partofdomain':
+                part = val
+
+    if part is not None and not isinstance(part, bool):
+        part_s = str(part).strip().lower()
+        if part_s in ('true', '1', 'yes'):
+            part = True
+        elif part_s in ('false', '0', 'no'):
+            part = False
+        else:
+            part = None
+
+    return domain, part
+
+
+def _domains_match(actual, expected):
+    """True if guest Domain matches expected FQDN/NetBIOS (case-insensitive)."""
+    if not actual or not expected:
+        return False
+    a = str(actual).strip().lower().rstrip('.')
+    e = str(expected).strip().lower().rstrip('.')
+    if a == e:
+        return True
+    # Accept NetBIOS vs FQDN (LAB vs lab.test).
+    if a.split('.')[0] == e.split('.')[0]:
+        return True
+    return False
+
+
+def _read_domain_membership(vmid):
+    """Query domain membership via guest agent (PowerShell CIM; no WMIC).
+
+    WMIC is removed on modern Windows 11 images, so CIM/JSON is the primary path.
+    Returns ``(domain_name_or_None, part_of_domain_or_None)``.
+    """
+    # Prefer JSON for reliable parsing.
+    ps = (
+        'powershell.exe -NoProfile -NonInteractive -Command '
+        '"Get-CimInstance Win32_ComputerSystem | '
+        'Select-Object Domain,PartOfDomain | ConvertTo-Json -Compress"'
+    )
+    try:
+        out = run_command_in_guest(vmid, ps)
+        domain, part = _parse_domain_membership(out)
+        if domain is not None or part is not None:
+            return domain, part
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning(f"PowerShell domain query failed on VM {vmid}: {e}")
+
+    # Fallback: legacy WMIC (Server 2019 / older images).
+    try:
+        out = run_command_in_guest(
+            vmid, 'cmd.exe /c wmic computersystem get Domain,PartOfDomain /value')
+        return _parse_domain_membership(out)
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning(f"WMIC domain query failed on VM {vmid}: {e}")
+        return None, None
+
+
 def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
                            expected_domain=None, timeout=None, on_progress=None):
     """Best-effort post-sysprep verification via the QEMU guest agent (no WinRM).
 
     Returns ``(summary, ok)``. ``ok`` is False when a required static IP never
-    appears or the hostname does not match — callers should treat that as failure
-    for static customization.
+    appears, the hostname does not match, or an expected domain join is not
+    observed — callers should treat that as failure for static customization.
     """
     # DHCP: brief check only — no lease must not look like a hang.
     # Static: give the guest more time to apply the address from setup.ps1
     # (FirstLogonCommands runs after AutoLogon).
+    # Domain join triggers an extra reboot after Add-Computer — allow more time.
     if timeout is None:
-        timeout = 900 if expected_ip else 45
-    poll = 15 if expected_ip else 5
+        if expected_domain:
+            timeout = 1200
+        elif expected_ip:
+            timeout = 900
+        else:
+            timeout = 45
+    poll = 15 if (expected_ip or expected_domain) else 5
 
     proxmox = get_proxmox_api()
     node = _get_vm_node(vmid)
@@ -175,6 +273,8 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
 
     found_ip = None
     polls = max(1, timeout // poll)
+    domain_name = None
+    part_of_domain = None
     for i in range(polls):
         try:
             mode = f"static {expected_ip}" if expected_ip else "DHCP"
@@ -190,14 +290,41 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
             if expected_ip:
                 if expected_ip in ips:
                     found_ip = expected_ip
-                    break
             elif ips:
                 found_ip = ips[0]
-                break
+
+            domain_ready = True
+            if expected_domain:
+                _progress(
+                    f"Checking domain membership ({expected_domain}) "
+                    f"({i + 1}/{polls})..."
+                )
+                domain_name, part_of_domain = _read_domain_membership(vmid)
+                domain_ready = bool(
+                    part_of_domain and _domains_match(domain_name, expected_domain)
+                )
+
+            ip_ready = (found_ip is not None) if expected_ip else True
+            if ip_ready and domain_ready:
+                # DHCP (no static expect): exit once we have a lease, or finish
+                # polls if domain-only and membership already confirmed.
+                if expected_ip or expected_domain:
+                    break
+                if found_ip:
+                    break
         except Exception as e:  # noqa: BLE001
             app.logger.info(f"VM {vmid} agent not ready during verify: {e}")
         if i + 1 < polls:
             time.sleep(poll)
+
+    # Refresh hostname after possible domain-join reboot.
+    if expected_domain:
+        try:
+            out = run_command_in_guest(vmid, 'cmd.exe /c hostname')
+            if out:
+                actual_hostname = out.strip()
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning(f"Could not re-read hostname for VM {vmid}: {e}")
 
     hostname_ok = (
         actual_hostname is not None
@@ -223,18 +350,29 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
             parts.append("IP not assigned (no DHCP lease detected)")
             # DHCP lease absence is informational — guest may be offline from DHCP.
 
+    domain_ok = True
     if expected_domain:
-        domain_info = "unknown"
-        try:
-            out = run_command_in_guest(
-                vmid, 'cmd.exe /c "wmic computersystem get Domain,PartOfDomain /value"')
-            if out:
-                domain_info = ' '.join(out.split())
-        except Exception as e:  # noqa: BLE001
-            app.logger.warning(f"Could not read domain membership for VM {vmid}: {e}")
-        parts.append(f"domain[{expected_domain}]: {domain_info}")
+        if part_of_domain and _domains_match(domain_name, expected_domain):
+            parts.append(f"domain[{expected_domain}]: joined ({domain_name})")
+            domain_ok = True
+        elif part_of_domain is False:
+            parts.append(
+                f"domain[{expected_domain}]: not joined "
+                f"(workgroup/domain={domain_name or '?'})"
+            )
+            domain_ok = False
+        elif domain_name and _domains_match(domain_name, expected_domain):
+            # Domain string matches but PartOfDomain missing/odd — treat as ok.
+            parts.append(f"domain[{expected_domain}]: joined ({domain_name})")
+            domain_ok = True
+        else:
+            parts.append(
+                f"domain[{expected_domain}]: unknown "
+                f"(read Domain={domain_name or '?'}, PartOfDomain={part_of_domain})"
+            )
+            domain_ok = False
 
-    ok = hostname_ok and ip_ok
+    ok = hostname_ok and ip_ok and domain_ok
     return "; ".join(parts), ok
 
 

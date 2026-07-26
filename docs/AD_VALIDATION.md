@@ -10,7 +10,7 @@ GuestOS can join clones to AD from `setup.ps1` using credentials from `DOMAIN_PR
 | Profile shape (domain, user, password) | OK |
 | Placeholder detection | Lab may still have placeholders — replace before production |
 | Live Sysprep+join on **Windows Server 2019** | **OK** (confirmed) |
-| Live Sysprep+join on Windows 11 | Run when convenient; code path same as Server 2019 |
+| Live Sysprep+join on **Windows 11** | **OK** (confirmed; verify uses PowerShell CIM — WMIC removed on Win11) |
 
 Dry-run command used:
 
