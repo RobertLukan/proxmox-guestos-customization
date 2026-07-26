@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Customization Jobs{% endblock %}
+{% block main_class %}app-main-wide{% endblock %}
+{% block content %}
+<h1>Customization Jobs</h1>
+<p class="page-lead">History of GuestOS clone+Sysprep (and related) jobs. The PDM <em>GuestOS</em> tab reads the same ledger via <code>/api/tasks</code>.</p>
+{% if tasks %}
+<div class="table-responsive">
+<table class="table table-sm align-middle">
+  <thead>
+    <tr>
+      <th>Started</th>
+      <th>Name</th>
+      <th>Hostname</th>
+      <th>Remote</th>
+      <th>Template</th>
+      <th>Result VM</th>
+      <th>Status</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for t in tasks %}
+    <tr>
+      <td class="text-nowrap small">{{ t.timestamp }}</td>
+      <td>{{ t.name }}</td>
+      <td>{{ t.hostname or '—' }}</td>
+      <td>{{ t.remote_id or '—' }}</td>
+      <td>{% if t.template_vmid %}{{ t.template_vmid }}{% else %}—{% endif %}</td>
+      <td>{% if t.result_vmid %}{{ t.result_vmid }}{% else %}—{% endif %}</td>
+      <td>
+        <span class="badge text-bg-{% if t.status == 'SUCCESS' %}success{% elif t.status == 'FAILURE' %}danger{% else %}primary{% endif %}">
+          {{ t.status }}{% if t.status not in ('SUCCESS','FAILURE') %} {{ t.progress }}%{% endif %}
+        </span>
+      </td>
+      <td><a class="btn btn-outline-secondary btn-sm" href="{{ url_for('workflow', task_id=t.id) }}">Open</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<div class="alert alert-info">No jobs recorded yet.</div>
+{% endif %}
+<div class="d-grid">
+  <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Back to Home</a>
+</div>
+{% endblock %}

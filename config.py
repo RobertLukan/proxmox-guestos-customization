@@ -105,3 +105,19 @@ CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://localho
 
 # Reverse Proxy Setup
 BEHIND_REVERSE_PROXY = os.environ.get('BEHIND_REVERSE_PROXY', 'False').lower() in ('true', '1', 't')
+
+# Optional URL path prefix when mounted under a subpath (e.g. /guestos).
+# Leave empty when the reverse proxy serves GuestOS at the site root.
+GUESTOS_PATH_PREFIX = (os.environ.get('GUESTOS_PATH_PREFIX') or '').strip().rstrip('/')
+
+# Comma-separated browser Origins allowed to call the machine API (PDM UI).
+# Use * to allow any Origin (lab only). Empty disables CORS headers.
+GUESTOS_CORS_ORIGINS = (os.environ.get('GUESTOS_CORS_ORIGINS') or '*').strip()
+
+# Shared HMAC secret for PDM → GuestOS one-click launch URLs (short-lived).
+# Must match the value baked into the PDM UI fork (ui/src/guestos.rs).
+GUESTOS_LAUNCH_SECRET = (os.environ.get('GUESTOS_LAUNCH_SECRET') or '').strip()
+try:
+    GUESTOS_LAUNCH_TTL = int(os.environ.get('GUESTOS_LAUNCH_TTL') or '300')
+except ValueError:
+    GUESTOS_LAUNCH_TTL = 300

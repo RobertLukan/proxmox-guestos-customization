@@ -1,0 +1,23 @@
+# Caddy terminates TLS and proxies to the GuestOS web container.
+# Lab uses a self-signed cert (browsers will warn once).
+#
+# Generate / refresh certs (on the GuestOS host):
+#   ./deploy/caddy/gen-selfsigned.sh 192.168.123.197
+
+{
+	auto_https off
+	admin off
+}
+
+# Bind all interfaces; cert SAN must include the public IP/DNS operators use.
+:443 {
+	tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem
+	encode gzip
+	reverse_proxy web:5001
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+}

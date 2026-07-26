@@ -22,25 +22,25 @@ class Task(db.Model):
     id = db.Column(db.String(36), primary_key=True) # Celery task ID
     name = db.Column(db.String(128), index=True)
     description = db.Column(db.String(256))
-    status = db.Column(db.String(64), default='PENDING') # PENDING, STARTED, PROGRESS, SUCCESS, FAILURE
+    status = db.Column(db.String(64), default='PENDING', index=True) # PENDING, STARTED, PROGRESS, SUCCESS, FAILURE
     progress = db.Column(db.Integer, default=0) # 0-100
     message = db.Column(db.String(512), default='')
     timestamp = db.Column(db.DateTime(timezone=True), index=True, default=_utcnow)
+    updated_at = db.Column(db.DateTime(timezone=True), index=True, default=_utcnow, onupdate=_utcnow)
     result_vmid = db.Column(db.Integer, nullable=True) # New column for VMID
     result_ip_address = db.Column(db.String(64), nullable=True) # New column for IP address
     vm_uuid = db.Column(db.String(36), nullable=True) # New column for unique VM identifier
     redirect_url = db.Column(db.String(256), nullable=True) # New column for redirection URL
+    # Customization ledger fields (PDM GuestOS jobs tab / history).
+    remote_id = db.Column(db.String(128), nullable=True, index=True)
+    template_vmid = db.Column(db.Integer, nullable=True, index=True)
+    hostname = db.Column(db.String(128), nullable=True, index=True)
 
     def __repr__(self):
         return '<Task {}> '.format(self.name)
 
-    def _timestamp_iso(self):
-        """Return the timestamp as an ISO-8601 string with a trailing 'Z'.
-
-        Handles both timezone-aware and legacy naive (assumed UTC) values so the
-        frontend contract stays stable.
-        """
-        ts = self.timestamp
+    def _timestamp_iso(self, ts):
+        """Return a timestamp as an ISO-8601 string with a trailing 'Z'."""
         if ts is None:
             return None
         if ts.tzinfo is not None:
@@ -55,15 +55,20 @@ class Task(db.Model):
             'status': self.status,
             'progress': self.progress,
             'message': self.message,
-            'timestamp': self._timestamp_iso(),
+            'timestamp': self._timestamp_iso(self.timestamp),
+            'updated_at': self._timestamp_iso(self.updated_at or self.timestamp),
             'result_vmid': self.result_vmid,
             'result_ip_address': self.result_ip_address,
-            'vm_uuid': self.vm_uuid, # Include in dict
-            'redirect_url': self.redirect_url # Include in dict
+            'vm_uuid': self.vm_uuid,
+            'redirect_url': self.redirect_url,
+            'remote_id': self.remote_id,
+            'template_vmid': self.template_vmid,
+            'hostname': self.hostname,
         }
 
     def update_status(self, status, progress=None, message=None, result_vmid=None, result_ip_address=None, vm_uuid=None, redirect_url=None):
         self.status = status
+        self.updated_at = _utcnow()
         if progress is not None:
             self.progress = progress
         if message is not None:

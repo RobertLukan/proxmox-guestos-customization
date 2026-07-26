@@ -8,19 +8,23 @@ Current app version is in [`VERSION`](../VERSION) and `GET /api/version`.
 
 ## Prerequisites
 
-1. GuestOS Compose (web + worker + Redis) reachable from the PDM host.
+1. GuestOS Compose (web + worker + Redis + **Caddy TLS**) reachable from operator browsers / PDM.
 2. Worker can reach the target Proxmox API(s).
 3. Set in `.env` (see `.env.example`):
 
 ```bash
 GUESTOS_API_TOKEN=generate-a-long-random-string
+BEHIND_REVERSE_PROXY=True
+GUESTOS_TLS_HOST=192.168.123.197
+GUESTOS_LAUNCH_SECRET=must-match-pdm-ui-bake-in
 # optional multi-cluster:
 # PVE_REMOTES_JSON={"lab":{"host":"pve.example","user":"api@pve","password":"...","verify_ssl":false}}
 ```
 
-4. Rebuild/restart after changing env:
+4. Generate lab certs and rebuild:
 
 ```bash
+./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"
 docker compose up -d --build
 ```
 
@@ -30,6 +34,7 @@ docker compose up -d --build
 |--------|------|------|
 | GET | `/api/health` | none |
 | GET | `/api/version` | none |
+| GET | `/launch` | HMAC query (`exp`, `jti`, `sig`, `template_vmid`, `remote_id`) → session |
 | POST | `/start_sysprep_workflow` | Bearer / `X-Api-Token` **or** session+CSRF |
 | GET | `/task_status/<task_id>` | Bearer / token **or** session |
 
@@ -37,26 +42,45 @@ docker compose up -d --build
 
 Do **not** call reconfigure/WinRM routes from PDM.
 
+## One-click launch (browser)
+
+PDM **Customize (GuestOS)** opens:
+
+`https://<host>/launch?template_vmid=…&remote_id=…&exp=…&jti=…&sig=…`
+
+GuestOS verifies HMAC (`GUESTOS_LAUNCH_SECRET`), creates a session, redirects to `/sysprep_form`. Tokens expire (`GUESTOS_LAUNCH_TTL`, default 300s) and are single-use.
+
+## Job history (PDM GuestOS tab)
+
+GuestOS keeps a SQLite task ledger. PDM’s **GuestOS** tab (global Remotes panel and per-PVE remote) polls:
+
+```http
+GET /api/tasks?kind=customization&limit=150
+GET /api/tasks?kind=customization&remote_id=<pdm-remote>&limit=150
+Authorization: Bearer <GUESTOS_API_TOKEN>
+```
+
+Response shape: `{ "tasks": [ { "id", "name", "status", "progress", "message", "timestamp", "updated_at", "remote_id", "template_vmid", "hostname", "result_vmid", … } ] }`.
+
+Also: `GET /api/tasks/<id>` and HTML `/jobs`. Set `GUESTOS_CORS_ORIGINS` if you restrict browser CORS (default `*`).
+
 ## Smoke check from the PDM host
 
-From a shell **on the PDM host** (or any host that can reach GuestOS):
-
 ```bash
-export GUESTOS_URL=http://guestos-host:5001
+export GUESTOS_URL=https://192.168.123.197
 export GUESTOS_API_TOKEN=your-token
 
-# Health
-curl -fsS "$GUESTOS_URL/api/health"
-curl -fsS "$GUESTOS_URL/api/version"
-
-# Or use the helper (polls optional start — default is health-only):
+curl -fk "$GUESTOS_URL/api/health"
+curl -fk "$GUESTOS_URL/api/version"
 python3 scripts/pdm_api_smoke.py --base-url "$GUESTOS_URL" --token "$GUESTOS_API_TOKEN"
 ```
+
+(Use `-k` / configure trust for the lab self-signed cert.)
 
 Example start (**template** clone + Sysprep — lab only):
 
 ```bash
-curl -fsS -X POST "$GUESTOS_URL/start_sysprep_workflow" \
+curl -fk -X POST "$GUESTOS_URL/start_sysprep_workflow" \
   -H "Authorization: Bearer $GUESTOS_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -72,61 +96,36 @@ curl -fsS -X POST "$GUESTOS_URL/start_sysprep_workflow" \
   }'
 ```
 
-Poll:
-
-```bash
-curl -fsS -H "Authorization: Bearer $GUESTOS_API_TOKEN" \
-  "$GUESTOS_URL/task_status/TASK_ID_HERE"
-```
-
-Omit `remote_id` to use default `PROXMOX_HOST` / `USER` / `PASSWORD`.
-
-## B-lite deep links (browser wizards)
-
-Operators open the golden-image wizard with a remote preselected:
-
-- **Customize from template:** `/sysprep_form?template_vmid=120&remote_id=lab` (GET; requires login)
-- Legacy existing-VM URL redirects: templates → sysprep_form; non-templates → home (blocked)
-
-These pages use the normal session cookie + CSRF. For PDM iframe later, plan a launch-token or proxy (later slice).
-
-## Phase 4 — Thin PDM UI fork (template Customize deep-link)
-
-Lab runs a forked **UI-only** package that adds **Customize (GuestOS)** on the QEMU panel
-**only when the guest is a Proxmox template**. Click opens a new tab to the clone+Sysprep
-wizard; the GuestOS API token stays on the sidecar (operator uses a normal GuestOS browser login).
-The button is hidden on ordinary VMs so production guests cannot be Sysprep'd from PDM.
+## Phase 4 — Thin PDM UI fork
 
 | Item | Value |
 |------|--------|
-| Fork (AGPL corresponding source) | https://github.com/RobertLukan/proxmox-datacenter-manager-guestos — branch `guestos-sysprep` |
-| Upstream UI pin | `proxmox/proxmox-datacenter-manager` tree matching UI **1.1.3** / package SOURCE `2b7254dc…` |
-| Installed package | `proxmox-datacenter-manager-ui` **1.1.3+guestos.3** on `pdm-lab` (apt-hold) |
-| Baked `GUESTOS_BASE` | `http://192.168.123.197:5001` (`ui/src/guestos.rs`) |
-| Deep link opened | `{GUESTOS_BASE}/sysprep_form?template_vmid={vmid}&remote_id={pdm_remote}` (e.g. `vie-1`) |
+| Fork | https://github.com/RobertLukan/proxmox-datacenter-manager-guestos — branch `guestos-sysprep` |
+| Installed package | `proxmox-datacenter-manager-ui` **1.1.3+guestos.5** (apt-hold) |
+| Baked `GUESTOS_BASE` | `https://192.168.123.197` |
+| Deep link | `{GUESTOS_BASE}/launch?…` (HMAC; skips GuestOS password) |
+| Job history | PDM **GuestOS** tab → `{GUESTOS_BASE}/api/tasks` |
 
-**Operator smoke:** PDM → remote `vie-1` → **Windows template** → **Customize (GuestOS)** → GuestOS wizard (clone + Sysprep). Log into GuestOS if prompted; do not start unless intended.
-
-**Build notes (pdm-lab):** Proxmox `devel` apt suite + `mk-build-deps` for UI Build-Depends; `PATH` without rustup (`/usr/bin` first); `cd ui && make deb`. Fat LTO needs ~8–15 GiB RAM.
+**Operator smoke:** PDM → remote `vie-1` → **Windows template** → **Customize (GuestOS)** → GuestOS wizard already logged in.
 
 ## Firewall sketch
 
-- PDM host → GuestOS `:5001` (HTTPS if you terminate TLS)
+- Operators / PDM host → GuestOS **`:443`** (TLS)
 - GuestOS worker → each PVE API port (usually 8006)
-- **No** WinRM subnet requirement for this path
+- Loopback `:5001` on GuestOS host only (debug)
 
 ## Version pinning
 
-PDM (or your notes) should record `guestos_min_version` ≥ the build you tested (e.g. `1.4.7`). Check with `GET /api/version`.
+`guestos_min_version` ≥ `1.5.0`. Check with `GET /api/version`.
 
-## Lab notes (Phase 0 / 2)
-
-Recorded against this lab (update if hosts change):
+## Lab notes
 
 | Item | Value |
 |------|--------|
 | GuestOS host | `192.168.123.197` (`guestos-lab`) |
-| GuestOS URL | `http://192.168.123.197:5001` |
+| GuestOS URL | `https://192.168.123.197` |
 | PDM host | `192.168.123.198` (`pdm-lab`) |
 | PDM remote | `vie-1` |
 | Windows templates | VMID **120** / **122** |
+
+AD join: [AD_VALIDATION.md](AD_VALIDATION.md).

@@ -6,88 +6,71 @@ Two complementary approaches:
 
 | Path | How it works | Best for |
 |------|----------------|----------|
-| **WinRM reconfigure** | Clone → temp NIC/DHCP → WinRM → apply static IP / hostname / optional domain join | Existing WinRM-ready templates |
-| **Sysprep** | Write `unattended.xml` + `SetupComplete.cmd`/`setup.ps1` via QEMU guest agent → `sysprep /generalize` → verify | New clones or existing VMs; no WinRM required for customize |
+| **Sysprep customize** | Template (golden image) → clone → guest-agent writes unattend + `setup.ps1` → `sysprep /generalize` → verify | VMware-style guest OS customization; **templates only** |
+| **WinRM reconfigure** | Clone → temp NIC/DHCP → WinRM → apply static IP / hostname / optional domain join | Lifecycle-tagged clones that need network/hostname changes **without** Sysprep |
+
+In-place Sysprep of existing/production VMs is **disabled** (protects live guests).
 
 ## Recent Improvements
 
--   **Security hardening:** eliminated PowerShell command injection (guest values validated and passed via Base64/JSON), stopped leaking WinRM/domain credentials to the browser (resolved server-side), CSRF on forms and JSON endpoints.
--   **Auth/config:** fails fast without `SECRET_KEY`, hardened session cookies, configurable Proxmox TLS verify, in-app change-password page.
--   **Sysprep (validated on Windows Server 2019 and Windows 11):** applies hostname, static or DHCP networking, DNS, optional domain join; domain profiles fill DNS/VLAN; enables Administrator and removes leftover template local users; waits for a *stable* guest agent (Win11-friendly); verifies result via guest agent (no WinRM).
--   **Packaging & CI:** `Dockerfile`, `docker-compose.yml`, `docker-compose.offline.yml` for air-gapped hosts, pinned deps, `pytest` + GitHub Actions.
--   WinRM disable-in-guest was removed (handled by Group Policy in the author’s environment).
+-   **Template-only customize:** PDM and GuestOS only run clone+Sysprep from Windows Proxmox templates (VMware-style golden image).
+-   **Static IP reliability (Server 2019 / Win11):** `setup.ps1` lives under `C:\ProgramData\GuestOS\` and is invoked by unattend **FirstLogonCommands** (Sysprep often removes `C:\Windows\Setup\Scripts`).
+-   **TLS + launch token:** Compose includes Caddy on `:443`; PDM can open a short-lived HMAC `/launch` URL that creates a GuestOS session (no second password).
+-   **Security hardening:** validated guest values, server-side domain credentials, CSRF, required `SECRET_KEY`.
+-   **Packaging & CI:** `Dockerfile`, `docker-compose.yml`, offline compose, `pytest` + GitHub Actions.
 
 ## Features
 
--   Clone VMs from Proxmox templates.
--   Reconfigure network settings on existing lifecycle-managed VMs (WinRM path).
--   Sysprep workflows for **new clones** and **existing VMs**:
+-   Clone Windows templates and run **Clone + Sysprep (customize)** in one job.
+-   WinRM reconfigure for lifecycle-tagged clones (network/hostname; no Sysprep).
+-   Sysprep applies:
     -   Hostname + timezone via answer file
-    -   **Static** or **DHCP** guest networking (IP, prefix, gateway, DNS)
-    -   Optional Active Directory join (credentials from form or domain profile; AD join not fully lab-validated yet)
-    -   Domain profiles optionally fill **DNS** and **VLAN** (same profiles as WinRM)
+    -   **Static** or **DHCP** networking (IP, prefix, gateway, DNS)
+    -   Optional Active Directory join (profile credentials server-side)
+    -   Domain profiles optionally fill **DNS** and **VLAN**
 -   Background tasks with Celery + Redis.
--   Web UI for all operations.
+-   Web UI + machine API for PDM (`/start_sysprep_workflow`, `/task_status/...`).
 
 ## Project Status
 
 **Active development.**
 
--   **WinRM reconfiguration** (clone + network reconfigure): considered stable.
--   **Sysprep customization** (hostname + static/DHCP network): validated on **Windows Server 2019** and **Windows 11** in lab. Post-sysprep verification uses the QEMU guest agent.
--   **Domain join** (both paths): implemented; treat as **not fully validated** until you test against your AD.
+-   **Sysprep customization** (hostname + static/DHCP): validated on **Windows Server 2019** and **Windows 11** in lab.
+-   **WinRM reconfiguration**: considered stable for standalone use.
+-   **Domain join**: code path implemented and dry-run validated; replace placeholder `DOMAIN_PROFILES_JSON` with real AD and run one live join before production use (see [docs/AD_VALIDATION.md](docs/AD_VALIDATION.md)).
 
 ## Workflow Overview
 
+### Sysprep path (golden image — recommended)
+
+1. Pick a **Windows Proxmox template** (ostype `win10` / `win11` / …).
+2. **Clone + Sysprep (customize)** → clone, power on, wait for a stable QEMU guest agent, write:
+    -   `C:\Windows\System32\Sysprep\unattended.xml`
+    -   `C:\ProgramData\GuestOS\setup.ps1` (survives `/generalize`)
+    -   optional `C:\Windows\Setup\Scripts\SetupComplete.cmd` (best-effort; often removed by Sysprep)
+3. Runs `sysprep /generalize /oobe /shutdown` with the answer file.
+4. After OOBE, **FirstLogonCommands** (AutoLogon once as Administrator) runs `setup.ps1` to apply network, clean local users, optional domain join.
+5. GuestOS verifies hostname / expected static IP via the guest agent.
+
+From **PDM**: open a **template** → **Customize (GuestOS)** → signed `/launch` deep-link (HTTPS) → wizard.
+
 ### WinRM path (clone + reconfigure)
 
-1. **Clone & Configure (WinRM)** → clone from a prepared template (hostname used for Proxmox name and later Windows rename).
-2. On the task page, choose **Power On VM** when ready (adds temp NIC on `TEMP_BRIDGE`).
+1. **Clone & Configure (WinRM)** → clone from a prepared template.
+2. On the task page, **Power On VM** when ready (adds temp NIC on `TEMP_BRIDGE`).
 3. Wait for an IP in `WINRM_SUBNET`.
 4. Connect with WinRM; apply primary NIC settings (and optional domain join).
 5. Reboot; optionally remove the temporary NIC.
 
-### Sysprep path
-
-**Clone then Sysprep later (preferred when you want a pause):**
-
-1. **Clone for Sysprep later** → clone only (does not run `sysprep.exe`).
-2. Power the VM on in Proxmox when ready.
-3. **Existing VMs → Sysprep** on that guest.
-
-**All-in-one:**
-
-1. **Clone + Sysprep now** → clone, power on, write answer files, run `sysprep /generalize` in one job.
-
-**Existing VM only:**
-
-1. Pick a running lifecycle-tagged VM → Sysprep (same guest-agent steps without cloning).
-
-Shared Sysprep steps after the guest is up:
-
-1. Optionally select a **domain profile** (fills DNS/VLAN); choose static or DHCP; optionally join a domain.
-2. App waits for a **stable** QEMU guest agent, then writes:
-    -   `C:\Windows\System32\Sysprep\unattended.xml`
-    -   `C:\Windows\Setup\Scripts\setup.ps1`
-    -   `C:\Windows\Setup\Scripts\SetupComplete.cmd` (Windows runs this after setup)
-3. Runs `sysprep /generalize /oobe /shutdown` with the answer file.
-4. Powers the VM back on, waits for the guest agent again, and verifies hostname / IP (and domain membership when requested).
-
-`setup.ps1` also enables the built-in **Administrator** account and removes other leftover local users from the template (Sysprep itself does not delete them).
-
 ## Design Choices
 
-### Why WinRM (for the reconfigure path)?
+### Why Sysprep + guest agent (customize)?
 
-WinRM is built into modern Windows Server. No Cloudbase-Init on the template, one port (5985) on an isolated temp network. See the original design notes below for detail.
+No WinRM or temp NIC for hostname/network. Uses the QEMU guest agent and native unattend / FirstLogonCommands. Network config runs from `setup.ps1` so virtio adapters can be selected by MAC.
 
-### Why Sysprep + guest agent (for the customize path)?
+### Why WinRM (reconfigure)?
 
-No dependency on WinRM or a temp NIC for applying hostname/network. Uses the QEMU guest agent (already required for Proxmox integration) and native Windows unattend / SetupComplete. Domain join and network config run from `setup.ps1` after specialize so virtio/e1000 adapter selection can use MAC matching.
-
-### Why WinRM instead of Cloud-Init? (historical)
-
-Cloud-Init on Windows needs Cloudbase-Init. This project prefers native WinRM for the reconfigure path to keep templates minimal.
+Built into modern Windows Server; useful when you must change an already-deployed clone without generalizing the image.
 
 ## Prerequisites
 
@@ -98,41 +81,30 @@ Cloud-Init on Windows needs Cloudbase-Init. This project prefers native WinRM fo
 
 ### Templates
 
-GuestOS lists and accepts **Windows templates/VMs only**, based on Proxmox QEMU `ostype` (`win10`, `win11`, `win8`, …). Linux (`l26`) and other types are hidden from the UI and rejected by clone/sysprep APIs.
+GuestOS lists and accepts **Windows templates only**, based on Proxmox QEMU `ostype` (`win10`, `win11`, `win8`, …).
+
+#### Sysprep golden image
+
+-   Converted to a Proxmox **template**.
+-   **QEMU Guest Agent** installed and working.
+-   Prefer a clean image (few extra local users).
+
+Validated guests: **Windows Server 2019**, **Windows 11**.
 
 #### WinRM reconfigure template
 
--   Windows Server (or client) with **QEMU Guest Agent**, VirtIO drivers, WinRM Basic + AllowUnencrypted (temp network only), firewall allowing TCP 5985.
--   Typically sysprep’d and converted to a Proxmox template.
-
-Example WinRM enablement:
-
-```powershell
-winrm quickconfig -q
-winrm set winrm/config/service/auth @{Basic="true"}
-winrm set winrm/config/service @{AllowUnencrypted="true"}
-New-NetFirewallRule -Name "WinRM-HTTP" -DisplayName "WinRM-HTTP" -Protocol TCP -LocalPort 5985 -Action Allow -Enabled True
-```
-
-#### Sysprep template / source VM
-
--   **QEMU Guest Agent** installed and working (`qm agent <vmid> ping` / Proxmox UI).
--   Prefer a clean image: avoid extra local users on the gold image (the app removes leftovers after specialize, but starting clean is better).
--   For **new-VM sysprep**: a Proxmox **template** (or full-cloneable VM).
--   For **existing-VM sysprep**: a running disposable VM (sysprep generalizes it).
-
-Validated guest OS targets so far: **Windows Server 2019**, **Windows 11**.
+-   Guest Agent + VirtIO + WinRM Basic on the temp network; firewall TCP 5985.
 
 ### Network
 
--   **WinRM path:** DHCP on `TEMP_BRIDGE`; app host must reach that subnet; keep it a dedicated non-routed L2/VLAN. `PRIMARY_BRIDGE` is typically a trunk for final VLANs.
--   **Sysprep path:** guest agent only from the Proxmox API host’s perspective; static or DHCP on the guest’s primary NIC as configured in the form. Domain join needs DNS that can resolve the DC (profile DNS or manual DNS).
+-   **Sysprep:** static or DHCP on the primary NIC; domain join needs DNS that can resolve the DC.
+-   **WinRM:** DHCP on `TEMP_BRIDGE`; app host must reach `WINRM_SUBNET`.
 
 ### Software
 
 -   Python 3.12+ (or Docker).
 -   Redis (bundled in Compose).
--   Reverse proxy with TLS recommended for production (`BEHIND_REVERSE_PROXY=True`).
+-   Reverse proxy with TLS (Compose **Caddy** service; set `BEHIND_REVERSE_PROXY=True`).
 
 ## Installation and Setup
 
@@ -152,13 +124,17 @@ Default login password: `changeme`. Change it immediately via **Change Password*
 ## Running with Docker (recommended)
 
 ```bash
-cp .env.example .env   # set SECRET_KEY; BEHIND_REVERSE_PROXY=False for local HTTP
+cp .env.example .env
+# set SECRET_KEY, GUESTOS_LAUNCH_SECRET, BEHIND_REVERSE_PROXY=True for TLS lab/prod
+chmod +x deploy/caddy/gen-selfsigned.sh
+./deploy/caddy/gen-selfsigned.sh 192.168.123.197   # or your host IP/DNS
 docker compose up -d --build
 ```
 
-App: **http://127.0.0.1:5001**
+-   **HTTPS (public):** `https://<GUESTOS_TLS_HOST>/` (Caddy `:443`, self-signed in lab)
+-   **HTTP loopback debug:** `http://127.0.0.1:5001` on the GuestOS host only
 
-Compose starts **web** (gunicorn + `init_db.py`), **worker** (Celery), and **Redis**. SQLite lives in the `app-instance` volume.
+Compose starts **web**, **worker**, **Redis**, and **Caddy**. SQLite lives in the `app-instance` volume.
 
 ### Older hosts (Compose V1)
 
@@ -168,38 +144,9 @@ If `docker compose` is missing but `docker-compose` exists:
 docker-compose up -d
 ```
 
-After changing `.env` on Compose V1 + modern Docker Engine, avoid `--force-recreate` (known `ContainerConfig` bug). Prefer:
-
-```bash
-docker-compose stop && docker-compose rm -f && docker-compose up -d
-```
-
 ### Offline / air-gapped deploy
 
-1. On a build machine (match target CPU, e.g. `linux/amd64` for typical Proxmox utility VMs):
-
-   ```bash
-   docker buildx build --platform linux/amd64 -t proxmox-guestos-customization-web:latest --load .
-   docker tag proxmox-guestos-customization-web:latest proxmox-guestos-customization-worker:latest
-   docker pull --platform linux/amd64 redis:7-alpine
-   # ensure redis tag is amd64, then:
-   docker save proxmox-guestos-customization-web:latest \
-               proxmox-guestos-customization-worker:latest \
-               redis:7-alpine | gzip > proxmox-guestos-customization-offline-amd64.tar.gz
-   ```
-
-2. On the offline host:
-
-   ```bash
-   gunzip -c proxmox-guestos-customization-offline-amd64.tar.gz | docker load
-   # copy docker-compose.offline.yml + .env into the same directory
-   docker-compose -f docker-compose.offline.yml up -d
-   # or: docker compose -f docker-compose.offline.yml up -d
-   ```
-
-`docker-compose.offline.yml` uses **images only** (no `build:`), so Compose will not look for a Dockerfile.
-
-**Important:** images built on Apple Silicon default to **arm64**. Proxmox utility hosts are usually **amd64** — always export with `--platform linux/amd64` for those hosts.
+See `docker-compose.offline.yml` (images only; add Caddy/certs separately if you need TLS offline). Prefer `--platform linux/amd64` when building for Proxmox utility VMs.
 
 ## Running manually
 
@@ -218,7 +165,7 @@ source venv/bin/activate
 celery -A app.celery worker --loglevel=info
 ```
 
-Production-style: `gunicorn --bind 0.0.0.0:5001 wsgi:app` with `BEHIND_REVERSE_PROXY=True` behind TLS.
+Production-style: Compose Caddy + `BEHIND_REVERSE_PROXY=True`, or your own TLS proxy in front of gunicorn.
 
 ## Configuration
 
@@ -228,65 +175,39 @@ See `.env.example`. Key variables:
 |----------|---------|
 | `PROXMOX_HOST` / `USER` / `PASSWORD` | Proxmox API (default remote) |
 | `PROXMOX_VERIFY_SSL` | TLS verify for Proxmox API (default `False`) |
-| `GUESTOS_API_TOKEN` / `API_TOKENS` | Machine API auth for PDM/sysprep start+poll |
+| `GUESTOS_API_TOKEN` / `API_TOKENS` | Machine API auth for PDM sysprep start+poll |
 | `PVE_REMOTES_JSON` | Optional named remotes (`remote_id` in sysprep JSON) |
+| `GUESTOS_LAUNCH_SECRET` | HMAC secret for PDM `/launch` one-click session (match PDM UI bake-in) |
+| `GUESTOS_LAUNCH_TTL` | Launch token lifetime seconds (default `300`) |
+| `GUESTOS_TLS_HOST` | Hostname/IP for Caddy TLS (default lab IP) |
+| `GUESTOS_PATH_PREFIX` | Optional subpath mount (leave empty for site-root HTTPS) |
 | `WINRM_USERNAME` / `PASSWORD` | Default WinRM creds (server-side only; standalone) |
 | `WINRM_SUBNET` | Allowed temp IP subnet for WinRM |
 | `PRIMARY_BRIDGE` / `TEMP_BRIDGE` | Final vs temporary bridges |
 | `SECRET_KEY` | **Required** — sessions + CSRF |
-| `APP_VERSION` | Optional override of `VERSION` file (shown in UI / `/api/version`) |
+| `APP_VERSION` | Optional override of `VERSION` file |
 | `BEHIND_REVERSE_PROXY` | ProxyFix + Secure cookies |
 | `DATABASE_URL` | SQLAlchemy URL (default SQLite under `instance/`) |
-| `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Redis (Compose overrides to `redis://redis:6379/0`) |
+| `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Redis |
 | `PORT` | Listen port (default `5001`) |
-| `DOMAIN_PROFILES_JSON` | Named profiles: `dns_servers`, `domain_name`, `domain_username`, `domain_password`, optional `vlan`, optional `domain_ou` |
-
-Domain profiles are used by **both** WinRM reconfigure and Sysprep. Selecting a profile fills DNS/VLAN in the UI; join credentials stay on the server when “Use Domain Profile Credentials” is checked.
+| `DOMAIN_PROFILES_JSON` | Named AD/network profiles |
 
 ## Lab helper scripts
 
 ```bash
-# Connectivity / config sanity (does not mutate VMs)
 venv/bin/python scripts/smoke_check.py
-
-# Machine API smoke from a PDM host (health, version, token)
-python3 scripts/pdm_api_smoke.py --base-url http://guestos:5001 --token "$GUESTOS_API_TOKEN"
-
-# Drive existing-VM sysprep synchronously (no Redis/web; generalizes the VM!)
-venv/bin/python scripts/sysprep_test.py \
-  --vmid 121 --hostname WINSRV19-T1 \
-  --ip 192.168.100.121 --netmask 24 --gateway 192.168.100.1 \
-  --dns 192.168.100.1,1.1.1.1 --admin-password '...' --yes
-
-# DHCP example
-venv/bin/python scripts/sysprep_test.py \
-  --vmid 122 --hostname WIN11-T1 --network-mode dhcp \
-  --dns 10.0.0.10 --admin-password '...' --yes
+python3 scripts/pdm_api_smoke.py --base-url https://192.168.123.197 --token "$GUESTOS_API_TOKEN"
+python3 scripts/ad_join_validate.py --check-dns
 ```
 
-PDM / integrator notes: [docs/PDM_INTEGRATION.md](docs/PDM_INTEGRATION.md).
+PDM notes: [docs/PDM_INTEGRATION.md](docs/PDM_INTEGRATION.md).  
+AD join checklist: [docs/AD_VALIDATION.md](docs/AD_VALIDATION.md).
 
 ## Usage
 
-1. Open **http://127.0.0.1:5001** (or your reverse-proxy URL).
-2. Log in; change the default password.
-3. Clone / reconfigure (WinRM) or run Sysprep from the UI.
-
-## Screenshots
-
-*Illustrative; UI may differ slightly from the current branch.*
-
-### Initial Page
-![Initial Page](screenshots/Initial.png)
-
-### Clone VM
-![Clone VM](screenshots/Clone.png)
-
-### Reconfigure VM
-![Reconfigure VM](screenshots/Reconfigure.png)
-
-### Progress
-![Progress](screenshots/Progress.png)
+1. Open **https://\<host\>/** (accept the lab self-signed cert once) or loopback HTTP for debug.
+2. Log in (or arrive via PDM **Customize** launch link); change the default password.
+3. Run **Clone + Sysprep** from a Windows template, or WinRM reconfigure from Existing VMs.
 
 ## Development / Testing
 
@@ -294,23 +215,15 @@ PDM / integrator notes: [docs/PDM_INTEGRATION.md](docs/PDM_INTEGRATION.md).
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements-dev.txt
-pytest                 # all tests
-pytest -m "not api"    # standalone / CSRF / wizards / core
-pytest -m api          # machine API (PDM surface)
+pytest
 ```
 
-Coverage includes validators, injection-safe PowerShell helpers, WinRM IP selection, tags, CSRF/auth, sysprep template rendering (static/DHCP/domain blob), and domain-profile resolution. Proxmox/WinRM are mocked. CI runs the same suite on GitHub Actions (`pythonpath = .` in `pytest.ini`).
+## Security notes
 
-## Security considerations
+-   Run behind TLS (`BEHIND_REVERSE_PROXY=True`).
+-   Treat `GUESTOS_LAUNCH_SECRET` like an API key (extractable from the PDM UI wasm in a lab fork — rotate for real deployments).
+-   Do not re-enable in-place Sysprep on arbitrary VMs.
 
--   Run behind TLS; set `BEHIND_REVERSE_PROXY=True` in production.
--   Do not expose outside an admin network.
--   Keep the WinRM temp network isolated (non-routed L2).
--   Guest inputs are validated; PowerShell receives Base64/JSON params, not interpolated secrets.
--   WinRM/domain credentials are resolved server-side by default.
--   CSRF is enabled; keep `SECRET_KEY` unique and secret.
--   Change `changeme` immediately after first login.
+## License
 
-## Acknowledgements
-
-This project was developed with assistance from AI coding tools (including Google Gemini and Cursor), guided by the author’s requirements and lab validation.
+See repository license file.

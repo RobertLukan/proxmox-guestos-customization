@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, request
 from flask_sqlalchemy import SQLAlchemy
 from celery import Celery
 from flask_login import LoginManager
@@ -61,7 +61,31 @@ def create_app():
 
     if app.config['BEHIND_REVERSE_PROXY']:
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
-        app.config['APPLICATION_ROOT'] = '/guestos'
+        path_prefix = (app.config.get('GUESTOS_PATH_PREFIX') or '').strip().rstrip('/')
+        if path_prefix:
+            app.config['APPLICATION_ROOT'] = path_prefix
+
+    @app.after_request
+    def _cors_headers(response):
+        """Allow PDM browser UI to poll /api/tasks (lab bake-in)."""
+        origins = (app.config.get('GUESTOS_CORS_ORIGINS') or '').strip()
+        if not origins:
+            return response
+        req_origin = request.headers.get('Origin')
+        if origins == '*':
+            allow = req_origin or '*'
+        else:
+            allowed = {o.strip() for o in origins.split(',') if o.strip()}
+            allow = req_origin if req_origin in allowed else None
+        if allow:
+            response.headers['Access-Control-Allow-Origin'] = allow
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
+            response.headers['Access-Control-Allow-Headers'] = (
+                'Authorization, Content-Type, X-Api-Token, X-CSRFToken'
+            )
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+            response.headers['Vary'] = 'Origin'
+        return response
 
     @app.context_processor
     def inject_app_version():
@@ -78,3 +102,12 @@ app = create_app()
 # ``@app.route`` / ``@celery.task`` / ``@login_manager.user_loader`` decorators
 # register against the configured objects above.
 from app import routes, celery_app  # noqa: E402,F401
+from app.schema import ensure_task_schema  # noqa: E402
+
+with app.app_context():
+    try:
+        ensure_task_schema()
+    except Exception as e:  # noqa: BLE001
+        # Startup should not crash workers on transient DB lock; init_db is authoritative.
+        import logging
+        logging.getLogger(__name__).warning('ensure_task_schema: %s', e)

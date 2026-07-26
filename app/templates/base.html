@@ -19,6 +19,7 @@
             <div class="d-flex gap-2 align-items-center ms-auto">
                 <span class="app-version" title="Application version">v{{ app_version }}</span>
                 {% if current_user.is_authenticated %}
+                <a class="btn btn-sm btn-link text-decoration-none" href="{{ url_for('jobs_page') }}">Jobs</a>
                 <a class="btn btn-sm btn-link text-decoration-none" href="{{ url_for('change_password') }}">Change Password</a>
                 <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('logout') }}">Logout</a>
                 {% endif %}

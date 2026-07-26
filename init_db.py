@@ -1,8 +1,9 @@
 from app import app, db
 from app.models import User
+from app.schema import ensure_task_schema
 
 with app.app_context():
-    db.create_all()
+    ensure_task_schema()
     # Create a default user
     if not User.query.get(1):
         user = User(id=1)

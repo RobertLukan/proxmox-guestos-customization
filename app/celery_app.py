@@ -1,5 +1,5 @@
 from app import celery, app, db
-from app.models import Task
+from app.models import Task, _utcnow
 from app.proxmox import (
     clone_vm,
     power_on_vm,
@@ -36,12 +36,21 @@ def _as_bool(value):
         return value
     return str(value).strip().lower() in ('true', '1', 't', 'yes', 'on')
 
-def update_task_progress(task_id, progress, message):
-    """Helper function to update task progress."""
+def update_task_progress(task_id, progress, message, result_vmid=None, result_ip_address=None):
+    """Helper function to update task progress (and optional result fields)."""
     task = Task.query.get(task_id)
     if task:
         task.progress = progress
         task.message = message
+        if task.status in (None, 'PENDING'):
+            task.status = 'PROGRESS'
+        elif task.status == 'STARTED':
+            task.status = 'PROGRESS'
+        task.updated_at = _utcnow()
+        if result_vmid is not None:
+            task.result_vmid = result_vmid
+        if result_ip_address is not None:
+            task.result_ip_address = result_ip_address
         db.session.commit()
 
 
@@ -389,7 +398,12 @@ def sysprep_workflow_task(self, task_id, data):
                     data.get('vlan') # Use .get() for the optional vlan
                 )
                 new_vmid = clone_result['vmid']
-                update_task_progress(task_id, 25, f"VM cloned successfully. New VMID: {new_vmid}")
+                update_task_progress(
+                    task_id,
+                    25,
+                    f"VM cloned successfully. New VMID: {new_vmid}",
+                    result_vmid=new_vmid,
+                )
 
                 # 2. Resolve the primary NIC MAC (for robust adapter selection) and
                 #    render the answer file + post-setup scripts.

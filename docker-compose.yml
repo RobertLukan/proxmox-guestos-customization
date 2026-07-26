@@ -4,6 +4,8 @@ services:
     restart: unless-stopped
     volumes:
       - redis-data:/data
+    networks:
+      - guestos
 
   web:
     # Explicit image name so offline `docker load` + `up --no-build` works.
@@ -15,14 +17,17 @@ services:
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    # Bound to loopback for local admin/debug; public HTTPS is via caddy:443.
     ports:
-      - "5001:5001"
+      - "127.0.0.1:5001:5001"
     depends_on:
       - redis
     volumes:
       # Persist the SQLite database (Flask-SQLAlchemy stores it under instance/).
       - app-instance:/app/instance
     restart: unless-stopped
+    networks:
+      - guestos
 
   worker:
     image: proxmox-guestos-customization-worker:latest
@@ -37,7 +42,32 @@ services:
     volumes:
       - app-instance:/app/instance
     restart: unless-stopped
+    networks:
+      - guestos
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      - web
+    ports:
+      - "443:443"
+    environment:
+      - GUESTOS_TLS_HOST=${GUESTOS_TLS_HOST:-192.168.123.197}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/caddy/certs:/etc/caddy/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - guestos
 
 volumes:
   redis-data:
   app-instance:
+  caddy-data:
+  caddy-config:
+
+networks:
+  guestos:
+    driver: bridge

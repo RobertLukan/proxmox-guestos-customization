@@ -5,6 +5,7 @@ from app.celery_app import sysprep_workflow_task
 from app.models import Task, User
 from app.api_auth import login_or_api_token_required, with_session_csrf
 from app.remotes import resolve_pve_remote
+from app.launch_token import verify_launch_token
 from flask_login import login_user, logout_user, login_required, current_user
 import uuid
 import logging
@@ -115,6 +116,40 @@ def login():
         else:
             flash('Invalid password')
     return render_template('login.html')
+
+
+@app.route('/launch')
+def launch_from_pdm():
+    """One-click session from a short-lived PDM HMAC launch token.
+
+    Query: template_vmid, remote_id, exp, jti, sig
+    On success: log in the operator user and redirect to the clone+Sysprep wizard.
+    """
+    ok, err = verify_launch_token(
+        request.args.get('exp'),
+        request.args.get('template_vmid'),
+        request.args.get('remote_id') or '',
+        request.args.get('jti'),
+        request.args.get('sig'),
+    )
+    if not ok:
+        flash(err)
+        return redirect(url_for('login'))
+
+    user = User.query.get(1)
+    if not user:
+        flash('GuestOS has no operator user configured.')
+        return redirect(url_for('login'))
+    login_user(user)
+
+    template_vmid = (request.args.get('template_vmid') or '').strip()
+    remote_id = (request.args.get('remote_id') or '').strip()
+    return redirect(url_for(
+        'sysprep_form',
+        template_vmid=template_vmid,
+        remote_id=remote_id or None,
+    ))
+
 
 @app.route('/logout')
 def logout():
@@ -393,6 +428,69 @@ def api_health():
 def api_version():
     return jsonify({'version': app.config.get('APP_VERSION', '0.0.0')})
 
+
+@app.route('/api/tasks', methods=['GET', 'OPTIONS'])
+@login_or_api_token_required
+def api_list_tasks():
+    """List customization jobs for PDM / operators (newest first)."""
+    if request.method == 'OPTIONS':
+        return ('', 204)
+
+    try:
+        limit = min(max(int(request.args.get('limit') or 100), 1), 500)
+    except ValueError:
+        limit = 100
+    status = (request.args.get('status') or '').strip()
+    remote_id = (request.args.get('remote_id') or '').strip()
+    running_only = str(request.args.get('running') or '').lower() in ('1', 'true', 'yes')
+
+    q = Task.query
+    if remote_id:
+        q = q.filter(Task.remote_id == remote_id)
+    if status:
+        q = q.filter(Task.status == status)
+    if running_only:
+        q = q.filter(Task.status.in_(('PENDING', 'STARTED', 'PROGRESS')))
+    # Prefer customization-related jobs; still include others when not filtered.
+    kind = (request.args.get('kind') or 'customization').strip().lower()
+    if kind == 'customization':
+        q = q.filter(Task.name.in_(('Sysprep Workflow', 'Sysprep Existing VM', 'Clone for Sysprep')))
+    elif kind == 'all':
+        pass
+    else:
+        q = q.filter(Task.name == kind)
+
+    rows = q.order_by(Task.timestamp.desc()).limit(limit).all()
+    return jsonify({
+        'tasks': [t.to_dict() for t in rows],
+        'count': len(rows),
+    })
+
+
+@app.route('/api/tasks/<task_id>', methods=['GET', 'OPTIONS'])
+@login_or_api_token_required
+def api_get_task(task_id):
+    if request.method == 'OPTIONS':
+        return ('', 204)
+    task = Task.query.get(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+    return jsonify(task.to_dict())
+
+
+@app.route('/jobs')
+@login_required
+def jobs_page():
+    """Simple GuestOS job history page (same ledger as the PDM tab)."""
+    rows = (
+        Task.query
+        .order_by(Task.timestamp.desc())
+        .limit(200)
+        .all()
+    )
+    return render_template('jobs.html', tasks=rows)
+
+
 @app.route('/workflow/<task_id>')
 @login_required
 def workflow(task_id):
@@ -445,7 +543,15 @@ def start_sysprep_workflow():
     vm_uuid = str(uuid.uuid4())
     hostname = data.get('hostname')
 
-    task = Task(id=task_id, name='Sysprep Workflow', description=f'Starting Sysprep workflow for {hostname}', vm_uuid=vm_uuid)
+    task = Task(
+        id=task_id,
+        name='Sysprep Workflow',
+        description=f'Starting Sysprep workflow for {hostname}',
+        vm_uuid=vm_uuid,
+        hostname=(hostname or None),
+        template_vmid=int(data['template_vmid']) if str(data.get('template_vmid', '')).isdigit() else None,
+        remote_id=(data.get('remote_id') or None),
+    )
     db.session.add(task)
     db.session.commit()
 

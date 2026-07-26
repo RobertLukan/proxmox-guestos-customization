@@ -56,6 +56,8 @@ def login_or_api_token_required(view):
 
     @wraps(view)
     def wrapped(*args, **kwargs):
+        if request.method == 'OPTIONS':
+            return view(*args, **kwargs)
         if request_has_valid_api_token():
             g.auth_via_api_token = True
             return view(*args, **kwargs)
