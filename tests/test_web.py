@@ -88,11 +88,21 @@ def test_index_uses_base_layout_with_csrf_meta(client, monkeypatch):
     assert b'app-version' in resp.data
     assert b'v' + client.application.config['APP_VERSION'].encode() in resp.data
     assert b'Clone + Sysprep (customize)' in resp.data
-    assert b'Legacy' in resp.data
-    assert b'Clone &amp; Configure (WinRM only)' in resp.data
-    assert b'deprecated' in resp.data
+    assert b'Clone &amp; Configure (WinRM only)' not in resp.data  # WinRM off by default
     assert b'Windows template' in resp.data
     assert b'In-place Sysprep' in resp.data or b'not allowed' in resp.data
+
+
+def test_index_shows_legacy_winrm_when_enabled(client, monkeypatch, app):
+    app.config['GUESTOS_ENABLE_WINRM'] = True
+    monkeypatch.setattr(
+        'app.routes.get_template_vms',
+        lambda: [{'vmid': 100, 'name': 'Win11-Template'}],
+    )
+    _login(client)
+    resp = client.get('/')
+    assert b'Legacy' in resp.data
+    assert b'Clone &amp; Configure (WinRM only)' in resp.data
 
 
 def test_select_template_sysprep_later_redirects_to_sysprep_form(client, monkeypatch):
@@ -215,7 +225,8 @@ def test_sysprep_form_get_deep_link(client, monkeypatch):
     assert b'name="remote_id"' in resp.data
     assert b'value="lab"' in resp.data
 
-def test_reconfigure_network_wizard_bootstrap5_and_fields(client, monkeypatch):
+def test_reconfigure_network_wizard_bootstrap5_and_fields(client, monkeypatch, app):
+    app.config['GUESTOS_ENABLE_WINRM'] = True
     monkeypatch.setattr('app.routes.select_winrm_ip', lambda vmid: '192.168.100.10')
     _login(client)
     resp = client.get('/reconfigure_network/121/test-uuid?temp_ip_address=10.0.0.5&primary_mac_address=aa:bb:cc:dd:ee:ff')

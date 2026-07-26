@@ -412,6 +412,49 @@ def power_on_vm(vmid):
                 return
         raise Exception(f"VM {vmid} failed to power on.")
 
+
+def delete_vm(vmid, purge=True, timeout=120):
+    """Stop (if needed) and delete a QEMU VM. Used by lab smoke cleanup.
+
+    ``purge`` removes disks from storage (Proxmox delete purge=1).
+    """
+    proxmox = get_proxmox_api()
+    if not proxmox:
+        raise Exception("Failed to connect to Proxmox.")
+    node = _get_vm_node(vmid)
+    if not node:
+        raise Exception(f"VM with VMID {vmid} not found.")
+
+    status = proxmox.nodes(node).qemu(vmid).status.current.get().get('status')
+    if status == 'running':
+        try:
+            proxmox.nodes(node).qemu(vmid).status.stop.post()
+        except Exception:
+            proxmox.nodes(node).qemu(vmid).status.shutdown.post(timeout=60)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            cur = proxmox.nodes(node).qemu(vmid).status.current.get().get('status')
+            if cur == 'stopped':
+                break
+            time.sleep(2)
+        else:
+            raise Exception(f"VM {vmid} did not stop before delete.")
+
+    params = {'purge': 1} if purge else {}
+    upid = proxmox.nodes(node).qemu(vmid).delete(**params)
+    # Some proxmoxer versions return a UPID string for async delete.
+    if isinstance(upid, str) and upid.startswith('UPID:'):
+        task_node = upid.split(':')[1]
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            st = proxmox.nodes(task_node).tasks(upid).status.get()
+            if st.get('status') != 'running':
+                if st.get('exitstatus') not in (None, 'OK'):
+                    raise Exception(f"Delete VM {vmid} failed: {st.get('exitstatus')}")
+                return
+            time.sleep(2)
+        raise Exception(f"Timed out waiting for delete of VM {vmid}.")
+
 def wait_for_guest_agent(vmid, timeout=1200, stable_for=45):
     """Wait until the QEMU Guest Agent is responsive *and stays up*.
 

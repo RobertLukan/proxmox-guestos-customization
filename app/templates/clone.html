@@ -2,14 +2,10 @@
 {% block title %}Clone VM{% endblock %}
 {% block content %}
 <h1>Clone VM from Template</h1>
-{% if purpose == 'sysprep_later' %}
-<p class="page-lead">Clone only from template {{ template_vmid }}. Sysprep runs later from Existing VMs — this step does not generalize the guest.</p>
-{% else %}
 <div class="alert alert-warning" role="alert">
     <strong>Legacy / deprecated.</strong> Prefer <strong>Clone + Sysprep</strong> on the home page instead of WinRM clone+configure.
 </div>
 <p class="page-lead">Create a new VM from template {{ template_vmid }}, then power on and configure via WinRM when you choose.</p>
-{% endif %}
 <div id="form-alert" class="alert alert-danger" role="alert"></div>
 <form id="clone-form" novalidate>
     <input type="hidden" name="template_vmid" value="{{ template_vmid }}">

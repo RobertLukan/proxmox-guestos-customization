@@ -180,6 +180,9 @@ def change_password():
 @login_required
 def reconfigure_network(vmid, vm_uuid):
     """Legacy WinRM reconfigure form (deprecated; prefer Clone + Sysprep)."""
+    blocked = _require_winrm_enabled()
+    if blocked:
+        return blocked
     temp_ip_address = request.args.get('temp_ip_address')
     primary_mac_address = request.args.get('primary_mac_address') # New parameter
 
@@ -202,6 +205,9 @@ def reconfigure_network(vmid, vm_uuid):
 @login_required
 def start_reconfigure_task():
     """Legacy WinRM reconfigure start (deprecated; prefer Clone + Sysprep)."""
+    blocked = _require_winrm_enabled()
+    if blocked:
+        return blocked
     data = request.json
     vmid = data.get('vmid')
     vm_uuid = data.get('vm_uuid')
@@ -266,6 +272,9 @@ def start_reconfigure_task():
 @app.route('/start_prepare_reconfigure_task', methods=['POST'])
 @login_required
 def start_prepare_reconfigure_task():
+    blocked = _require_winrm_enabled()
+    if blocked:
+        return blocked
     data = request.json
     vmid = data.get('vmid')
     vm_uuid = data.get('vm_uuid')
@@ -282,6 +291,9 @@ def start_prepare_reconfigure_task():
 @login_required
 def reconfigure_existing_vm():
     """Legacy WinRM VM picker (deprecated; prefer Clone + Sysprep from a template)."""
+    blocked = _require_winrm_enabled()
+    if blocked:
+        return blocked
     vms = get_manageable_vms()
     return render_template('reconfigure_selection.html', vms=vms)
 
@@ -289,7 +301,27 @@ def reconfigure_existing_vm():
 @login_required
 def index():
     templates = get_template_vms()
-    return render_template('index.html', templates=templates)
+    return render_template(
+        'index.html',
+        templates=templates,
+        winrm_enabled=bool(app.config.get('GUESTOS_ENABLE_WINRM')),
+    )
+
+
+def _winrm_disabled_response():
+    """Reject legacy WinRM routes when the feature flag is off."""
+    if request.accept_mimetypes.best == 'application/json' or request.is_json:
+        return jsonify({
+            'error': 'WinRM reconfigure is disabled. Use Clone + Sysprep, or set GUESTOS_ENABLE_WINRM=True.'
+        }), 403
+    flash('WinRM reconfigure is disabled. Use Clone + Sysprep (or set GUESTOS_ENABLE_WINRM=True).')
+    return redirect(url_for('index'))
+
+
+def _require_winrm_enabled():
+    if not app.config.get('GUESTOS_ENABLE_WINRM'):
+        return _winrm_disabled_response()
+    return None
 
 def _reject_non_windows_template(template_vmid):
     """Flash + redirect home when template_vmid is missing or not Windows."""
@@ -327,6 +359,9 @@ def select_template():
         if rejected:
             return rejected
         return redirect(url_for('sysprep_form', template_vmid=template_vmid))
+    blocked = _require_winrm_enabled()
+    if blocked:
+        return blocked
     rejected = _reject_non_windows_template(template_vmid)
     if rejected:
         return rejected
@@ -346,6 +381,9 @@ def select_template():
 @login_required
 def start_clone_task():
     try:
+        blocked = _require_winrm_enabled()
+        if blocked:
+            return blocked
         data = request.json
         template_vmid = data.get('template_vmid')
         hostname = data.get('hostname')
@@ -354,17 +392,13 @@ def start_clone_task():
         bridge = app.config['PRIMARY_BRIDGE']
         vlan = data.get('vlan')
         purpose = (data.get('purpose') or 'winrm').strip()
-        if purpose not in ('winrm', 'sysprep_later'):
+        if purpose not in ('winrm',):
             purpose = 'winrm'
 
         task_id = str(uuid.uuid4())
         vm_uuid = str(uuid.uuid4()) # Generate unique VM identifier
-        if purpose == 'sysprep_later':
-            task_name = 'Clone for Sysprep'
-            task_desc = f'Cloning VM {hostname} from template {template_vmid} (sysprep later)'
-        else:
-            task_name = 'Clone VM'
-            task_desc = f'Cloning VM {hostname} from template {template_vmid}'
+        task_name = 'Clone VM'
+        task_desc = f'Cloning VM {hostname} from template {template_vmid}'
         task = Task(id=task_id, name=task_name, description=task_desc, vm_uuid=vm_uuid)
         
         try:
@@ -541,6 +575,10 @@ def start_sysprep_workflow():
             require_sysprep_template(template_vmid)
         except ValueError as e:
             return jsonify({'error': str(e)}), 400
+
+    # API / PDM clients may omit bridge; match WinRM-clone default.
+    if not (data.get('bridge') or '').strip():
+        data['bridge'] = app.config.get('PRIMARY_BRIDGE') or 'vmbr0'
 
     task_id = str(uuid.uuid4())
     vm_uuid = str(uuid.uuid4())

@@ -1,5 +1,9 @@
 # PDM / machine API integration (sysprep-only)
 
+**Install / production deploy:** see [`INSTALL.md`](INSTALL.md) (GuestOS Compose +
+optional PDM fork packages, privileges, firewall). This page is the API and
+lab-integration reference.
+
 GuestOS is one app. **Sysprep customize** (template → clone → guest agent) is the
 supported path for PDM and new standalone use.
 
@@ -20,7 +24,7 @@ Current app version is in [`VERSION`](../VERSION) and `GET /api/version`.
 GUESTOS_API_TOKEN=generate-a-long-random-string
 BEHIND_REVERSE_PROXY=True
 GUESTOS_TLS_HOST=192.168.123.197
-GUESTOS_LAUNCH_SECRET=must-match-pdm-ui-bake-in
+GUESTOS_LAUNCH_SECRET=must-match-pdm-guestos-cfg
 # optional multi-cluster:
 # PVE_REMOTES_JSON={"lab":{"host":"pve.example","user":"api@pve","password":"...","verify_ssl":false}}
 ```
@@ -46,17 +50,11 @@ docker compose up -d --build
 
 Do **not** call reconfigure/WinRM routes from PDM (legacy standalone only; deprecated).
 
-## One-click launch (browser)
-
-PDM **Customize (GuestOS)** opens:
-
-`https://<host>/launch?template_vmid=…&remote_id=…&exp=…&jti=…&sig=…`
-
-GuestOS verifies HMAC (`GUESTOS_LAUNCH_SECRET`), creates a session, redirects to `/sysprep_form`. Tokens expire (`GUESTOS_LAUNCH_TTL`, default 300s) and are single-use.
-
 ## Job history (PDM GuestOS tab)
 
-GuestOS keeps a SQLite task ledger. PDM’s **GuestOS** tab (global Remotes panel and per-PVE remote) polls:
+GuestOS keeps a SQLite task ledger. PDM’s **GuestOS** tab calls the **PDM server
+proxy** (`GET /api2/extjs/guestos/tasks`), which uses `guestos.cfg` (`base-url`,
+`api-token`) to fetch:
 
 ```http
 GET /api/tasks?kind=customization&limit=150
@@ -64,10 +62,22 @@ GET /api/tasks?kind=customization&remote_id=<pdm-remote>&limit=150
 Authorization: Bearer <GUESTOS_API_TOKEN>
 ```
 
-Response shape: `{ "tasks": [ { "id", "name", "status", "progress", "message", "timestamp", "updated_at", "remote_id", "template_vmid", "hostname", "result_vmid", … } ] }`.
+Browsers no longer need the GuestOS API token. Configure PDM with
+`/etc/proxmox-datacenter-manager/guestos.cfg` (see the PDM fork
+`docs/guestos.cfg.example`).
 
-Also: `GET /api/tasks/<id>` and HTML `/jobs`. Set `GUESTOS_CORS_ORIGINS` if you restrict browser CORS (default `*`).
+Response shape from GuestOS: `{ "tasks": [ { "id", "name", "status", "progress", "message", "timestamp", "updated_at", "remote_id", "template_vmid", "hostname", "result_vmid", … } ] }`.
 
+Also: `GET /api/tasks/<id>` and HTML `/jobs`.
+
+## One-click launch (browser)
+
+PDM **Customize (GuestOS)** (Windows templates only) asks PDM
+`POST /api2/extjs/guestos/launch`, then opens the returned URL:
+
+`https://<host>/launch?template_vmid=…&remote_id=…&exp=…&jti=…&sig=…`
+
+GuestOS verifies HMAC (`GUESTOS_LAUNCH_SECRET`), creates a session, redirects to `/sysprep_form`. Tokens expire (`GUESTOS_LAUNCH_TTL`, default 300s) and are single-use.
 ## Smoke check from the PDM host
 
 ```bash
@@ -100,17 +110,50 @@ curl -fk -X POST "$GUESTOS_URL/start_sysprep_workflow" \
   }'
 ```
 
+## Automated smoke tests
+
+### CI (mocked workflow — always safe)
+
+```bash
+pytest tests/test_sysprep_workflow_smoke.py
+```
+
+Runs `sysprep_workflow_task` end-to-end with Proxmox/guest-agent calls stubbed. No lab required.
+
+### Lab live (after major changes — destructive)
+
+Run on the GuestOS host after meaningful workflow/API/Proxmox changes (not on a schedule). Needs Compose up, `.env`, and a disposable Windows template:
+
+```bash
+cd /opt/proxmox-guestos-customization
+# Prefer docker exec so cleanup can import Flask/Proxmox helpers:
+docker exec -e PYTHONUNBUFFERED=1 proxmox-guestos-customization-web-1 \
+  python3 /app/scripts/pdm_api_smoke.py \
+    --base-url http://127.0.0.1:5001 \
+    --start-workflow --template-vmid 120 --remote-id vie-1 \
+    --poll --cleanup
+```
+
+(`GUESTOS_API_TOKEN` / `PRIMARY_BRIDGE` come from the container env. Omit `--bridge` to use the API default.)
+
+- Unique hostname is generated unless `--hostname` is set.
+- `--cleanup` deletes the result VM after `SUCCESS` (uses `delete_vm`).
+- Exit `0` = SUCCESS, `2` = FAILURE/timeout, `3` = cleanup failed.
+- If `bridge` is omitted in the API body, GuestOS defaults to `PRIMARY_BRIDGE` (else `vmbr0`).
+
 ## Phase 4 — Thin PDM UI fork
 
 | Item | Value |
 |------|--------|
 | Fork | https://github.com/RobertLukan/proxmox-datacenter-manager-guestos — branch `guestos-sysprep` |
-| Installed package | `proxmox-datacenter-manager-ui` **1.1.3+guestos.5** (apt-hold) |
-| Baked `GUESTOS_BASE` | `https://192.168.123.197` |
-| Deep link | `{GUESTOS_BASE}/launch?…` (HMAC; skips GuestOS password) |
-| Job history | PDM **GuestOS** tab → `{GUESTOS_BASE}/api/tasks` |
+| Installed packages | UI **1.1.3+guestos.8**, server **1.1.7+guestos.8** (proxy + Customize) |
+| Config | `/etc/proxmox-datacenter-manager/guestos.cfg` (`base-url`, `api-token`, `launch-secret`) |
+| Customize | Windows templates only → PDM `POST …/guestos/launch` → GuestOS `/launch?…` |
+| Job history | PDM **GuestOS** tab → PDM `GET …/guestos/tasks` (server proxies GuestOS) |
 
 **Operator smoke:** PDM → remote `vie-1` → **Windows template** → **Customize (GuestOS)** → GuestOS wizard already logged in.
+
+Production TLS / `PROXMOX_VERIFY_SSL`: see [`TLS_PRODUCTION.md`](TLS_PRODUCTION.md).
 
 ## Firewall sketch
 

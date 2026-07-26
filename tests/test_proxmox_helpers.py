@@ -247,3 +247,56 @@ def test_require_sysprep_template_accepts_windows_template(monkeypatch):
     monkeypatch.setattr(pm, 'get_proxmox_api', lambda: _FakeProxmoxTemplates(vms, configs))
     monkeypatch.setattr(pm, '_get_vm_node', lambda vmid: 'pve')
     assert pm.require_sysprep_template(120) == 'win10'
+
+
+def test_delete_vm_stops_then_deletes(monkeypatch):
+    calls = {'stop': 0, 'delete': 0}
+
+    class _Postable:
+        def __init__(self, key):
+            self._key = key
+
+        def post(self, **_kwargs):
+            calls[self._key] += 1
+
+    class _StatusCurrent:
+        def get(self):
+            if calls['stop'] == 0:
+                return {'status': 'running'}
+            return {'status': 'stopped'}
+
+    class _Status:
+        def __init__(self):
+            self.current = _StatusCurrent()
+            self.stop = _Postable('stop')
+            self.shutdown = _Postable('stop')
+
+    class _Qemu:
+        def __init__(self):
+            self.status = _Status()
+
+        def delete(self, **params):
+            calls['delete'] += 1
+            assert params.get('purge') == 1
+            return {'ok': 1}
+
+    class _Node:
+        def qemu(self, vmid):
+            assert vmid == 9055
+            return _Qemu()
+
+    class _Nodes:
+        def __call__(self, node):
+            assert node == 'pve'
+            return _Node()
+
+    class _Px:
+        def __init__(self):
+            self.nodes = _Nodes()
+
+    monkeypatch.setattr(pm, 'get_proxmox_api', lambda: _Px())
+    monkeypatch.setattr(pm, '_get_vm_node', lambda vmid: 'pve')
+    monkeypatch.setattr(pm.time, 'sleep', lambda *_a, **_k: None)
+    pm.delete_vm(9055)
+    assert calls['stop'] == 1
+    assert calls['delete'] == 1

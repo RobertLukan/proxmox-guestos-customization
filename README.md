@@ -113,6 +113,14 @@ Only needed if you still use the deprecated WinRM path:
 
 ## Installation and Setup
 
+**Full guide (lab vs production, GuestOS + optional PDM fork):**
+[`docs/INSTALL.md`](docs/INSTALL.md).
+
+TLS hardening: [`docs/TLS_PRODUCTION.md`](docs/TLS_PRODUCTION.md).  
+PDM / machine API: [`docs/PDM_INTEGRATION.md`](docs/PDM_INTEGRATION.md).
+
+### Quick local / venv setup
+
 ```bash
 git clone https://github.com/RobertLukan/proxmox-guestos-customization/
 cd proxmox-guestos-customization
@@ -226,8 +234,8 @@ pytest
 
 ## Security notes
 
--   Run behind TLS (`BEHIND_REVERSE_PROXY=True`).
--   Treat `GUESTOS_LAUNCH_SECRET` like an API key (extractable from the PDM UI wasm in a lab fork — rotate for real deployments).
+-   Run behind TLS (`BEHIND_REVERSE_PROXY=True`). For non-lab deploys see [`docs/TLS_PRODUCTION.md`](docs/TLS_PRODUCTION.md) (`PROXMOX_VERIFY_SSL`, trusted Caddy cert, PDM `verify-tls`).
+-   Keep `GUESTOS_LAUNCH_SECRET` / `GUESTOS_API_TOKEN` on the GuestOS host and in PDM `guestos.cfg` only (not in UI wasm).
 -   Do not re-enable in-place Sysprep on arbitrary VMs.
 -   Prefer Sysprep over WinRM so guest management ports stay closed.
 

@@ -60,6 +60,37 @@ def test_sysprep_start_with_api_token_skips_csrf(client, app, monkeypatch):
     assert '_pve' not in captured['data']
 
 
+def test_sysprep_start_defaults_bridge_from_primary(client, app, monkeypatch):
+    """API clients (PDM smoke) may omit bridge; use PRIMARY_BRIDGE."""
+    app.config['API_TOKENS'] = frozenset({'good-token'})
+    app.config['PRIMARY_BRIDGE'] = 'vmbr9'
+    captured = {}
+
+    class _Task:
+        @staticmethod
+        def delay(task_id, data):
+            captured['data'] = data
+
+    monkeypatch.setattr('app.routes.sysprep_workflow_task', _Task)
+    monkeypatch.setattr('app.routes.require_sysprep_template', lambda vmid, **kw: 'win11')
+    resp = client.post(
+        '/start_sysprep_workflow',
+        json={
+            'hostname': 'BRIDGEDEF01',
+            'template_vmid': '100',
+            'cores': 2,
+            'ram': 4096,
+            'network_mode': 'dhcp',
+            'administrator_password': 'password123',
+            'timezone': 'UTC',
+            'join_domain': False,
+        },
+        headers={'Authorization': 'Bearer good-token'},
+    )
+    assert resp.status_code == 200
+    assert captured['data']['bridge'] == 'vmbr9'
+
+
 def test_sysprep_start_session_still_needs_csrf(client, monkeypatch):
     class _Task:
         @staticmethod
