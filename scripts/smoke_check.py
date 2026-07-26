@@ -7,10 +7,9 @@ exercises the exact code paths the web app relies on.
 
 Usage:
     python scripts/smoke_check.py            # run all read-only checks
-    python scripts/smoke_check.py --vmid 123 # also resolve a WinRM IP for VM 123
 
 Requires a populated .env (at minimum: SECRET_KEY, PROXMOX_HOST, PROXMOX_USER,
-PROXMOX_PASSWORD). Optional: WINRM_SUBNET, PRIMARY_BRIDGE, TEMP_BRIDGE.
+PROXMOX_PASSWORD). Optional: PRIMARY_BRIDGE.
 """
 import argparse
 import os
@@ -59,9 +58,7 @@ def check_config():
     line(INFO, f"PROXMOX_USER      = {user or '(unset)'}")
     line(INFO, f"PROXMOX_PASSWORD  = {'set' if pw else '(unset)'}")
     line(INFO, f"PROXMOX_VERIFY_SSL= {app.config.get('PROXMOX_VERIFY_SSL')}")
-    line(INFO, f"WINRM_SUBNET      = {app.config.get('WINRM_SUBNET') or '(unset)'}")
     line(INFO, f"PRIMARY_BRIDGE    = {app.config.get('PRIMARY_BRIDGE')}")
-    line(INFO, f"TEMP_BRIDGE       = {app.config.get('TEMP_BRIDGE')}")
     ok = all([host, user, pw])
     if not ok:
         line(FAIL, "Missing one of PROXMOX_HOST/USER/PASSWORD in .env")
@@ -123,33 +120,11 @@ def check_bridges():
     names = {b.get("iface") for b in bridges}
     for b in bridges:
         line(PASS, f"{b.get('iface')} on node-level (type={b.get('type')})")
-    for cfg_key in ("PRIMARY_BRIDGE", "TEMP_BRIDGE"):
-        want = app.config.get(cfg_key)
-        if want in names:
-            line(PASS, f"{cfg_key}={want} exists")
-        else:
-            line(WARN, f"{cfg_key}={want} not found among discovered bridges")
-
-
-def check_manageable_vms():
-    header("Manageable VMs (running + lifecycle- tag)")
-    vms = pm.get_manageable_vms()
-    if not vms:
-        line(INFO, "No manageable VMs (this is normal on a clean lab).")
-        return
-    for vm in vms:
-        line(PASS, f"vmid={vm['vmid']} name={vm['name']} node={vm['node']} "
-                   f"tags={vm['tags']}")
-
-
-def check_winrm_ip(vmid):
-    header(f"WinRM IP resolution for VM {vmid}")
-    ip = pm.select_winrm_ip(vmid)
-    if ip:
-        line(PASS, f"select_winrm_ip({vmid}) -> {ip}")
+    want = app.config.get("PRIMARY_BRIDGE")
+    if want in names:
+        line(PASS, f"PRIMARY_BRIDGE={want} exists")
     else:
-        line(WARN, f"select_winrm_ip({vmid}) -> None "
-                   "(guest agent not ready, or no IP in WINRM_SUBNET)")
+        line(WARN, f"PRIMARY_BRIDGE={want} not found among discovered bridges")
 
 
 def _gib(n):
@@ -161,9 +136,7 @@ def _gib(n):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vmid", type=int, default=None,
-                        help="Optionally resolve a WinRM IP for this VM (read-only).")
-    args = parser.parse_args()
+    parser.parse_args()
 
     print("Proxmox GuestOS Customization - Tier-0 read-only smoke check")
     print("(no VMs are created, modified, or deleted)")
@@ -179,9 +152,6 @@ def main():
         check_nodes(proxmox)
         check_templates()
         check_bridges()
-        check_manageable_vms()
-        if args.vmid is not None:
-            check_winrm_ip(args.vmid)
 
     print()
     if _failures:

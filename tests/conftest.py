@@ -4,7 +4,6 @@ import tempfile
 # Configure the environment before importing the app so config.py loads cleanly
 # without a real .env (SECRET_KEY is required, and we want an isolated test DB).
 os.environ.setdefault('SECRET_KEY', 'test-secret-key')
-os.environ.setdefault('WINRM_SUBNET', '192.168.100.0/24')
 _db_fd, _db_path = tempfile.mkstemp(suffix='.db')
 os.environ.setdefault('DATABASE_URL', f'sqlite:///{_db_path}')
 

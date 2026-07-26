@@ -82,9 +82,11 @@ def test_setup_ps1_contains_network_config():
     assert "@('10.0.5.1', '8.8.8.8')" in ps1
     # MAC is normalized to dash-separated uppercase inside PowerShell.
     assert "'BC:24:11:AA:BB:CC'.Replace(':', '-').ToUpper()" in ps1
-    # Server-safe static path: address and default route are separate.
+    # Server-safe static path: address and default route are separate
+    # (avoid New-NetIPAddress -DefaultGateway, which fails on Server 2019).
     assert 'New-NetRoute' in ps1
-    assert '-DefaultGateway' not in ps1
+    assert 'New-NetIPAddress' in ps1
+    assert '-DefaultGateway $gateway' not in ps1
     assert r"C:\ProgramData\GuestOS\setup.log" in ps1
 
 

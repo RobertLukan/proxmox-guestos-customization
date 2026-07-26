@@ -4,13 +4,11 @@
 optional PDM fork packages, privileges, firewall). This page is the API and
 lab-integration reference.
 
+**Upgrading from 1.x:** see [`MIGRATE_2.0.md`](MIGRATE_2.0.md) — GuestOS 2.0 removed
+the legacy WinRM reconfigure path.
+
 GuestOS is one app. **Sysprep customize** (template → clone → guest agent) is the
-supported path for PDM and new standalone use.
-
-**WinRM reconfigure** remains in the standalone browser UI as **legacy / deprecated**
-(lifecycle-tagged clones only). Do not build PDM or new automation on WinRM routes.
-
-In-place Sysprep of existing/production VMs is disabled.
+only supported customization path for PDM and standalone use.
 
 Current app version is in [`VERSION`](../VERSION) and `GET /api/version`.
 
@@ -47,8 +45,6 @@ docker compose up -d --build
 | GET | `/task_status/<task_id>` | Bearer / token **or** session |
 
 `POST /start_sysprep_existing_vm_task` returns **403** (disabled — protects production VMs).
-
-Do **not** call reconfigure/WinRM routes from PDM (legacy standalone only; deprecated).
 
 ## Job history (PDM GuestOS tab)
 

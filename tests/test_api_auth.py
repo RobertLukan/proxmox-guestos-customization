@@ -37,7 +37,7 @@ def test_sysprep_start_with_api_token_skips_csrf(client, app, monkeypatch):
             captured['data'] = data
 
     monkeypatch.setattr('app.routes.sysprep_workflow_task', _Task)
-    monkeypatch.setattr('app.routes.require_windows_guest', lambda vmid, **kw: 'win11')
+    monkeypatch.setattr('app.routes.require_sysprep_template', lambda vmid, **kw: 'win11')
     resp = client.post(
         '/start_sysprep_workflow',
         json={

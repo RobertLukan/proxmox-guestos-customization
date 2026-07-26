@@ -22,38 +22,11 @@
     <div class="d-grid gap-2">
         <button type="submit" name="purpose" value="sysprep_now" formaction="{{ url_for('sysprep_form') }}" class="btn btn-primary">Clone + Sysprep (customize)</button>
     </div>
-    {% if winrm_enabled %}
-    <details class="legacy-panel mt-4">
-        <summary class="legacy-summary">
-            <span class="badge text-bg-warning">Legacy</span>
-            WinRM reconfigure (deprecated)
-        </summary>
-        <p class="form-text mt-2 mb-2">
-            Prefer <strong>Clone + Sysprep</strong>. WinRM needs a temp NIC and open management ports;
-            it is kept only for older lifecycle-tagged clones and may be removed later.
-        </p>
-        <div class="d-grid gap-2">
-            <button type="submit" name="purpose" value="winrm" class="btn btn-outline-secondary btn-sm">Clone &amp; Configure (WinRM only)</button>
-            <a href="{{ url_for('reconfigure_existing_vm') }}" class="btn btn-outline-secondary btn-sm">Existing VMs (WinRM reconfigure)</a>
-        </div>
-    </details>
-    {% endif %}
 </form>
 {% else %}
 <div class="alert alert-warning" role="alert">
     No Windows templates found. Set the VM <code>ostype</code> to a Windows value (e.g. <code>win10</code>, <code>win11</code>) and convert to a Proxmox template.
 </div>
-{% if winrm_enabled %}
-<details class="legacy-panel mt-3">
-    <summary class="legacy-summary">
-        <span class="badge text-bg-warning">Legacy</span>
-        WinRM reconfigure (deprecated)
-    </summary>
-    <div class="d-grid gap-2 mt-2">
-        <a href="{{ url_for('reconfigure_existing_vm') }}" class="btn btn-outline-secondary btn-sm">Existing VMs (WinRM reconfigure)</a>
-    </div>
-</details>
-{% endif %}
 {# Keep a CSRF field for forms that post from this page context / tests. #}
 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 {% endif %}

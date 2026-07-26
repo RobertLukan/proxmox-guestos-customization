@@ -1,10 +1,8 @@
 """Input validation helpers.
 
-These are used to sanitize user-supplied values before they are sent to a
-guest VM (over WinRM or the QEMU guest agent). Rejecting malformed input early
-is the first line of defense against command/script injection: combined with
-the parameter-passing helper in ``app.proxmox``, no user-controlled bytes are
-ever interpolated directly into PowerShell syntax.
+These sanitize user-supplied values before they are written into Sysprep
+answer files / guest-agent scripts. Rejecting malformed input early is the
+first line of defense against command/script injection.
 """
 
 import ipaddress

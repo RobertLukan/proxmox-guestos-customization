@@ -2,14 +2,15 @@
 
 A Flask web application to automate cloning and **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize).
 
+GuestOS **2.0** is **Sysprep-only**. The legacy WinRM reconfigure path (temp NIC,
+WinRM ports, "Existing VMs") has been removed — see
+[docs/MIGRATE_2.0.md](docs/MIGRATE_2.0.md) if you are upgrading from 1.x.
+
 | Path | Status | How it works |
 |------|--------|----------------|
-| **Sysprep customize** | **Supported** (recommended) | Template → clone → guest-agent writes unattend + `setup.ps1` → `sysprep /generalize` → verify |
-| **WinRM reconfigure** | **Legacy / deprecated** | Clone → temp NIC/DHCP → WinRM → apply static IP / hostname / optional domain join |
+| **Sysprep customize** | **Supported** (only path) | Template → clone → guest-agent writes unattend + `setup.ps1` → `sysprep /generalize` → verify |
 
 In-place Sysprep of existing/production VMs is **disabled** (protects live guests).
-
-WinRM remains in the standalone UI for existing lifecycle-tagged clones and lab rollback, but **new work should use Clone + Sysprep**. PDM integration is Sysprep-only.
 
 ## Recent Improvements
 
@@ -30,14 +31,12 @@ WinRM remains in the standalone UI for existing lifecycle-tagged clones and lab 
     -   Domain profiles optionally fill **DNS** and **VLAN**
 -   Background tasks with Celery + Redis.
 -   Web UI + machine API for PDM (`/start_sysprep_workflow`, `/api/tasks`, `/task_status/...`).
--   **Legacy:** WinRM reconfigure for lifecycle-tagged clones (kept for compatibility; not recommended for new deployments).
 
 ## Project Status
 
-**Active development** — Sysprep customize is the primary product path.
+**Active development** — Sysprep customize is the only product path (2.0).
 
 -   **Sysprep customization** (hostname + static/DHCP + optional AD join): validated on **Windows Server 2019** and **Windows 11** in lab.
--   **WinRM reconfiguration**: **deprecated**. Still functional in the standalone UI; no further feature work; prefer Sysprep. May be removed in a future major version.
 -   **Domain join**: live join confirmed on Server 2019; keep real (non-placeholder) `DOMAIN_PROFILES_JSON` for production (see [docs/AD_VALIDATION.md](docs/AD_VALIDATION.md)).
 
 ## Workflow Overview
@@ -55,25 +54,11 @@ WinRM remains in the standalone UI for existing lifecycle-tagged clones and lab 
 
 From **PDM**: open a **template** → **Customize (GuestOS)** → signed `/launch` deep-link (HTTPS) → wizard.
 
-### WinRM path (legacy / deprecated)
-
-Kept only for older lifecycle-tagged clones that were never Sysprep’d. Prefer rebuilding from a template with **Clone + Sysprep**.
-
-1. **Clone & Configure (WinRM)** → clone from a prepared template.
-2. On the task page, **Power On VM** when ready (adds temp NIC on `TEMP_BRIDGE`).
-3. Wait for an IP in `WINRM_SUBNET`.
-4. Connect with WinRM; apply primary NIC settings (and optional domain join).
-5. Reboot; optionally remove the temporary NIC.
-
 ## Design Choices
 
 ### Why Sysprep + guest agent (customize)?
 
 No WinRM or temp NIC for hostname/network. Uses the QEMU guest agent and native unattend / FirstLogonCommands. Network config runs from `setup.ps1` so virtio adapters can be selected by MAC. This matches the VMware guest-customization model and is what PDM drives.
-
-### Why WinRM still exists (legacy)?
-
-Earlier standalone path for changing an already-deployed clone without generalizing. It requires a temp NIC, open WinRM, and `WINRM_*` env. **Do not build new automation on it.**
 
 ## Prerequisites
 
@@ -94,16 +79,9 @@ GuestOS lists and accepts **Windows templates only**, based on Proxmox QEMU `ost
 
 Validated guests: **Windows Server 2019**, **Windows 11**.
 
-#### WinRM reconfigure template (legacy)
-
-Only needed if you still use the deprecated WinRM path:
-
--   Guest Agent + VirtIO + WinRM Basic on the temp network; firewall TCP 5985.
-
 ### Network
 
 -   **Sysprep:** static or DHCP on the primary NIC; domain join needs DNS that can resolve the DC.
--   **WinRM (legacy):** DHCP on `TEMP_BRIDGE`; app host must reach `WINRM_SUBNET`.
 
 ### Software
 
@@ -117,7 +95,8 @@ Only needed if you still use the deprecated WinRM path:
 [`docs/INSTALL.md`](docs/INSTALL.md).
 
 TLS hardening: [`docs/TLS_PRODUCTION.md`](docs/TLS_PRODUCTION.md).  
-PDM / machine API: [`docs/PDM_INTEGRATION.md`](docs/PDM_INTEGRATION.md).
+PDM / machine API: [`docs/PDM_INTEGRATION.md`](docs/PDM_INTEGRATION.md).  
+1.x → 2.0: [`docs/MIGRATE_2.0.md`](docs/MIGRATE_2.0.md).
 
 ### Quick local / venv setup
 
@@ -194,9 +173,7 @@ See `.env.example`. Key variables:
 | `GUESTOS_LAUNCH_TTL` | Launch token lifetime seconds (default `300`) |
 | `GUESTOS_TLS_HOST` | Hostname/IP for Caddy TLS (default lab IP) |
 | `GUESTOS_PATH_PREFIX` | Optional subpath mount (leave empty for site-root HTTPS) |
-| `WINRM_USERNAME` / `PASSWORD` | **Legacy** default WinRM creds (standalone reconfigure only) |
-| `WINRM_SUBNET` | **Legacy** allowed temp IP subnet for WinRM |
-| `PRIMARY_BRIDGE` / `TEMP_BRIDGE` | Final vs temporary bridges (`TEMP_BRIDGE` mainly for legacy WinRM) |
+| `PRIMARY_BRIDGE` | Bridge for the cloned VM's network interface |
 | `SECRET_KEY` | **Required** — sessions + CSRF |
 | `APP_VERSION` | Optional override of `VERSION` file |
 | `BEHIND_REVERSE_PROXY` | ProxyFix + Secure cookies |
@@ -221,7 +198,6 @@ AD join checklist: [docs/AD_VALIDATION.md](docs/AD_VALIDATION.md).
 1. Open **https://\<host\>/** (accept the lab self-signed cert once) or loopback HTTP for debug.
 2. Log in (or arrive via PDM **Customize** launch link); change the default password.
 3. Run **Clone + Sysprep** from a Windows template.
-4. Avoid the home-page **Legacy (WinRM)** actions unless you maintain older clones.
 
 ## Development / Testing
 
@@ -237,7 +213,7 @@ pytest
 -   Run behind TLS (`BEHIND_REVERSE_PROXY=True`). For non-lab deploys see [`docs/TLS_PRODUCTION.md`](docs/TLS_PRODUCTION.md) (`PROXMOX_VERIFY_SSL`, trusted Caddy cert, PDM `verify-tls`).
 -   Keep `GUESTOS_LAUNCH_SECRET` / `GUESTOS_API_TOKEN` on the GuestOS host and in PDM `guestos.cfg` only (not in UI wasm).
 -   Do not re-enable in-place Sysprep on arbitrary VMs.
--   Prefer Sysprep over WinRM so guest management ports stay closed.
+-   Sysprep + the QEMU guest agent keep guest management ports closed (no WinRM).
 
 ## License
 

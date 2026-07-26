@@ -18,7 +18,7 @@ def test_login_page_renders_with_csrf(client):
 
 
 def test_state_changing_post_without_csrf_is_rejected(client):
-    resp = client.post('/start_clone_task', json={'template_vmid': 1})
+    resp = client.post('/select', data={'template_vmid': 1})
     assert resp.status_code == 400  # CSRF rejection happens before the view
 
 
@@ -88,21 +88,9 @@ def test_index_uses_base_layout_with_csrf_meta(client, monkeypatch):
     assert b'app-version' in resp.data
     assert b'v' + client.application.config['APP_VERSION'].encode() in resp.data
     assert b'Clone + Sysprep (customize)' in resp.data
-    assert b'Clone &amp; Configure (WinRM only)' not in resp.data  # WinRM off by default
+    assert b'WinRM' not in resp.data
     assert b'Windows template' in resp.data
     assert b'In-place Sysprep' in resp.data or b'not allowed' in resp.data
-
-
-def test_index_shows_legacy_winrm_when_enabled(client, monkeypatch, app):
-    app.config['GUESTOS_ENABLE_WINRM'] = True
-    monkeypatch.setattr(
-        'app.routes.get_template_vms',
-        lambda: [{'vmid': 100, 'name': 'Win11-Template'}],
-    )
-    _login(client)
-    resp = client.get('/')
-    assert b'Legacy' in resp.data
-    assert b'Clone &amp; Configure (WinRM only)' in resp.data
 
 
 def test_select_template_sysprep_later_redirects_to_sysprep_form(client, monkeypatch):
@@ -128,20 +116,18 @@ def test_select_template_sysprep_later_redirects_to_sysprep_form(client, monkeyp
     assert b'data-wizard' in resp.data
 
 
-def test_select_template_rejects_non_windows(client, monkeypatch):
+def test_select_template_rejects_non_sysprep_template(client, monkeypatch):
     monkeypatch.setattr(
         'app.routes.get_template_vms',
         lambda: [{'vmid': 100, 'name': 'Win11-Template'}],
     )
     def _reject(vmid, **_kw):
         raise ValueError(f'VM {vmid} is not a Windows guest (ostype="l26").')
-    monkeypatch.setattr('app.routes.require_windows_guest', _reject)
-    monkeypatch.setattr('app.routes.is_proxmox_template', lambda vmid, **kw: True)
+    monkeypatch.setattr('app.routes.require_sysprep_template', _reject)
     _login(client)
     token = _csrf_token(client.get('/').data)
     resp = client.post('/select', data={
         'template_vmid': '50',
-        'purpose': 'winrm',
         'csrf_token': token,
     }, follow_redirects=True)
     assert resp.status_code == 200
@@ -224,26 +210,6 @@ def test_sysprep_form_get_deep_link(client, monkeypatch):
     assert b'value="100"' in resp.data
     assert b'name="remote_id"' in resp.data
     assert b'value="lab"' in resp.data
-
-def test_reconfigure_network_wizard_bootstrap5_and_fields(client, monkeypatch, app):
-    app.config['GUESTOS_ENABLE_WINRM'] = True
-    monkeypatch.setattr('app.routes.select_winrm_ip', lambda vmid: '192.168.100.10')
-    _login(client)
-    resp = client.get('/reconfigure_network/121/test-uuid?temp_ip_address=10.0.0.5&primary_mac_address=aa:bb:cc:dd:ee:ff')
-    assert resp.status_code == 200
-    html = resp.data
-    assert b'csrf-token' in html
-    assert b'data-wizard' in html
-    assert b'bootstrap-5.3.0' in html or b'bootstrap-5.3.0.min.css' in html
-    assert b'form-group' not in html  # BS4 class island removed
-    assert b'name="new_ip_address"' in html
-    assert b'name="netmask"' in html
-    assert b'name="gateway"' in html
-    assert b'id="use_predefined_winrm"' in html
-    assert b'id="join_domain_checkbox"' in html
-    assert b'id="remove_temp_interface"' in html
-    assert b'js/forms.js' in html
-
 
 def test_start_sysprep_unknown_profile_returns_field_errors(client, monkeypatch):
     class _Task:

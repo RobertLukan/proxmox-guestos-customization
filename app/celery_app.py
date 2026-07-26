@@ -7,7 +7,6 @@ from app.proxmox import (
     write_file_to_guest,
     run_command_in_guest,
     run_shutdown_command_in_guest,
-    get_vm_ip,
     get_proxmox_api,
     get_primary_mac_address,
     _get_vm_node,
@@ -231,7 +230,7 @@ def _read_domain_membership(vmid):
 
 def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
                            expected_domain=None, timeout=None, on_progress=None):
-    """Best-effort post-sysprep verification via the QEMU guest agent (no WinRM).
+    """Best-effort post-sysprep verification via the QEMU guest agent.
 
     Returns ``(summary, ok)``. ``ok`` is False when a required static IP never
     appears, the hostname does not match, or an expected domain join is not

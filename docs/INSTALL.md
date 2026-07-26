@@ -119,7 +119,8 @@ Minimum production-oriented settings:
 | `DOMAIN_PROFILES_JSON` | Real AD profiles if you join domains (no placeholders) |
 | `PVE_REMOTES_JSON` | Optional named remotes for multi-cluster / PDM `remote_id` |
 
-Do **not** enable WinRM (`GUESTOS_ENABLE_WINRM`) for new production designs.
+Remove any leftover 1.x keys from `.env` if upgrading (`WINRM_*`, `TEMP_BRIDGE`,
+`GUESTOS_ENABLE_WINRM`) — see [MIGRATE_2.0.md](MIGRATE_2.0.md).
 
 ### 2.3 TLS certificates
 

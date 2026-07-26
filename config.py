@@ -72,21 +72,8 @@ except json.JSONDecodeError:
     print("Warning: Could not decode DOMAIN_PROFILES_JSON. Using empty profiles.")
     DOMAIN_PROFILES = {}
 
-# WinRM credentials (legacy / deprecated standalone reconfigure path).
-# Prefer Sysprep customize; these are unused by the PDM machine API.
-# Enable the Legacy WinRM UI with GUESTOS_ENABLE_WINRM=True.
-WINRM_USERNAME = os.environ.get('WINRM_USERNAME', 'Administrator')
-WINRM_PASSWORD = os.environ.get('WINRM_PASSWORD')
-
-# WinRM temp-NIC subnet (legacy). Leave unset if you only use Sysprep.
-WINRM_SUBNET = os.environ.get('WINRM_SUBNET')
-
-# Feature flag: expose Legacy WinRM clone/reconfigure UI and routes (default off).
-GUESTOS_ENABLE_WINRM = _env_bool('GUESTOS_ENABLE_WINRM', False)
-
 # Network Configuration
 PRIMARY_BRIDGE = os.environ.get('PRIMARY_BRIDGE', 'vmbr0')
-TEMP_BRIDGE = os.environ.get('TEMP_BRIDGE', 'vmbr1')
 
 # Secret key for session management. Required: without it Flask sessions and
 # CSRF tokens are insecure, so fail fast rather than starting up with None.
@@ -120,7 +107,7 @@ GUESTOS_PATH_PREFIX = (os.environ.get('GUESTOS_PATH_PREFIX') or '').strip().rstr
 GUESTOS_CORS_ORIGINS = (os.environ.get('GUESTOS_CORS_ORIGINS') or '*').strip()
 
 # Shared HMAC secret for PDM → GuestOS one-click launch URLs (short-lived).
-# Must match the value baked into the PDM UI fork (ui/src/guestos.rs).
+# Must match launch-secret in PDM /etc/proxmox-datacenter-manager/guestos.cfg.
 GUESTOS_LAUNCH_SECRET = (os.environ.get('GUESTOS_LAUNCH_SECRET') or '').strip()
 try:
     GUESTOS_LAUNCH_TTL = int(os.environ.get('GUESTOS_LAUNCH_TTL') or '300')

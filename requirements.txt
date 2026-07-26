@@ -6,7 +6,6 @@ SQLAlchemy==2.0.51
 Flask-SQLAlchemy==3.1.1
 Celery==5.6.3
 redis==8.0.1
-pywinrm==0.5.0  # legacy WinRM reconfigure path only
 Flask-Login==0.6.3
 Werkzeug==3.1.8
 python-dotenv==1.2.2

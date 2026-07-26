@@ -13,9 +13,6 @@
     <div id="result-alert" class="alert" role="alert"></div>
     <div class="d-grid gap-2">
         <a href="{{ url_for('index') }}" class="btn btn-primary">Back to Template Selection</a>
-        <a id="existing-vms-link" href="{{ url_for('reconfigure_existing_vm') }}" class="btn btn-outline-secondary" style="display: none;">Existing VMs (legacy WinRM)</a>
-        <button id="power-on-btn" class="btn btn-outline-secondary" style="display: none;">Power On VM (legacy WinRM)</button>
-        <button id="wait-for-ip-btn" class="btn btn-info" style="display: none;">Wait for IP</button>
     </div>
 </div>
 {% endblock %}
@@ -27,8 +24,6 @@
     const resultContainer = document.getElementById('result-container');
     const resultAlert = document.getElementById('result-alert');
     const statusContainer = document.getElementById('status-container');
-    const powerOnBtn = document.getElementById('power-on-btn');
-    const existingVmsLink = document.getElementById('existing-vms-link');
 
     const urlParts = window.location.pathname.split('/');
     const taskId = urlParts[urlParts.length - 1];
@@ -55,60 +50,6 @@
 
                 if (data.status === 'SUCCESS') {
                     resultAlert.classList.add('alert-success');
-                    if (data.name === 'Clone for Sysprep') {
-                        const newVmid = data.result_vmid;
-                        resultAlert.innerText = (data.message || '') +
-                            '\n\nClone finished. Power the VM on in Proxmox when ready, then open Existing VMs and choose Sysprep' +
-                            (newVmid ? ' for VMID ' + newVmid + '.' : '.');
-                        existingVmsLink.style.display = 'block';
-                        return;
-                    }
-                    if (data.name === 'Clone VM') {
-                        const newVmid = data.result_vmid;
-                        const vmUuid = data.vm_uuid;
-                        if (newVmid && vmUuid) {
-                            powerOnBtn.style.display = 'block';
-                            powerOnBtn.onclick = async function () {
-                                const powerOnResponse = await fetch('{{ url_for('start_power_on_task') }}', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ vmid: newVmid, vm_uuid: vmUuid })
-                                });
-                                if (powerOnResponse.ok) {
-                                    const powerOnResult = await powerOnResponse.json();
-                                    window.location.href = `{{ url_for('workflow', task_id='') }}${powerOnResult.task_id}`;
-                                } else {
-                                    resultAlert.classList.remove('alert-success');
-                                    resultAlert.classList.add('alert-danger');
-                                    resultAlert.innerText = 'Error starting power on task.';
-                                }
-                            };
-                        }
-                    } else if (data.name === 'Power On VM') {
-                        const vmid = data.result_vmid;
-                        const vmUuid = data.vm_uuid;
-                        if (vmid && vmUuid) {
-                            const waitResponse = await fetch('{{ url_for('start_wait_for_ip_task') }}', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ vmid: vmid, vm_uuid: vmUuid })
-                            });
-                            if (waitResponse.ok) {
-                                const waitResult = await waitResponse.json();
-                                window.location.href = `{{ url_for('workflow', task_id='') }}${waitResult.task_id}`;
-                            } else {
-                                resultAlert.classList.add('alert-danger');
-                                resultAlert.innerText = 'Error starting wait for IP task after power on.';
-                                return;
-                            }
-                        }
-                    } else if (data.name === 'Wait for IP') {
-                        const ipAddress = data.result_ip_address;
-                        if (ipAddress) {
-                            resultAlert.innerText = (data.message || '') + '\nVM IP: ' + ipAddress;
-                            return;
-                        }
-                    }
                 } else {
                     resultAlert.classList.add('alert-danger');
                 }

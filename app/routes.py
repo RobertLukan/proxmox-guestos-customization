@@ -1,6 +1,6 @@
 from flask import render_template, request, Response, redirect, url_for, json, jsonify, flash
 from app import app, db, celery, login_manager, csrf
-from app.proxmox import get_template_vms, get_network_bridges, clone_vm_task, power_on_vm_task, wait_for_guest_agent_and_ip_task, reconfigure_vm_network_task, get_manageable_vms, get_vm_current_ip, prepare_reconfigure_task, get_vm_details, select_winrm_ip, require_windows_guest, require_sysprep_template, require_sysprep_existing_target, is_proxmox_template, use_pve_override
+from app.proxmox import get_template_vms, get_network_bridges, require_windows_guest, require_sysprep_template, require_sysprep_existing_target, is_proxmox_template, use_pve_override
 from app.celery_app import sysprep_workflow_task
 from app.models import Task, User
 from app.api_auth import login_or_api_token_required, with_session_csrf
@@ -176,127 +176,6 @@ def change_password():
             return redirect(url_for('index'))
     return render_template('change_password.html')
 
-@app.route('/reconfigure_network/<vmid>/<vm_uuid>')
-@login_required
-def reconfigure_network(vmid, vm_uuid):
-    """Legacy WinRM reconfigure form (deprecated; prefer Clone + Sysprep)."""
-    blocked = _require_winrm_enabled()
-    if blocked:
-        return blocked
-    temp_ip_address = request.args.get('temp_ip_address')
-    primary_mac_address = request.args.get('primary_mac_address') # New parameter
-
-    current_ip_address = select_winrm_ip(vmid)
-
-    # Never send secrets to the browser: strip domain credentials from the
-    # profiles and do not pass WinRM credentials at all. The server resolves
-    # the actual credentials in start_reconfigure_task.
-    return render_template(
-        'reconfigure_network.html',
-        vmid=vmid,
-        vm_uuid=vm_uuid,
-        temp_ip_address=temp_ip_address,
-        current_ip_address=current_ip_address,
-        primary_mac_address=primary_mac_address,
-        domain_profiles=sanitized_domain_profiles(),
-    )
-
-@app.route('/start_reconfigure_task', methods=['POST'], endpoint='start_reconfigure_task_endpoint')
-@login_required
-def start_reconfigure_task():
-    """Legacy WinRM reconfigure start (deprecated; prefer Clone + Sysprep)."""
-    blocked = _require_winrm_enabled()
-    if blocked:
-        return blocked
-    data = request.json
-    vmid = data.get('vmid')
-    vm_uuid = data.get('vm_uuid')
-    # temp_ip_address = data.get('temp_ip_address') # This will be determined dynamically
-    primary_mac_address = data.get('primary_mac_address')
-    new_ip_address = data.get('new_ip_address')
-    netmask = data.get('netmask')
-    gateway = data.get('gateway')
-    dns_servers = data.get('dns_servers')
-    remove_temp_interface = data.get('remove_temp_interface')
-    vlan = data.get('vlan')
-
-    # --- Resolve WinRM credentials server-side ---
-    # By default use the predefined credentials from config; only fall back to
-    # request-provided credentials when the operator explicitly opts out. Secrets
-    # are never echoed back to (or trusted from) the browser by default.
-    if data.get('use_predefined_winrm', True):
-        winrm_username = app.config.get('WINRM_USERNAME')
-        winrm_password = app.config.get('WINRM_PASSWORD')
-    else:
-        winrm_username = data.get('winrm_username')
-        winrm_password = data.get('winrm_password')
-
-    # --- Resolve domain-join parameters server-side ---
-    ok, err = resolve_domain_join_from_request(data)
-    if not ok:
-        return err
-    join_domain = data.get('join_domain', False)
-    domain_name = data.get('domain_name')
-    domain_username = data.get('domain_username')
-    domain_password = data.get('domain_password')
-    # Prefer DNS from the resolved data (may have been filled from the profile).
-    if data.get('dns_servers'):
-        dns_servers = data.get('dns_servers')
-
-    # Determine the WinRM IP dynamically (first suitable address in WINRM_SUBNET).
-    winrm_subnet_str = app.config.get('WINRM_SUBNET')
-    selected_winrm_ip = select_winrm_ip(vmid)
-
-    if not selected_winrm_ip:
-        task_id = str(uuid.uuid4())
-        task = Task(id=task_id, name='Reconfigure VM Network', description=f'Failed to find a suitable WinRM IP for VM {vmid}', vm_uuid=vm_uuid, status='FAILURE', message=f"Could not find a suitable WinRM IP address within the configured subnet ({winrm_subnet_str if winrm_subnet_str else 'any network'}).")
-        db.session.add(task)
-        db.session.commit()
-        return jsonify({'task_id': task_id}), 500 # Return an error response
-
-    temp_ip_address = selected_winrm_ip # Use the dynamically selected IP
-
-    task_id = str(uuid.uuid4())
-    task = Task(id=task_id, name='Reconfigure VM Network', description=f'Reconfiguring network for VM {vmid}', vm_uuid=vm_uuid)
-    db.session.add(task)
-    db.session.commit()
-
-    reconfigure_vm_network_task.delay(
-        task_id, vmid, vm_uuid, temp_ip_address, new_ip_address, netmask, gateway, 
-        dns_servers, winrm_username, winrm_password, primary_mac_address, 
-        remove_temp_interface, join_domain, domain_name, domain_username, domain_password,
-        vlan
-    )
-    return jsonify({'task_id': task_id})
-
-@app.route('/start_prepare_reconfigure_task', methods=['POST'])
-@login_required
-def start_prepare_reconfigure_task():
-    blocked = _require_winrm_enabled()
-    if blocked:
-        return blocked
-    data = request.json
-    vmid = data.get('vmid')
-    vm_uuid = data.get('vm_uuid')
-
-    task_id = str(uuid.uuid4())
-    task = Task(id=task_id, name='Prepare VM for Reconfiguration', description=f'Preparing VM {vmid} for network reconfiguration', vm_uuid=vm_uuid)
-    db.session.add(task)
-    db.session.commit()
-
-    prepare_reconfigure_task.delay(task_id, vmid, vm_uuid)
-    return jsonify({'task_id': task_id})
-
-@app.route('/reconfigure_existing_vm')
-@login_required
-def reconfigure_existing_vm():
-    """Legacy WinRM VM picker (deprecated; prefer Clone + Sysprep from a template)."""
-    blocked = _require_winrm_enabled()
-    if blocked:
-        return blocked
-    vms = get_manageable_vms()
-    return render_template('reconfigure_selection.html', vms=vms)
-
 @app.route('/')
 @login_required
 def index():
@@ -304,36 +183,7 @@ def index():
     return render_template(
         'index.html',
         templates=templates,
-        winrm_enabled=bool(app.config.get('GUESTOS_ENABLE_WINRM')),
     )
-
-
-def _winrm_disabled_response():
-    """Reject legacy WinRM routes when the feature flag is off."""
-    if request.accept_mimetypes.best == 'application/json' or request.is_json:
-        return jsonify({
-            'error': 'WinRM reconfigure is disabled. Use Clone + Sysprep, or set GUESTOS_ENABLE_WINRM=True.'
-        }), 403
-    flash('WinRM reconfigure is disabled. Use Clone + Sysprep (or set GUESTOS_ENABLE_WINRM=True).')
-    return redirect(url_for('index'))
-
-
-def _require_winrm_enabled():
-    if not app.config.get('GUESTOS_ENABLE_WINRM'):
-        return _winrm_disabled_response()
-    return None
-
-def _reject_non_windows_template(template_vmid):
-    """Flash + redirect home when template_vmid is missing or not Windows."""
-    if not template_vmid:
-        flash('Missing template_vmid')
-        return redirect(url_for('index'))
-    try:
-        require_windows_guest(template_vmid)
-    except ValueError as e:
-        flash(str(e))
-        return redirect(url_for('index'))
-    return None
 
 
 def _reject_non_sysprep_template(template_vmid):
@@ -352,102 +202,10 @@ def _reject_non_sysprep_template(template_vmid):
 @login_required
 def select_template():
     template_vmid = request.form.get('template_vmid')
-    purpose = (request.form.get('purpose') or 'winrm').strip()
-    # Sysprep customization always uses the golden-image wizard (clone + sysprep).
-    if purpose == 'sysprep_now' or purpose == 'sysprep_later':
-        rejected = _reject_non_sysprep_template(template_vmid)
-        if rejected:
-            return rejected
-        return redirect(url_for('sysprep_form', template_vmid=template_vmid))
-    blocked = _require_winrm_enabled()
-    if blocked:
-        return blocked
-    rejected = _reject_non_windows_template(template_vmid)
+    rejected = _reject_non_sysprep_template(template_vmid)
     if rejected:
         return rejected
-    if not is_proxmox_template(template_vmid):
-        flash(f'VMID {template_vmid} is not a Proxmox template.')
-        return redirect(url_for('index'))
-    if purpose not in ('winrm',):
-        purpose = 'winrm'
-    return render_template(
-        'clone.html',
-        template_vmid=template_vmid,
-        purpose=purpose,
-        domain_profiles=app.config['DOMAIN_PROFILES'],
-    )
-
-@app.route('/start_clone_task', methods=['POST'], endpoint='start_clone_task_endpoint')
-@login_required
-def start_clone_task():
-    try:
-        blocked = _require_winrm_enabled()
-        if blocked:
-            return blocked
-        data = request.json
-        template_vmid = data.get('template_vmid')
-        hostname = data.get('hostname')
-        cores = int(data.get('cores'))
-        ram = int(data.get('ram'))
-        bridge = app.config['PRIMARY_BRIDGE']
-        vlan = data.get('vlan')
-        purpose = (data.get('purpose') or 'winrm').strip()
-        if purpose not in ('winrm',):
-            purpose = 'winrm'
-
-        task_id = str(uuid.uuid4())
-        vm_uuid = str(uuid.uuid4()) # Generate unique VM identifier
-        task_name = 'Clone VM'
-        task_desc = f'Cloning VM {hostname} from template {template_vmid}'
-        task = Task(id=task_id, name=task_name, description=task_desc, vm_uuid=vm_uuid)
-        
-        try:
-            db.session.add(task)
-            db.session.commit()
-        except Exception as e:
-            logging.error(f"Error adding task to database: {e}")
-            return jsonify({'error': 'Database error'}), 500
-
-        try:
-            clone_vm_task.delay(task_id, template_vmid, hostname, cores, ram, bridge, vlan)
-        except Exception as e:
-            logging.error(f"Error starting celery task: {e}")
-            return jsonify({'error': 'Celery error'}), 500
-
-        return jsonify({'task_id': task_id})
-    except Exception as e:
-        logging.error(f"Error in start_clone_task: {e}")
-        return jsonify({'error': 'An unexpected error occurred.'}), 500
-
-@app.route('/start_power_on_task', methods=['POST'])
-@login_required
-def start_power_on_task():
-    data = request.json
-    vmid = data.get('vmid')
-    vm_uuid = data.get('vm_uuid') # Get vm_uuid from request
-
-    task_id = str(uuid.uuid4())
-    task = Task(id=task_id, name='Power On VM', description=f'Powering on VM {vmid}', vm_uuid=vm_uuid) # Store vm_uuid
-    db.session.add(task)
-    db.session.commit()
-
-    power_on_vm_task.delay(task_id, vmid, vm_uuid) # Pass vm_uuid to task
-    return jsonify({'task_id': task_id})
-
-@app.route('/start_wait_for_ip_task', methods=['POST'])
-@login_required
-def start_wait_for_ip_task():
-    data = request.json
-    vmid = data.get('vmid')
-    vm_uuid = data.get('vm_uuid') # Get vm_uuid from request
-
-    task_id = str(uuid.uuid4())
-    task = Task(id=task_id, name='Wait for IP', description=f'Waiting for IP for VM {vmid}', vm_uuid=vm_uuid) # Store vm_uuid
-    db.session.add(task)
-    db.session.commit()
-
-    wait_for_guest_agent_and_ip_task.delay(task_id, vmid, vm_uuid) # Pass vm_uuid to task
-    return jsonify({'task_id': task_id})
+    return redirect(url_for('sysprep_form', template_vmid=template_vmid))
 
 @app.route('/task_status/<task_id>')
 @login_or_api_token_required
@@ -576,7 +334,7 @@ def start_sysprep_workflow():
         except ValueError as e:
             return jsonify({'error': str(e)}), 400
 
-    # API / PDM clients may omit bridge; match WinRM-clone default.
+    # API / PDM clients may omit bridge; default to the configured primary bridge.
     if not (data.get('bridge') or '').strip():
         data['bridge'] = app.config.get('PRIMARY_BRIDGE') or 'vmbr0'
 
@@ -603,31 +361,14 @@ def start_sysprep_workflow():
 @app.route('/clone_form')
 @login_required
 def clone_form():
-    """Deep-link: WinRM clone from a Windows template (legacy sysprep_later → full customize)."""
+    """Deep-link: old PDM/bookmarks land on the Clone + Sysprep wizard."""
     template_vmid = request.args.get('template_vmid')
-    purpose = (request.args.get('purpose') or 'winrm').strip()
     remote_id = (request.args.get('remote_id') or '').strip()
-    # Old PDM/bookmarks: sysprep_later → full clone+Sysprep wizard (golden image path).
-    if purpose == 'sysprep_later':
-        return redirect(url_for(
-            'sysprep_form',
-            template_vmid=template_vmid,
-            remote_id=remote_id or None,
-        ))
-    rejected = _reject_non_windows_template(template_vmid)
-    if rejected:
-        return rejected
-    if not is_proxmox_template(template_vmid):
-        flash(f'VMID {template_vmid} is not a Proxmox template.')
-        return redirect(url_for('index'))
-    if purpose not in ('winrm',):
-        purpose = 'winrm'
-    return render_template(
-        'clone.html',
+    return redirect(url_for(
+        'sysprep_form',
         template_vmid=template_vmid,
-        purpose=purpose,
-        domain_profiles=app.config['DOMAIN_PROFILES'],
-    )
+        remote_id=remote_id or None,
+    ))
 
 
 @app.route('/sysprep_existing_vm_form/<vmid>')
