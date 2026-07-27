@@ -12,7 +12,10 @@ from app.proxmox import (
     _get_vm_node,
     use_pve_override,
     require_windows_guest,
+    is_windows_server_2019_template,
+    reconcile_vm_disks,
 )
+from app.disks import prepare_disk_plan
 from app.validators import (
     ValidationError,
     validate_dns_servers,
@@ -33,6 +36,35 @@ def _as_bool(value):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ('true', '1', 't', 'yes', 'on')
+
+
+# Production defaults for the fixed first-boot sleep and guest-agent stability.
+# Smoke tests may pass fast_waits=true to use the short lab timings instead.
+_BOOT_SETTLE_DEFAULT = 180
+_AGENT_STABLE_DEFAULT = 60
+_BOOT_SETTLE_FAST = 30
+_AGENT_STABLE_FAST = 15
+
+
+def _sysprep_wait_timings(data=None):
+    """Return (boot_settle_seconds, agent_stable_seconds).
+
+    Priority: request ``fast_waits`` → app config env overrides → production defaults.
+    """
+    data = data or {}
+    if _as_bool(data.get('fast_waits')):
+        return _BOOT_SETTLE_FAST, _AGENT_STABLE_FAST
+    boot = app.config.get('SYSPREP_BOOT_SETTLE_SECONDS', _BOOT_SETTLE_DEFAULT)
+    stable = app.config.get('SYSPREP_AGENT_STABLE_SECONDS', _AGENT_STABLE_DEFAULT)
+    try:
+        boot = max(0, int(boot))
+    except (TypeError, ValueError):
+        boot = _BOOT_SETTLE_DEFAULT
+    try:
+        stable = max(0, int(stable))
+    except (TypeError, ValueError):
+        stable = _AGENT_STABLE_DEFAULT
+    return boot, stable
 
 def update_task_progress(task_id, progress, message, result_vmid=None, result_ip_address=None):
     """Helper function to update task progress (and optional result fields)."""
@@ -118,7 +150,9 @@ def _render_sysprep_files(data):
     setup_complete_cmd_bytes).
     """
     unattended_xml = render_template('sysprep/unattended.xml', **data).encode('utf-8')
-    setup_ps1 = render_template('sysprep/setup.ps1', **data).encode('utf-8')
+    # UTF-8 BOM so Windows PowerShell 5.1 (-File) does not misread the script as
+    # the system ANSI code page (which corrupts non-ASCII and breaks parsing).
+    setup_ps1 = render_template('sysprep/setup.ps1', **data).encode('utf-8-sig')
     setup_complete = render_template('sysprep/SetupComplete.cmd', **data).encode('utf-8')
     return unattended_xml, setup_ps1, setup_complete
 
@@ -374,6 +408,119 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
     return "; ".join(parts), ok
 
 
+def _verify_disks(vmid, disk_guest_plan, on_progress=None):
+    """Verify disk reconcile outcomes via guest agent. Returns (summary, ok)."""
+    if not disk_guest_plan:
+        return "disks: (none)", True
+
+    def _progress(msg):
+        if on_progress:
+            on_progress(msg)
+
+    # Compact verifier: emit ROLE|LETTER|SIZE_GB|PAGEFILE_OK|STATUS per line.
+    plan_json = json.dumps(disk_guest_plan)
+    ps = r'''
+$ErrorActionPreference = 'Continue'
+$plan = @'
+__PLAN_JSON__
+'@ | ConvertFrom-Json
+foreach ($d in $plan) {
+  $role = $d.role
+  $serial = $d.serial
+  $letter = $d.drive_letter
+  $minGb = [int]$d.min_size_gb
+  $wantPf = [bool]$d.ensure_pagefile
+  $disk = Get-Disk | Where-Object { $_.SerialNumber -and ($_.SerialNumber.Trim() -eq $serial) } | Select-Object -First 1
+  if (-not $disk) {
+    Write-Output ("{0}|{1}|0|0|missing_serial" -f $role, $letter)
+    continue
+  }
+  if ($disk.IsOffline -or $disk.IsReadOnly -or ($disk.OperationalStatus -ne 'Online')) {
+    try {
+      Set-Disk -Number $disk.Number -IsOffline $false -ErrorAction Stop
+      Set-Disk -Number $disk.Number -IsReadOnly $false -ErrorAction SilentlyContinue
+    } catch {}
+    $disk = Get-Disk -Number $disk.Number
+  }
+  $part = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue |
+    Where-Object { $_.DriveLetter -and $_.DriveLetter.ToString().ToUpper() -eq $letter.ToUpper() } |
+    Select-Object -First 1
+  if (-not $part -and $role -eq 'os') {
+    $part = Get-Partition -DriveLetter C -ErrorAction SilentlyContinue | Select-Object -First 1
+    $letter = 'C'
+  }
+  $sizeGb = 0
+  if ($part) {
+    $vol = Get-Volume -DriveLetter $part.DriveLetter -ErrorAction SilentlyContinue
+    if ($vol) { $sizeGb = [math]::Floor($vol.Size / 1GB) }
+  }
+  $pfOk = 1
+  if ($wantPf) {
+    $pfOk = 0
+    $pfs = Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue
+    foreach ($pf in $pfs) {
+      $name = [string]$pf.Name
+      if ($name -and $name.ToUpper().StartsWith(($letter.ToUpper() + ':'))) { $pfOk = 1 }
+    }
+    if ($pfOk -ne 1) {
+      $settings = Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue
+      foreach ($pf in $settings) {
+        $name = [string]$pf.Name
+        if ($name -and $name.ToUpper().StartsWith(($letter.ToUpper() + ':'))) { $pfOk = 1 }
+      }
+    }
+    if ($pfOk -ne 1) {
+      # setup.ps1 may configure via registry (PagingFiles) when CIM is unsafe under SetupComplete.
+      $pfReg = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -Name PagingFiles -ErrorAction SilentlyContinue).PagingFiles
+      foreach ($entry in @($pfReg)) {
+        if ($entry -and $entry.ToUpper().StartsWith(($letter.ToUpper() + ':'))) { $pfOk = 1 }
+      }
+    }
+  }
+  $status = 'ok'
+  # Floor(bytes/1GB) on a "64G" volume often yields 63 — allow 1G slack.
+  if (-not $part) { $status = 'no_volume' }
+  elseif ($sizeGb + 1 -lt $minGb) { $status = 'undersized' }
+  elseif ($wantPf -and $pfOk -ne 1) { $status = 'pagefile_missing' }
+  Write-Output ("{0}|{1}|{2}|{3}|{4}" -f $role, $letter, $sizeGb, $pfOk, $status)
+}
+'''.replace('__PLAN_JSON__', plan_json)
+
+    _progress('Verifying disks via guest agent...')
+    # Write a temp verify script to avoid quoting hell through guest-exec.
+    script_path = r'C:\ProgramData\GuestOS\verify-disks.ps1'
+    try:
+        write_file_to_guest(vmid, ps.encode('utf-8'), script_path)
+        out = run_command_in_guest(
+            vmid,
+            f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
+        ) or ''
+    except Exception as e:  # noqa: BLE001
+        return f'disks: verify error ({e})', False
+
+    parts = []
+    ok = True
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or '|' not in line:
+            continue
+        bits = line.split('|')
+        if len(bits) < 5:
+            continue
+        role, letter, size_gb, pf_ok, status = bits[0], bits[1], bits[2], bits[3], bits[4]
+        if role == 'pagefile' and status == 'ok' and pf_ok == '1':
+            parts.append(f'pagefile={letter}: {size_gb}G in use')
+        elif status == 'ok':
+            parts.append(f'{role}={letter}: {size_gb}G ok')
+        else:
+            parts.append(f'{role}={letter}: {status} ({size_gb}G)')
+            ok = False
+
+    if not parts:
+        return f'disks: no parseable verify output ({out[:200]!r})', False
+    return 'disks: ' + '; '.join(parts), ok
+
+
 def _guest_agent_responsive(proxmox, node, vmid):
     """True when the QEMU Guest Agent answers a cheap probe."""
     try:
@@ -462,7 +609,7 @@ def _wait_for_sysprep_shutdown(
     return None
 
 
-def _complete_sysprep_power_cycle(task_id, vmid, progress_base=88):
+def _complete_sysprep_power_cycle(task_id, vmid, progress_base=88, agent_stable_for=60):
     """After sysprep is issued: wait for stop/reboot, power on if needed.
 
     Returns True on success, False if the wait timed out (caller marks FAILURE).
@@ -497,7 +644,7 @@ def _complete_sysprep_power_cycle(task_id, vmid, progress_base=88):
             "VM already running after Sysprep; waiting for guest agent...",
         )
 
-    wait_for_guest_agent(vmid, timeout=1800, stable_for=60)
+    wait_for_guest_agent(vmid, timeout=1800, stable_for=agent_stable_for)
     return True
 
 @celery.task(bind=True)
@@ -510,6 +657,13 @@ def sysprep_workflow_task(self, task_id, data):
                     require_windows_guest(data['template_vmid'])
                     _validate_sysprep_network(data)
                     _prepare_domain_join(data)
+                    if _as_bool(data.get('manage_disks')) and not is_windows_server_2019_template(
+                        data['template_vmid']
+                    ):
+                        # Policy: disk reconcile is supported for Server 2019 templates only.
+                        data['manage_disks'] = False
+                        data['disks'] = []
+                    prepare_disk_plan(data)
                 except ValidationError as e:
                     task = Task.query.get(task_id)
                     task.status = 'FAILURE'
@@ -541,6 +695,18 @@ def sysprep_workflow_task(self, task_id, data):
                     result_vmid=new_vmid,
                 )
 
+                # 1b. Optional disk reconcile (attach / grow) before first boot.
+                if data.get('manage_disks'):
+                    update_task_progress(task_id, 30, "Reconciling disks on Proxmox...")
+                    guest_plan = reconcile_vm_disks(new_vmid, data['disks'])
+                    data['disk_guest_plan'] = guest_plan
+                    data['disk_plan_b64'] = base64.b64encode(
+                        json.dumps(guest_plan).encode('utf-8')
+                    ).decode('ascii')
+                else:
+                    data['disk_guest_plan'] = []
+                    data['disk_plan_b64'] = ''
+
                 # 2. Resolve the primary NIC MAC (for robust adapter selection) and
                 #    render the answer file + post-setup scripts.
                 update_task_progress(task_id, 35, "Generating sysprep files...")
@@ -554,12 +720,19 @@ def sysprep_workflow_task(self, task_id, data):
                 power_on_vm(new_vmid)
                 # Win11 (and some Server builds) reboot several times before the
                 # guest agent stays up; give the first boot cycle room to settle.
-                update_task_progress(task_id, 55, "Waiting 3 minutes for initial OS reboots...")
-                time.sleep(180)
+                # Smoke/lab may pass fast_waits or set SYSPREP_* env overrides.
+                boot_settle, agent_stable = _sysprep_wait_timings(data)
+                if boot_settle:
+                    update_task_progress(
+                        task_id,
+                        55,
+                        f"Waiting {boot_settle}s for initial OS reboots...",
+                    )
+                    time.sleep(boot_settle)
 
                 # 4. Wait for a *stable* QEMU Guest Agent (not just the first ping).
                 update_task_progress(task_id, 60, "Waiting for QEMU Guest Agent to stabilize...")
-                wait_for_guest_agent(new_vmid, timeout=1200, stable_for=60)
+                wait_for_guest_agent(new_vmid, timeout=1200, stable_for=agent_stable)
                 update_task_progress(task_id, 70, "QEMU Guest Agent is ready.")
 
                 # 5. Write the answer file + post-setup scripts to the guest.
@@ -574,7 +747,9 @@ def sysprep_workflow_task(self, task_id, data):
 
                 # 7. Verify: wait for shutdown or post-sysprep boot, then confirm
                 # the guest agent before reporting success.
-                if not _complete_sysprep_power_cycle(task_id, new_vmid, progress_base=92):
+                if not _complete_sysprep_power_cycle(
+                    task_id, new_vmid, progress_base=92, agent_stable_for=agent_stable
+                ):
                     task = Task.query.get(task_id)
                     task.status = 'FAILURE'
                     task.message = (
@@ -591,6 +766,14 @@ def sysprep_workflow_task(self, task_id, data):
                     expected_domain=data.get('domain_name') if data.get('join_domain') else None,
                     on_progress=lambda msg: update_task_progress(task_id, 98, msg),
                 )
+                if data.get('manage_disks') and data.get('disk_guest_plan'):
+                    disk_summary, disk_ok = _verify_disks(
+                        new_vmid,
+                        data['disk_guest_plan'],
+                        on_progress=lambda msg: update_task_progress(task_id, 98, msg),
+                    )
+                    verify_summary = f'{verify_summary}; {disk_summary}'
+                    verify_ok = verify_ok and disk_ok
 
                 task = Task.query.get(task_id)
                 if verify_ok:

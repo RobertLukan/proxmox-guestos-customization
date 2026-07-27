@@ -57,6 +57,49 @@ _WINDOWS_OSTYPES = frozenset({
 })
 
 
+def _looks_like_windows_server_2019_name(name):
+    """Best-effort name matcher for Windows Server 2019 templates."""
+    s = str(name or '').strip().lower()
+    if not s:
+        return False
+    return (
+        'server2019' in s
+        or 'server 2019' in s
+        or 'windows2019' in s
+        or 'windows 2019' in s
+        or 'win2019' in s
+        or 'ws2019' in s
+    )
+
+
+def is_windows_server_2019_template(vmid, node=None, proxmox=None):
+    """True when template metadata indicates Windows Server 2019.
+
+    Proxmox ``ostype`` cannot reliably distinguish Server 2019 from Win11 for
+    all templates in this lab (often both are ``win10``), so this helper uses
+    the template VM name as an operator-controlled hint.
+    """
+    proxmox = proxmox or get_proxmox_api()
+    if not proxmox:
+        return False
+    # Prefer cluster resource name (cheap call).
+    for vm in proxmox.cluster.resources.get(type='vm'):
+        if str(vm.get('vmid')) == str(vmid):
+            if _looks_like_windows_server_2019_name(vm.get('name')):
+                return True
+            break
+    # Fallback to config name when cluster payload has no useful name.
+    node = node or _get_vm_node(vmid)
+    if not node:
+        return False
+    try:
+        cfg = proxmox.nodes(node).qemu(vmid).config.get() or {}
+    except Exception as e:
+        logging.warning(f"Could not read template name for VM {vmid}: {e}")
+        return False
+    return _looks_like_windows_server_2019_name(cfg.get('name'))
+
+
 def is_windows_ostype(ostype):
     """True when ``ostype`` is a Proxmox Windows guest type."""
     if not ostype:
@@ -256,6 +299,320 @@ def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan):
     proxmox.nodes(node).qemu(new_vmid).config.post(cores=cores, memory=ram, net0=net0_config, agent=1)
     
     return {'vmid': new_vmid, 'uuid': vm_uuid}
+
+
+_DISK_KEY_RE = re.compile(r'^(scsi|virtio|sata|ide)(\d+)$')
+_SIZE_RE = re.compile(r'^(\d+(?:\.\d+)?)([KMGT])?$', re.I)
+
+# Options that are not regular key=value disk flags (parsed specially / skipped).
+# Keep media/serial in opts so round-trips and CD-ROM detection work; they are
+# excluded from COPYABLE_DISK_OPTS when attaching new volumes.
+_DISK_OPTS_SKIP = frozenset({
+    'size', 'import-from', 'format', 'volume', 'file',
+})
+
+
+def _is_cdrom_or_iso(parsed, raw_value=None):
+    """True for CD-ROM / ISO / cloud-init attachments (not usable data disks)."""
+    opts = (parsed or {}).get('opts') or {}
+    if str(opts.get('media', '')).lower() == 'cdrom':
+        return True
+    blob = ' '.join([
+        str(raw_value or ''),
+        str((parsed or {}).get('head') or ''),
+        str((parsed or {}).get('volume') or ''),
+    ]).lower()
+    if 'media=cdrom' in blob:
+        return True
+    if 'cloudinit' in blob:
+        return True
+    if '.iso' in blob or '/iso/' in blob or ':iso/' in blob:
+        return True
+    return False
+
+
+def _parse_size_to_gb(token):
+    """Parse Proxmox size tokens like 32G / 65536M / bare integers (GB)."""
+    if token is None:
+        return None
+    s = str(token).strip()
+    if not s:
+        return None
+    m = _SIZE_RE.match(s)
+    if not m:
+        # Bare integer from "storage:16" style new-disk sizes.
+        try:
+            return int(s)
+        except ValueError:
+            return None
+    num = float(m.group(1))
+    unit = (m.group(2) or 'G').upper()
+    mult = {'K': 1 / (1024 ** 2), 'M': 1 / 1024, 'G': 1, 'T': 1024}[unit]
+    return max(1, int(round(num * mult)))
+
+
+def _parse_disk_value(raw):
+    """Split a Proxmox disk config value into storage, volume/size, options, size_gb."""
+    parts = [p for p in str(raw or '').split(',') if p != '']
+    if not parts:
+        return None
+    head = parts[0]
+    opts = {}
+    size_gb = None
+    for p in parts[1:]:
+        if '=' not in p:
+            continue
+        k, v = p.split('=', 1)
+        k = k.strip()
+        v = v.strip()
+        if k == 'size':
+            size_gb = _parse_size_to_gb(v)
+        elif k not in _DISK_OPTS_SKIP:
+            opts[k] = v
+    storage = None
+    volume = head
+    if ':' in head:
+        storage, rest = head.split(':', 1)
+        volume = rest
+        # Unused slot style: storage:16 (size in GB)
+        if rest.isdigit() and size_gb is None:
+            size_gb = int(rest)
+    return {
+        'head': head,
+        'storage': storage,
+        'volume': volume,
+        'opts': opts,
+        'size_gb': size_gb,
+        'raw': raw,
+    }
+
+
+def list_vm_disks(vmid):
+    """Return unused+used disk entries for a QEMU VM (scsi/virtio/sata/ide)."""
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not proxmox or not node:
+        raise Exception(f'VM with VMID {vmid} not found.')
+    cfg = proxmox.nodes(node).qemu(vmid).config.get() or {}
+    disks = []
+    for key, val in cfg.items():
+        m = _DISK_KEY_RE.match(key)
+        if not m:
+            continue
+        parsed = _parse_disk_value(val)
+        if not parsed:
+            continue
+        # CD-ROM / ISO / cloudinit — never treat as attachable data disks.
+        if _is_cdrom_or_iso(parsed, val):
+            continue
+        disks.append({
+            'key': key,
+            'bus': m.group(1),
+            'index': int(m.group(2)),
+            **parsed,
+            'serial': parsed['opts'].get('serial'),
+        })
+    disks.sort(key=lambda d: (d['bus'], d['index']))
+    return disks, cfg, node, proxmox
+
+
+def get_boot_disk_spec(vmid):
+    """Identify the boot/OS disk and return storage, bus, copyable options, key."""
+    disks, cfg, node, proxmox = list_vm_disks(vmid)
+    if not disks:
+        raise Exception(f'VM {vmid} has no usable disks.')
+
+    boot_key = None
+    boot_order = str(cfg.get('boot') or '')
+    # e.g. order=scsi0;ide2;net0
+    for token in re.findall(r'(scsi|virtio|sata|ide)\d+', boot_order):
+        pass
+    m = re.search(r'(scsi|virtio|sata|ide)\d+', boot_order)
+    if m:
+        # Prefer first disk-like device in boot order
+        for part in re.findall(r'((?:scsi|virtio|sata|ide)\d+)', boot_order):
+            if any(d['key'] == part for d in disks):
+                boot_key = part
+                break
+
+    boot = None
+    if boot_key:
+        boot = next((d for d in disks if d['key'] == boot_key), None)
+    if not boot:
+        # Prefer scsi0, then virtio0, sata0, else lowest index.
+        for pref in ('scsi0', 'virtio0', 'sata0', 'ide0'):
+            boot = next((d for d in disks if d['key'] == pref), None)
+            if boot:
+                break
+    if not boot:
+        boot = disks[0]
+
+    opts = {k: v for k, v in boot['opts'].items() if k in (
+        'aio', 'discard', 'cache', 'iothread', 'ssd', 'backup', 'replicate',
+        'detect_zeroes', 'queue-size', 'blocksize',
+    )}
+    if not boot.get('storage'):
+        raise Exception(f'Boot disk {boot["key"]} has no storage id.')
+    return {
+        'key': boot['key'],
+        'bus': boot['bus'],
+        'index': boot['index'],
+        'storage': boot['storage'],
+        'opts': opts,
+        'size_gb': boot.get('size_gb'),
+        'raw': boot.get('raw'),
+        'disks': disks,
+        'node': node,
+        'proxmox': proxmox,
+        'cfg': cfg,
+    }
+
+
+def _next_bus_index(disks, bus):
+    used = {d['index'] for d in disks if d['bus'] == bus}
+    n = 0
+    while n in used:
+        n += 1
+    return n
+
+
+def _format_disk_value(storage, size_gb, opts, serial=None):
+    parts = [f'{storage}:{int(size_gb)}']
+    merged = dict(opts or {})
+    if serial:
+        merged['serial'] = serial
+    for k in sorted(merged.keys()):
+        parts.append(f'{k}={merged[k]}')
+    return ','.join(parts)
+
+
+def _build_disk_config_value(raw_value, serial=None, extra_opts=None):
+    """Rebuild a disk config string: keep volume head + size, merge opts/serial."""
+    parsed = _parse_disk_value(raw_value)
+    if not parsed:
+        return raw_value
+    opts = dict(parsed['opts'])
+    if extra_opts:
+        opts.update({k: v for k, v in extra_opts.items() if v is not None})
+    if serial:
+        opts['serial'] = serial
+    parts = [parsed['head']]
+    size_token = None
+    for p in str(raw_value).split(',')[1:]:
+        if p.startswith('size='):
+            size_token = p
+            break
+    if size_token:
+        parts.append(size_token)
+    for k in sorted(opts.keys()):
+        if k == 'size':
+            continue
+        parts.append(f'{k}={opts[k]}')
+    return ','.join(parts)
+
+
+def _set_disk_serial(proxmox, node, vmid, disk_key, raw_value, serial, extra_opts=None):
+    """Ensure serial= (and optional copyable opts) on an existing disk config."""
+    new_val = _build_disk_config_value(raw_value, serial=serial, extra_opts=extra_opts)
+    if new_val == raw_value:
+        return raw_value
+    proxmox.nodes(node).qemu(vmid).config.post(**{disk_key: new_val})
+    return new_val
+
+
+def _resize_disk_to_gb(proxmox, node, vmid, disk_key, current_gb, target_gb):
+    if current_gb is None or target_gb is None:
+        return False
+    if target_gb <= current_gb:
+        return False
+    # Absolute size resize (Proxmox accepts e.g. 80G).
+    proxmox.nodes(node).qemu(vmid).resize.put(disk=disk_key, size=f'{int(target_gb)}G')
+    return True
+
+
+def reconcile_vm_disks(vmid, disks_plan):
+    """Attach/grow disks per plan. Returns guest_plan list for setup.ps1 / verify.
+
+    New disks use the boot disk storage and copied options (aio, discard, …).
+    """
+    from app.disks import COPYABLE_DISK_OPTS  # local import avoids cycles
+
+    boot = get_boot_disk_spec(vmid)
+    proxmox, node = boot['proxmox'], boot['node']
+    disks = list(boot['disks'])
+    copy_opts = {k: v for k, v in boot['opts'].items() if k in COPYABLE_DISK_OPTS}
+    guest_plan = []
+
+    # Map existing non-boot disks by ascending index for reuse.
+    non_boot = [d for d in disks if d['key'] != boot['key']]
+    non_boot_i = 0
+
+    for item in disks_plan:
+        role = item['role']
+        serial = item['serial']
+
+        if role == 'os':
+            target = item.get('grow_to_gb') or item.get('min_size_gb')
+            grown = False
+            if target:
+                grown = _resize_disk_to_gb(
+                    proxmox, node, vmid, boot['key'], boot.get('size_gb'), target
+                )
+            _set_disk_serial(proxmox, node, vmid, boot['key'], boot['raw'], serial)
+            guest_plan.append({
+                'role': 'os',
+                'serial': serial,
+                'drive_letter': 'C',
+                'min_size_gb': item.get('min_size_gb') or target or boot.get('size_gb') or 1,
+                'ensure_pagefile': False,
+                'reformat': False,
+                'extend': bool(grown or item.get('grow_to_gb')),
+                'label': item.get('label'),
+                'pve_key': boot['key'],
+            })
+            continue
+
+        # Prefer an unused existing disk for this role.
+        matched = None
+        if non_boot_i < len(non_boot):
+            matched = non_boot[non_boot_i]
+            non_boot_i += 1
+
+        size_gb = int(item['size_gb'])
+        if matched:
+            # Reused template disks often lack boot-disk opts (discard/ssd/…).
+            # Align them with the boot disk the same way new attaches do.
+            _set_disk_serial(
+                proxmox, node, vmid, matched['key'], matched['raw'], serial,
+                extra_opts=copy_opts,
+            )
+            cur = matched.get('size_gb')
+            if cur is not None and size_gb > cur:
+                _resize_disk_to_gb(proxmox, node, vmid, matched['key'], cur, size_gb)
+            pve_key = matched['key']
+        else:
+            bus = boot['bus']
+            # Refresh disk list for next free index after prior attaches.
+            disks, _, _, _ = list_vm_disks(vmid)
+            idx = _next_bus_index(disks, bus)
+            pve_key = f'{bus}{idx}'
+            value = _format_disk_value(boot['storage'], size_gb, copy_opts, serial=serial)
+            proxmox.nodes(node).qemu(vmid).config.post(**{pve_key: value})
+
+        guest_plan.append({
+            'role': role,
+            'serial': serial,
+            'drive_letter': item['drive_letter'],
+            'min_size_gb': size_gb,
+            'ensure_pagefile': bool(item.get('ensure_pagefile')),
+            'reformat': bool(item.get('reformat')),
+            'extend': True,
+            'label': item.get('label') or ('Pagefile' if role == 'pagefile' else 'Data'),
+            'pve_key': pve_key,
+        })
+
+    return guest_plan
+
 
 def power_on_vm(vmid):
     """Powers on a VM."""

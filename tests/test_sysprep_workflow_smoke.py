@@ -27,6 +27,7 @@ def _workflow_data(**overrides):
         'administrator_password': 'ChangeMe123!',
         'timezone': 'UTC',
         'join_domain': False,
+        'manage_disks': False,
     }
     data.update(overrides)
     return data
@@ -75,7 +76,7 @@ def _patch_workflow_side_effects(monkeypatch, *, clone_vmid=9055, fail_clone=Fal
         calls['sysprep_cmd'] += 1
         assert 'sysprep.exe' in command.lower()
 
-    def _power_cycle(task_id, vmid, progress_base=92):
+    def _power_cycle(task_id, vmid, progress_base=92, agent_stable_for=60):
         return True
 
     def _verify(vmid, expected_hostname, expected_ip=None, expected_domain=None, on_progress=None):
@@ -84,6 +85,7 @@ def _patch_workflow_side_effects(monkeypatch, *, clone_vmid=9055, fail_clone=Fal
         return ('hostname=SMOKE01 ip=dhcp domain=-', True)
 
     monkeypatch.setattr(ca, 'require_windows_guest', _require_windows)
+    monkeypatch.setattr(ca, 'is_windows_server_2019_template', lambda vmid: True)
     monkeypatch.setattr(ca, 'clone_vm', _clone)
     monkeypatch.setattr(ca, 'get_primary_mac_address', _mac)
     monkeypatch.setattr(ca, 'power_on_vm', _power_on)
@@ -93,7 +95,68 @@ def _patch_workflow_side_effects(monkeypatch, *, clone_vmid=9055, fail_clone=Fal
     monkeypatch.setattr(ca, 'run_shutdown_command_in_guest', _run_shutdown)
     monkeypatch.setattr(ca, '_complete_sysprep_power_cycle', _power_cycle)
     monkeypatch.setattr(ca, '_verify_sysprep_result', _verify)
+    monkeypatch.setattr(
+        ca,
+        'reconcile_vm_disks',
+        lambda vmid, plan: (_ for _ in ()).throw(AssertionError('reconcile should not run')),
+    )
     return calls
+
+
+def test_sysprep_workflow_manage_disks_reconciles(app, monkeypatch):
+    calls = _patch_workflow_side_effects(monkeypatch, clone_vmid=9060)
+    import app.celery_app as ca
+
+    reconciled = {}
+
+    def _reconcile(vmid, plan):
+        reconciled['vmid'] = vmid
+        reconciled['plan'] = plan
+        return [
+            {
+                'role': 'os',
+                'serial': 'guestos-os',
+                'drive_letter': 'C',
+                'min_size_gb': 40,
+                'ensure_pagefile': False,
+                'reformat': False,
+                'extend': False,
+                'pve_key': 'scsi0',
+            },
+            {
+                'role': 'pagefile',
+                'serial': 'guestos-pagefile',
+                'drive_letter': 'P',
+                'min_size_gb': 16,
+                'ensure_pagefile': True,
+                'reformat': False,
+                'extend': True,
+                'pve_key': 'scsi1',
+            },
+        ]
+
+    monkeypatch.setattr(ca, 'reconcile_vm_disks', _reconcile)
+    monkeypatch.setattr(ca, '_verify_disks', lambda *a, **k: ('disks: pagefile=P: 16G in use', True))
+
+    task_id = str(uuid.uuid4())
+    with app.app_context():
+        db.session.add(Task(id=task_id, name='Sysprep Workflow', description='disks'))
+        db.session.commit()
+        sysprep_workflow_task.run(
+            task_id,
+            _workflow_data(
+                manage_disks=True,
+                disks=[
+                    {'role': 'os'},
+                    {'role': 'pagefile', 'size_gb': 16, 'drive_letter': 'P', 'ensure_pagefile': True},
+                ],
+            ),
+        )
+        task = db.session.get(Task, task_id)
+        assert task.status == 'SUCCESS'
+        assert reconciled.get('vmid') == 9060
+        assert any(d['role'] == 'pagefile' for d in reconciled.get('plan') or [])
+        assert 'disks:' in (task.message or '')
 
 
 def test_sysprep_workflow_mocked_success(app, monkeypatch):
@@ -115,7 +178,31 @@ def test_sysprep_workflow_mocked_success(app, monkeypatch):
         assert calls['write_files'] == 1
         assert calls['sysprep_cmd'] == 1
         assert 9055 in calls['power_on']
-        assert calls['sleeps'] >= 1  # initial 3-minute boot wait (mocked)
+        assert calls['sleeps'] >= 1  # initial boot-settle wait (mocked)
+
+
+def test_sysprep_workflow_disables_manage_disks_on_non_server_2019(app, monkeypatch):
+    _patch_workflow_side_effects(monkeypatch, clone_vmid=9057)
+    import app.celery_app as ca
+
+    monkeypatch.setattr(ca, 'is_windows_server_2019_template', lambda vmid: False)
+
+    task_id = str(uuid.uuid4())
+    with app.app_context():
+        db.session.add(Task(id=task_id, name='Sysprep Workflow', description='non-srv2019'))
+        db.session.commit()
+        sysprep_workflow_task.run(
+            task_id,
+            _workflow_data(
+                manage_disks=True,
+                disks=[
+                    {'role': 'os'},
+                    {'role': 'pagefile', 'size_gb': 16, 'drive_letter': 'P', 'ensure_pagefile': True},
+                ],
+            ),
+        )
+        task = db.session.get(Task, task_id)
+        assert task.status == 'SUCCESS'
 
 
 def test_sysprep_workflow_mocked_clone_failure(app, monkeypatch):

@@ -15,7 +15,8 @@
         <li data-step="0" class="is-active">Basics</li>
         <li data-step="1">Network</li>
         <li data-step="2">Domain</li>
-        <li data-step="3">Review</li>
+        <li data-step="3">Disks</li>
+        <li data-step="4">Review</li>
     </ol>
 
     <div class="wizard-panel" data-step="0">
@@ -156,6 +157,48 @@
     </div>
 
     <div class="wizard-panel" data-step="3" hidden>
+        <h2 class="step-title">Disks (optional)</h2>
+        <div class="form-check mb-3">
+            <input type="checkbox" class="form-check-input" id="manage_disks_checkbox">
+            <label class="form-check-label" for="manage_disks_checkbox">Configure disks</label>
+        </div>
+        <div id="disk_fields" hidden>
+            <p class="form-text">
+                When enabled, GuestOS inventories template disks, attaches any missing
+                data/pagefile disks on the <strong>same storage</strong> as the boot disk
+                (with the same aio/discard/cache options), brings offline disks online,
+                extends undersized volumes, and can place the Windows pagefile on a
+                dedicated volume.
+            </p>
+            <div class="mb-3">
+                <label for="os_grow_to_gb" class="form-label">Grow OS disk to (GB, optional)</label>
+                <input type="number" class="form-control" id="os_grow_to_gb" name="os_grow_to_gb" min="1" placeholder="Leave blank to keep template size">
+            </div>
+            <div class="form-check mb-3">
+                <input type="checkbox" class="form-check-input" id="ensure_pagefile_disk" checked>
+                <label class="form-check-label" for="ensure_pagefile_disk">Ensure pagefile disk</label>
+            </div>
+            <div id="pagefile_disk_fields" class="mb-3">
+                <label for="pagefile_size_gb" class="form-label">Pagefile disk size (GB)</label>
+                <input type="number" class="form-control" id="pagefile_size_gb" name="pagefile_size_gb" value="16" min="1">
+                <label for="pagefile_drive_letter" class="form-label mt-2">Pagefile drive letter</label>
+                <input type="text" class="form-control" id="pagefile_drive_letter" name="pagefile_drive_letter" value="P" maxlength="1">
+            </div>
+            <div class="form-check mb-3">
+                <input type="checkbox" class="form-check-input" id="ensure_data_disk" checked>
+                <label class="form-check-label" for="ensure_data_disk">Ensure data disk</label>
+            </div>
+            <div id="data_disk_fields" class="mb-3">
+                <label for="data_size_gb" class="form-label">Data disk size (GB)</label>
+                <input type="number" class="form-control" id="data_size_gb" name="data_size_gb" value="50" min="1">
+                <label for="data_drive_letter" class="form-label mt-2">Data drive letter</label>
+                <input type="text" class="form-control" id="data_drive_letter" name="data_drive_letter" value="D" maxlength="1">
+            </div>
+        </div>
+        <p class="form-text mb-0">Leave unchecked to keep today’s Sysprep-only behavior (no disk changes).</p>
+    </div>
+
+    <div class="wizard-panel" data-step="4" hidden>
         <h2 class="step-title">Review</h2>
         <dl class="review-dl row" id="review-summary"></dl>
         <p class="form-text">Starting the workflow clones the template and runs Sysprep via the guest agent.</p>
@@ -181,6 +224,7 @@
 
     GuestOSForms.wireNetworkMode(form);
     GuestOSForms.wireDomainJoin(form);
+    GuestOSForms.wireManageDisks(form);
     profileSelect.addEventListener('change', function () {
         GuestOSForms.applyDomainProfile(profileSelect, domainProfiles, dnsEl, vlanEl);
     });

@@ -113,3 +113,13 @@ try:
     GUESTOS_LAUNCH_TTL = int(os.environ.get('GUESTOS_LAUNCH_TTL') or '300')
 except ValueError:
     GUESTOS_LAUNCH_TTL = 300
+
+# Sysprep workflow waits (production defaults). Lab/smoke may lower via env.
+try:
+    SYSPREP_BOOT_SETTLE_SECONDS = int(os.environ.get('SYSPREP_BOOT_SETTLE_SECONDS') or '180')
+except ValueError:
+    SYSPREP_BOOT_SETTLE_SECONDS = 180
+try:
+    SYSPREP_AGENT_STABLE_SECONDS = int(os.environ.get('SYSPREP_AGENT_STABLE_SECONDS') or '60')
+except ValueError:
+    SYSPREP_AGENT_STABLE_SECONDS = 60

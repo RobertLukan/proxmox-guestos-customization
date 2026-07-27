@@ -100,6 +100,27 @@
     return { applyJoin: applyJoin, applyCreds: applyCreds };
   }
 
+  function wireManageDisks(form) {
+    var manageCb = form.querySelector('#manage_disks_checkbox');
+    var diskFields = form.querySelector('#disk_fields');
+    var pagefileCb = form.querySelector('#ensure_pagefile_disk');
+    var dataCb = form.querySelector('#ensure_data_disk');
+    var pagefileFields = form.querySelector('#pagefile_disk_fields');
+    var dataFields = form.querySelector('#data_disk_fields');
+
+    function apply() {
+      var on = manageCb && manageCb.checked;
+      setSectionVisible(diskFields, on);
+      setSectionVisible(pagefileFields, on && (!pagefileCb || pagefileCb.checked));
+      setSectionVisible(dataFields, on && (!dataCb || dataCb.checked));
+    }
+    if (manageCb) manageCb.addEventListener('change', apply);
+    if (pagefileCb) pagefileCb.addEventListener('change', apply);
+    if (dataCb) dataCb.addEventListener('change', apply);
+    apply();
+    return apply;
+  }
+
   function collectSysprepPayload(form) {
     var data = Object.fromEntries(new FormData(form).entries());
     var joinDomain = !!(form.querySelector('#join_domain_checkbox') || {}).checked;
@@ -110,6 +131,38 @@
       data.domain_name = '';
       data.domain_username = '';
       data.domain_password = '';
+    }
+
+    var manageDisks = !!(form.querySelector('#manage_disks_checkbox') || {}).checked;
+    data.manage_disks = manageDisks;
+    delete data.os_grow_to_gb;
+    delete data.pagefile_size_gb;
+    delete data.pagefile_drive_letter;
+    delete data.data_size_gb;
+    delete data.data_drive_letter;
+    if (manageDisks) {
+      var disks = [{ role: 'os' }];
+      var grow = (form.querySelector('#os_grow_to_gb') || {}).value;
+      if (grow) disks[0].grow_to_gb = parseInt(grow, 10);
+      if ((form.querySelector('#ensure_pagefile_disk') || {}).checked) {
+        disks.push({
+          role: 'pagefile',
+          size_gb: parseInt((form.querySelector('#pagefile_size_gb') || {}).value || '16', 10),
+          drive_letter: ((form.querySelector('#pagefile_drive_letter') || {}).value || 'P'),
+          ensure_pagefile: true,
+        });
+      }
+      if ((form.querySelector('#ensure_data_disk') || {}).checked) {
+        disks.push({
+          role: 'data',
+          size_gb: parseInt((form.querySelector('#data_size_gb') || {}).value || '50', 10),
+          drive_letter: ((form.querySelector('#data_drive_letter') || {}).value || 'D'),
+          label: 'Data',
+        });
+      }
+      data.disks = disks;
+    } else {
+      data.disks = [];
     }
     return data;
   }
@@ -144,6 +197,29 @@
     add('Domain profile', (form.querySelector('#domain_profile') || {}).value);
     var join = form.querySelector('#join_domain_checkbox');
     if (join) add('Join domain', join.checked ? 'Yes' : 'No');
+    var manageDisks = form.querySelector('#manage_disks_checkbox');
+    if (manageDisks) {
+      add('Configure disks', manageDisks.checked ? 'Yes' : 'No');
+      if (manageDisks.checked) {
+        add('Grow OS (GB)', (form.querySelector('#os_grow_to_gb') || {}).value);
+        if ((form.querySelector('#ensure_pagefile_disk') || {}).checked) {
+          add(
+            'Pagefile disk',
+            ((form.querySelector('#pagefile_size_gb') || {}).value || '') +
+              'G → ' +
+              ((form.querySelector('#pagefile_drive_letter') || {}).value || 'P')
+          );
+        }
+        if ((form.querySelector('#ensure_data_disk') || {}).checked) {
+          add(
+            'Data disk',
+            ((form.querySelector('#data_size_gb') || {}).value || '') +
+              'G → ' +
+              ((form.querySelector('#data_drive_letter') || {}).value || 'D')
+          );
+        }
+      }
+    }
     target.innerHTML = rows.join('');
   }
 
@@ -176,6 +252,7 @@
     applyDomainProfile: applyDomainProfile,
     wireNetworkMode: wireNetworkMode,
     wireDomainJoin: wireDomainJoin,
+    wireManageDisks: wireManageDisks,
     collectSysprepPayload: collectSysprepPayload,
     fillReview: fillReview,
     postJson: postJson,

@@ -2,9 +2,9 @@
 
 A Flask web application to automate cloning and **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize).
 
-GuestOS **2.0** is **Sysprep-only**. The legacy WinRM reconfigure path (temp NIC,
-WinRM ports, "Existing VMs") has been removed — see
-[docs/MIGRATE_2.0.md](docs/MIGRATE_2.0.md) if you are upgrading from 1.x.
+GuestOS **2.1** is **Sysprep-only** (WinRM removed in 2.0 — see
+[docs/MIGRATE_2.0.md](docs/MIGRATE_2.0.md)). Optional **Configure disks** can
+reconcile OS/data/pagefile volumes at customize time.
 
 | Path | Status | How it works |
 |------|--------|----------------|
@@ -14,6 +14,7 @@ In-place Sysprep of existing/production VMs is **disabled** (protects live guest
 
 ## Recent Improvements
 
+-   **2.1 — Configure disks (Server 2019):** optional OS / data / pagefile reconcile at customize time (attach, online, extend, verify). Applied only for **Windows Server 2019** templates; Win11 keeps a flat disk layout.
 -   **Template-only customize:** PDM and GuestOS only run clone+Sysprep from Windows Proxmox templates (VMware-style golden image).
 -   **Static IP reliability (Server 2019 / Win11):** `setup.ps1` lives under `C:\ProgramData\GuestOS\` and is invoked by unattend **FirstLogonCommands** (Sysprep often removes `C:\Windows\Setup\Scripts`).
 -   **Domain join via Sysprep:** validated on **Windows Server 2019** in lab (profile credentials + `setup.ps1`).
@@ -29,14 +30,15 @@ In-place Sysprep of existing/production VMs is **disabled** (protects live guest
     -   **Static** or **DHCP** networking (IP, prefix, gateway, DNS)
     -   Optional Active Directory join (profile credentials server-side)
     -   Domain profiles optionally fill **DNS** and **VLAN**
+    -   Optional **Configure disks** for **Server 2019** templates (attach/online/extend/pagefile verify; skipped for Win11)
 -   Background tasks with Celery + Redis.
 -   Web UI + machine API for PDM (`/start_sysprep_workflow`, `/api/tasks`, `/task_status/...`).
 
 ## Project Status
 
-**Active development** — Sysprep customize is the only product path (2.0).
+**Active development** — Sysprep customize is the only product path (2.1).
 
--   **Sysprep customization** (hostname + static/DHCP + optional AD join): validated on **Windows Server 2019** and **Windows 11** in lab.
+-   **Sysprep customization** (hostname + static/DHCP + optional AD join + optional disks): validated on **Windows Server 2019** and **Windows 11** in lab.
 -   **Domain join**: live join confirmed on Server 2019; keep real (non-placeholder) `DOMAIN_PROFILES_JSON` for production (see [docs/AD_VALIDATION.md](docs/AD_VALIDATION.md)).
 
 ## Workflow Overview

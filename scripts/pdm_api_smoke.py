@@ -125,6 +125,28 @@ def main():
         default=os.environ.get('PRIMARY_BRIDGE', 'vmbr0'),
         help='Proxmox bridge for the clone NIC (default: PRIMARY_BRIDGE or vmbr0).',
     )
+    p.add_argument('--network-mode', default='dhcp', choices=['dhcp', 'static'])
+    p.add_argument('--ip-address', default='')
+    p.add_argument('--netmask-cidr', default='24')
+    p.add_argument('--gateway', default='')
+    p.add_argument('--dns-servers', default='')
+    p.add_argument(
+        '--manage-disks',
+        action='store_true',
+        help='Enable disk reconcile (default plan: os + 16G pagefile + 50G data).',
+    )
+    p.add_argument(
+        '--fast-waits',
+        action='store_true',
+        default=True,
+        help='Shorten first-boot settle + agent stability waits (default on for smoke).',
+    )
+    p.add_argument(
+        '--no-fast-waits',
+        action='store_false',
+        dest='fast_waits',
+        help='Use production wait timings (3 min settle, 60s agent stable).',
+    )
     p.add_argument('--admin-password', default='ChangeMe123!')
     p.add_argument('--poll', action='store_true', help='Poll task_status after --start-workflow.')
     p.add_argument(
@@ -215,17 +237,29 @@ def main():
         'cores': 2,
         'ram': 4096,
         'bridge': args.bridge,
-        'network_mode': 'dhcp',
+        'network_mode': args.network_mode,
         'administrator_password': args.admin_password,
         'timezone': 'Central European Standard Time',
         'join_domain': False,
     }
+    if args.network_mode == 'static':
+        payload['ip_address'] = args.ip_address
+        payload['netmask_cidr'] = args.netmask_cidr
+        payload['gateway'] = args.gateway
+        if args.dns_servers:
+            payload['dns_servers'] = args.dns_servers
+    if args.manage_disks:
+        payload['manage_disks'] = True
+    if args.fast_waits:
+        payload['fast_waits'] = True
     if args.remote_id:
         payload['remote_id'] = args.remote_id
 
     print(
         f"     payload: template_vmid={payload['template_vmid']} hostname={payload['hostname']} "
-        f"bridge={payload['bridge']} network_mode=dhcp "
+        f"bridge={payload['bridge']} network_mode={args.network_mode} "
+        f"{'ip=' + args.ip_address + ' ' if args.network_mode == 'static' else ''}"
+        f"manage_disks={bool(args.manage_disks)} fast_waits={bool(args.fast_waits)} "
         f"admin_password={'set' if payload['administrator_password'] else 'MISSING'}"
     )
     code, body = _req(

@@ -156,6 +156,20 @@ def test_require_sysprep_template_accepts_windows_template(monkeypatch):
     assert pm.require_sysprep_template(120) == 'win10'
 
 
+def test_windows_server_2019_name_matcher():
+    assert pm._looks_like_windows_server_2019_name('WIN-SERVER2019-TPL') is True
+    assert pm._looks_like_windows_server_2019_name('Windows 2019 Core') is True
+    assert pm._looks_like_windows_server_2019_name('ws2019-base') is True
+    assert pm._looks_like_windows_server_2019_name('Windows11-template') is False
+
+
+def test_is_windows_server_2019_template_uses_vm_name(monkeypatch):
+    vms = [{'vmid': 120, 'name': 'tpl-win-server2019', 'template': 1, 'node': 'pve'}]
+    configs = {120: {'ostype': 'win10', 'name': 'ignored'}}
+    monkeypatch.setattr(pm, 'get_proxmox_api', lambda: _FakeProxmoxTemplates(vms, configs))
+    assert pm.is_windows_server_2019_template(120) is True
+
+
 def test_delete_vm_stops_then_deletes(monkeypatch):
     calls = {'stop': 0, 'delete': 0}
 

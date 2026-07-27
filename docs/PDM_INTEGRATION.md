@@ -46,6 +46,31 @@ docker compose up -d --build
 
 `POST /start_sysprep_existing_vm_task` returns **403** (disabled — protects production VMs).
 
+### Optional disk reconcile (`manage_disks`)
+
+Same opt-in pattern as domain join. Default **off**. When `manage_disks` is true:
+
+```json
+{
+  "manage_disks": true,
+  "disks": [
+    { "role": "os", "grow_to_gb": 80 },
+    { "role": "pagefile", "size_gb": 16, "drive_letter": "P", "ensure_pagefile": true },
+    { "role": "data", "size_gb": 100, "drive_letter": "D", "label": "Data" }
+  ]
+}
+```
+
+New disks are created on the **boot disk’s storage** with the boot disk’s Proxmox
+options (`aio`, `discard`, `cache`, …). Existing template disks are reused
+(online/extend) instead of duplicated. Post-Sysprep verify checks volumes and
+pagefile placement when requested.
+
+**Policy:** disk reconcile runs only for **Windows Server 2019** templates
+(matched by template name, e.g. `server2019` / `win2019`). If `manage_disks` is
+set on a non–Server-2019 template (e.g. Win11), the workflow silently disables
+disk customization and continues with a flat disk layout.
+
 ## Job history (PDM GuestOS tab)
 
 GuestOS keeps a SQLite task ledger. PDM’s **GuestOS** tab calls the **PDM server
@@ -111,7 +136,7 @@ curl -fk -X POST "$GUESTOS_URL/start_sysprep_workflow" \
 ### CI (mocked workflow — always safe)
 
 ```bash
-pytest tests/test_sysprep_workflow_smoke.py
+pytest tests/test_sysprep_workflow_smoke.py tests/test_disks.py
 ```
 
 Runs `sysprep_workflow_task` end-to-end with Proxmox/guest-agent calls stubbed. No lab required.
