@@ -1,0 +1,10 @@
+# Coverage config for CI job: pytest -m api
+# That subset exercises the machine API / workflow enqueue path, not the full
+# guest-agent/Sysprep unit surface (covered by -m "not api").
+[run]
+source = app
+omit =
+    app/proxmox.py
+    app/sysprep_verify.py
+    app/sysprep_power.py
+    app/launch_token.py
