@@ -59,17 +59,35 @@ _WINDOWS_OSTYPES = frozenset({
 
 def _looks_like_windows_server_2019_name(name):
     """Best-effort name matcher for Windows Server 2019 templates."""
-    s = str(name or '').strip().lower()
+    s = str(name or '').strip().lower().replace('_', ' ').replace('-', ' ')
     if not s:
         return False
+    compact = s.replace(' ', '')
     return (
-        'server2019' in s
-        or 'server 2019' in s
-        or 'windows2019' in s
-        or 'windows 2019' in s
-        or 'win2019' in s
-        or 'ws2019' in s
+        'server2019' in compact
+        or 'windows2019' in compact
+        or 'win2019' in compact
+        or 'ws2019' in compact
+        or 'w2k19' in compact
+        or 'srv2019' in compact
+        or 'srv19' in compact
+        or ('2019' in compact and any(t in compact for t in ('server', 'win', 'ws', 'srv', 'w2k')))
     )
+
+
+def _tags_indicate_server_2019(tags):
+    """True when Proxmox tags include an explicit GuestOS / 2019 disk capability."""
+    raw = str(tags or '')
+    parts = {p.strip().lower() for p in raw.replace(';', ',').split(',') if p.strip()}
+    markers = {
+        'guestos-disk',
+        'guestos-disks',
+        'guestos-server2019',
+        'server2019',
+        'win2019',
+        'ws2019',
+    }
+    return bool(parts & markers)
 
 
 def is_windows_server_2019_template(vmid, node=None, proxmox=None):
@@ -77,18 +95,20 @@ def is_windows_server_2019_template(vmid, node=None, proxmox=None):
 
     Proxmox ``ostype`` cannot reliably distinguish Server 2019 from Win11 for
     all templates in this lab (often both are ``win10``), so this helper uses
-    the template VM name as an operator-controlled hint.
+    template name and optional tags (``guestos-disk``, ``server2019``, …).
     """
     proxmox = proxmox or get_proxmox_api()
     if not proxmox:
         return False
-    # Prefer cluster resource name (cheap call).
+    # Prefer cluster resource name/tags (cheap call).
     for vm in proxmox.cluster.resources.get(type='vm'):
         if str(vm.get('vmid')) == str(vmid):
             if _looks_like_windows_server_2019_name(vm.get('name')):
                 return True
+            if _tags_indicate_server_2019(vm.get('tags')):
+                return True
             break
-    # Fallback to config name when cluster payload has no useful name.
+    # Fallback to config name/tags when cluster payload has no useful name.
     node = node or _get_vm_node(vmid)
     if not node:
         return False
@@ -97,7 +117,9 @@ def is_windows_server_2019_template(vmid, node=None, proxmox=None):
     except Exception as e:
         logging.warning(f"Could not read template name for VM {vmid}: {e}")
         return False
-    return _looks_like_windows_server_2019_name(cfg.get('name'))
+    if _looks_like_windows_server_2019_name(cfg.get('name')):
+        return True
+    return _tags_indicate_server_2019(cfg.get('tags'))
 
 
 def is_windows_ostype(ostype):
@@ -543,9 +565,8 @@ def reconcile_vm_disks(vmid, disks_plan):
     copy_opts = {k: v for k, v in boot['opts'].items() if k in COPYABLE_DISK_OPTS}
     guest_plan = []
 
-    # Map existing non-boot disks by ascending index for reuse.
+    # Map existing non-boot disks for reuse (serial match, else ascending index).
     non_boot = [d for d in disks if d['key'] != boot['key']]
-    non_boot_i = 0
 
     for item in disks_plan:
         role = item['role']
@@ -572,16 +593,33 @@ def reconcile_vm_disks(vmid, disks_plan):
             })
             continue
 
-        # Prefer an unused existing disk for this role.
+        # Prefer an unused existing disk that already carries this serial, else
+        # next unused non-boot disk by ascending index (legacy templates).
         matched = None
-        if non_boot_i < len(non_boot):
-            matched = non_boot[non_boot_i]
-            non_boot_i += 1
+        for i, candidate in enumerate(non_boot):
+            if str(candidate.get('serial') or '') == str(serial):
+                matched = non_boot.pop(i)
+                break
+        if matched is None and non_boot:
+            matched = non_boot.pop(0)
 
         size_gb = int(item['size_gb'])
         if matched:
             # Reused template disks often lack boot-disk opts (discard/ssd/…).
             # Align them with the boot disk the same way new attaches do.
+            # Refuse blind reformat of a volume that already has a *different*
+            # serial unless the plan explicitly asks to reformat.
+            existing_serial = str(matched.get('serial') or '')
+            if (
+                existing_serial
+                and existing_serial != str(serial)
+                and not bool(item.get('reformat'))
+            ):
+                raise Exception(
+                    f"Refusing to overwrite disk {matched['key']} "
+                    f"(serial={existing_serial}) with role={role} serial={serial} "
+                    f"without reformat=true."
+                )
             _set_disk_serial(
                 proxmox, node, vmid, matched['key'], matched['raw'], serial,
                 extra_opts=copy_opts,

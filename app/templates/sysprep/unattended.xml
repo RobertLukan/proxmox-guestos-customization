@@ -33,8 +33,8 @@
                 <HideEULAPage>true</HideEULAPage>
                 <ProtectYourPC>1</ProtectYourPC>
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
-                <SkipMachineOOBE>true</SkipMachineOOBE>
-                <SkipUserOOBE>true</SkipUserOOBE>
+                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+                <HideLocalAccountScreen>true</HideLocalAccountScreen>
             </OOBE>
             <UserAccounts>
                 <AdministratorPassword>
@@ -42,12 +42,12 @@
                     <PlainText>true</PlainText>
                 </AdministratorPassword>
             </UserAccounts>
-            <!-- AutoLogon once so FirstLogonCommands can apply static IP / domain join.
-                 setup.ps1 lives under ProgramData because Setup\Scripts is removed by generalize. -->
+            <!-- AutoLogon a few times so FirstLogonCommands can retry if setup.ps1
+                 reboots (pagefile/domain) or a transient failure occurs. -->
             <AutoLogon>
                 <Enabled>true</Enabled>
                 <Username>Administrator</Username>
-                <LogonCount>1</LogonCount>
+                <LogonCount>3</LogonCount>
                 <Password>
                     <Value>{{ administrator_password }}</Value>
                     <PlainText>true</PlainText>

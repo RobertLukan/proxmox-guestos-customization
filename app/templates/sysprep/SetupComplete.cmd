@@ -1,7 +1,9 @@
 @echo off
-REM Optional path: Windows may run this after Setup if the Scripts folder survived.
-REM Primary path is unattend FirstLogonCommands → C:\ProgramData\GuestOS\setup.ps1
-REM (Sysprep /generalize often removes C:\Windows\Setup\Scripts on Server 2019).
-echo [SetupComplete] %DATE% %TIME% running ProgramData setup.ps1 >> "%WINDIR%\Temp\setup.log" 2>&1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\ProgramData\GuestOS\setup.ps1" >> "%WINDIR%\Temp\setup.log" 2>&1
-echo [SetupComplete] %DATE% %TIME% setup.ps1 exit code %ERRORLEVEL% >> "%WINDIR%\Temp\setup.log" 2>&1
+REM Do NOT run setup.ps1 from SetupComplete.
+REM SetupComplete runs during specialize (SYSTEM context). Running the full GuestOS
+REM script there applies network/disks, then specialize cleanup can remove
+REM C:\ProgramData\GuestOS (including setup.done) while leaving the applied
+REM config behind — verify then hangs and FirstLogon re-fires a missing script.
+REM Primary path: unattend FirstLogonCommands after AutoLogon.
+echo [SetupComplete] %DATE% %TIME% deferring GuestOS setup.ps1 to FirstLogonCommands >> "%WINDIR%\Temp\setup.log" 2>&1
+exit /b 0

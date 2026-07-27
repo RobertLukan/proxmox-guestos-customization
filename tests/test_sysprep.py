@@ -101,14 +101,16 @@ def test_setup_ps1_enables_admin_and_removes_other_local_users():
     assert 'keepLocalUsers' in ps1
 
 
-def test_setup_complete_invokes_programdata_setup_ps1():
+def test_setup_complete_defers_to_firstlogon():
+    """SetupComplete must not run setup.ps1 (specialize cleanup drops ProgramData)."""
     data = _base_data()
     with flask_app.app_context():
         _validate_sysprep_network(data)
         _xml, _ps1, cmd = _render_sysprep_files(data)
     cmd = cmd.decode()
-    assert r'C:\ProgramData\GuestOS\setup.ps1' in cmd
-    assert 'powershell.exe' in cmd
+    assert 'deferring GuestOS setup.ps1 to FirstLogonCommands' in cmd
+    assert 'powershell.exe' not in cmd
+    assert r'C:\ProgramData\GuestOS\setup.ps1' not in cmd
 
 
 # --- DHCP mode --------------------------------------------------------------

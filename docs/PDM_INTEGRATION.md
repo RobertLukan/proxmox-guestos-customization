@@ -67,9 +67,11 @@ options (`aio`, `discard`, `cache`, …). Existing template disks are reused
 pagefile placement when requested.
 
 **Policy:** disk reconcile runs only for **Windows Server 2019** templates
-(matched by template name, e.g. `server2019` / `win2019`). If `manage_disks` is
-set on a non–Server-2019 template (e.g. Win11), the workflow silently disables
-disk customization and continues with a flat disk layout.
+(matched by template **name** or **tags**, e.g. `server2019` / `win2019` /
+`ws2019` / `guestos-disk`). If `manage_disks` is set on a non–Server-2019
+template (e.g. Win11), the workflow **fails validation** with a clear error
+(no silent disable). Disk customize is available via the machine API / smoke
+scripts; it is **not** exposed in the PDM Customize UI.
 
 ## Job history (PDM GuestOS tab)
 
@@ -78,8 +80,8 @@ proxy** (`GET /api2/extjs/guestos/tasks`), which uses `guestos.cfg` (`base-url`,
 `api-token`) to fetch:
 
 ```http
-GET /api/tasks?kind=customization&limit=150
-GET /api/tasks?kind=customization&remote_id=<pdm-remote>&limit=150
+GET /api/tasks?kind=customization&limit=100&offset=0
+GET /api/tasks?kind=customization&remote_id=<pdm-remote>&limit=100&offset=0
 Authorization: Bearer <GUESTOS_API_TOKEN>
 ```
 
@@ -87,8 +89,10 @@ Browsers no longer need the GuestOS API token. Configure PDM with
 `/etc/proxmox-datacenter-manager/guestos.cfg` (see the PDM fork
 `docs/guestos.cfg.example`).
 
-Response shape from GuestOS: `{ "tasks": [ { "id", "name", "status", "progress", "message", "timestamp", "updated_at", "remote_id", "template_vmid", "hostname", "result_vmid", … } ] }`.
-
+Response shape from GuestOS:
+`{ "tasks": [ … ], "count": N, "total": T, "limit": L, "offset": O }`.
+Each task includes `id`, `name`, `status`, `progress`, `message`, `timestamp`,
+`updated_at`, `remote_id`, `template_vmid`, `hostname`, `result_vmid`, ….
 Also: `GET /api/tasks/<id>` and HTML `/jobs`.
 
 ## One-click launch (browser)
@@ -184,8 +188,13 @@ Production TLS / `PROXMOX_VERIFY_SSL`: see [`TLS_PRODUCTION.md`](TLS_PRODUCTION.
 
 ## Version pinning
 
-`guestos_min_version` ≥ `1.5.0`. Check with `GET /api/version`.
+PDM requires GuestOS **`version` ≥ `2.3.0`** (configurable as
+`min-guestos-version` in `guestos.cfg`). GuestOS advertises
+`min_pdm_guestos` on `GET /api/version`. Launch fails closed when the sidecar
+is too old or unreachable.
 
+Failure triage: [FAILURE_RUNBOOK.md](FAILURE_RUNBOOK.md). Start payload schema:
+[openapi.yaml](openapi.yaml).
 ## Lab notes
 
 | Item | Value |

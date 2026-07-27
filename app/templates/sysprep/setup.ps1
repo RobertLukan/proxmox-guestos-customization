@@ -17,14 +17,87 @@ try {
     Start-Transcript -Path 'C:\ProgramData\GuestOS\setup.log' -Append | Out-Null
 } catch {}
 
-# SetupComplete.cmd AND FirstLogonCommands both invoke this script. After a
-# successful run (or intentional reboot for pagefile), skip heavy work so a
-# second launch cannot hang on pagefile/DHCP again.
-if (Test-Path -LiteralPath 'C:\ProgramData\GuestOS\setup.done') {
-    Write-Output "setup.ps1: setup.done present -- skipping (already completed)."
+# SetupComplete.cmd must NOT invoke this script. After a successful FirstLogon
+# run (or intentional reboot for pagefile), skip heavy work so a second launch
+# cannot hang on pagefile/DHCP again.
+function Test-GuestOsAlreadyDone {
+    if (Test-Path -LiteralPath 'C:\ProgramData\GuestOS\setup.done') { return $true }
+    if (Test-Path -LiteralPath 'C:\Windows\GuestOS\setup.done') { return $true }
+    try {
+        $st = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\GuestOS' -Name SetupStatus -ErrorAction Stop).SetupStatus
+        if ([string]$st -eq 'done') { return $true }
+    } catch {}
+    return $false
+}
+if (Test-GuestOsAlreadyDone) {
+    Write-Output "setup.ps1: setup already completed -- skipping."
     try { Stop-Transcript | Out-Null } catch {}
     exit 0
 }
+
+# Overlapping FirstLogon invocations: first writer wins the lock.
+# SetupComplete must NOT run this script (specialize can delete ProgramData\GuestOS
+# after SetupComplete returns). Take over when the lock owner PID is gone or
+# the lock is older than 15 minutes.
+$lockPath = 'C:\ProgramData\GuestOS\setup.lock'
+function Test-GuestOsSetupLockStale {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    $owner = $null
+    try { $owner = [int]((Get-Content -LiteralPath $Path -ErrorAction Stop | Select-Object -First 1).Trim()) } catch {}
+    if ($owner -and $owner -gt 0) {
+        try {
+            $proc = Get-Process -Id $owner -ErrorAction Stop
+            if ($proc) { return $false }
+        } catch {
+            return $true
+        }
+    }
+    $ageMin = ((Get-Date) - (Get-Item -LiteralPath $Path).LastWriteTime).TotalMinutes
+    return ($ageMin -ge 15)
+}
+function Write-GuestOsSetupMarker {
+    param([ValidateSet('done','failed')][string]$Status, [string]$Detail = 'ok')
+    New-Item -ItemType Directory -Force -Path 'C:\ProgramData\GuestOS' | Out-Null
+    New-Item -ItemType Directory -Force -Path 'C:\Windows\GuestOS' | Out-Null
+    $reg = 'HKLM:\SOFTWARE\GuestOS'
+    if (-not (Test-Path -LiteralPath $reg)) {
+        New-Item -Path $reg -Force | Out-Null
+    }
+    Set-ItemProperty -Path $reg -Name SetupStatus -Value $Status -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $reg -Name SetupDetail -Value $Detail -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $reg -Name SetupUtc -Value ((Get-Date).ToUniversalTime().ToString('o')) -ErrorAction SilentlyContinue
+    if ($Status -eq 'done') {
+        $Detail | Set-Content -Path 'C:\ProgramData\GuestOS\setup.done' -Encoding ASCII
+        $Detail | Set-Content -Path 'C:\Windows\GuestOS\setup.done' -Encoding ASCII
+        Remove-Item -LiteralPath 'C:\ProgramData\GuestOS\setup.failed' -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath 'C:\Windows\GuestOS\setup.failed' -Force -ErrorAction SilentlyContinue
+    } else {
+        $Detail | Set-Content -Path 'C:\ProgramData\GuestOS\setup.failed' -Encoding ASCII
+        $Detail | Set-Content -Path 'C:\Windows\GuestOS\setup.failed' -Encoding ASCII
+    }
+}
+if (Test-Path -LiteralPath $lockPath) {
+    if (-not (Test-GuestOsSetupLockStale -Path $lockPath)) {
+        Write-Output "setup.ps1: setup.lock held by live process -- exiting."
+        try { Stop-Transcript | Out-Null } catch {}
+        exit 0
+    }
+    Write-Output "setup.ps1: Removing stale setup.lock."
+    Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+}
+try {
+    $fs = [System.IO.File]::Open($lockPath, 'CreateNew', 'Write', 'None')
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes("$PID`n")
+    $fs.Write($bytes, 0, $bytes.Length)
+    $fs.Close()
+} catch {
+    Write-Output "setup.ps1: setup.lock race -- another instance won; exiting."
+    try { Stop-Transcript | Out-Null } catch {}
+    exit 0
+}
+
+try {
 
 {% if manage_disks and disk_plan_b64 %}
 # --- Disk reconcile (optional) --------------------------------------------
@@ -88,13 +161,13 @@ function Wait-GuestOsDiskBySerial([string]$Serial, [int]$TimeoutSec = 120) {
     return $null
 }
 
-function Clear-GuestOsCdRomLetter([string]$Letter) {
-    # Templates often mount virtio/ISO images on D:/E:, which blocks New-Partition -DriveLetter.
+function Clear-GuestOsDriveLetter([string]$Letter) {
+    # Free the target letter from ANY volume (CD-ROM, leftover data, etc.).
     $L = $Letter.Substring(0, 1).ToUpper()
     Get-Volume -ErrorAction SilentlyContinue | Where-Object {
-        $_.DriveLetter -and ($_.DriveLetter.ToString().ToUpper() -eq $L) -and ([string]$_.DriveType -eq 'CD-ROM')
+        $_.DriveLetter -and ($_.DriveLetter.ToString().ToUpper() -eq $L)
     } | ForEach-Object {
-        Write-Output "setup.ps1: Freeing CD-ROM drive ${L}: ('$($_.FileSystemLabel)')."
+        Write-Output "setup.ps1: Freeing drive ${L}: ('$($_.FileSystemLabel)' type=$($_.DriveType))."
         cmd.exe /c "mountvol ${L}: /d" | Out-Null
     }
 }
@@ -113,7 +186,7 @@ function Ensure-GuestOsVolume {
         throw "Disk $($Disk.Number) is still offline after online attempts."
     }
     $Letter = $Letter.Substring(0, 1).ToUpper()
-    Clear-GuestOsCdRomLetter -Letter $Letter
+    Clear-GuestOsDriveLetter -Letter $Letter
 
     $part = Get-Partition -DiskNumber $Disk.Number -ErrorAction SilentlyContinue |
         Where-Object { $_.Type -ne 'Reserved' -and $_.Type -ne 'System' -and $_.Size -gt 1MB } |
@@ -142,7 +215,7 @@ function Ensure-GuestOsVolume {
             try {
                 Remove-PartitionAccessPath -DiskNumber $Disk.Number -PartitionNumber $part.PartitionNumber -AccessPath ($part.DriveLetter.ToString() + ':') -ErrorAction SilentlyContinue
             } catch {}
-            Clear-GuestOsCdRomLetter -Letter $Letter
+            Clear-GuestOsDriveLetter -Letter $Letter
             Set-Partition -DiskNumber $Disk.Number -PartitionNumber $part.PartitionNumber -NewDriveLetter $Letter[0] -ErrorAction Stop
             $part = Get-Partition -DiskNumber $Disk.Number -PartitionNumber $part.PartitionNumber
         }
@@ -173,13 +246,11 @@ foreach ($d in $diskPlan) {
     Write-Output "setup.ps1: Disk role=$role serial=$serial letter=$letter"
     $disk = Wait-GuestOsDiskBySerial $serial -TimeoutSec 120
     if (-not $disk) {
-        Write-Output "setup.ps1: WARNING: disk serial $serial not found after wait."
-        continue
+        throw "Disk serial $serial not found after wait."
     }
     $disk = Set-GuestOsDiskOnline -Disk $disk
     if (-not $disk -or $disk.IsOffline -or [string]$disk.OperationalStatus -ne 'Online') {
-        Write-Output "setup.ps1: WARNING: disk serial $serial could not be brought online."
-        continue
+        throw "Disk serial $serial could not be brought online."
     }
     if ($role -eq 'os') {
         # Extend C: if the PVE boot disk was grown.
@@ -203,7 +274,7 @@ foreach ($d in $diskPlan) {
             $pagefileLetter = $letter.ToUpper()
         }
     } catch {
-        Write-Output "setup.ps1: Disk role=$role failed: $($_.Exception.Message)"
+        throw "Disk role=$role failed: $($_.Exception.Message)"
     }
 }
 
@@ -215,11 +286,18 @@ if ($pagefileLetter) {
     try {
         $path = "${pagefileLetter}:\pagefile.sys"
         $mm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
-        # Explicit PagingFiles entry disables system-managed pagefile (?:\pagefile.sys).
-        Set-ItemProperty -Path $mm -Name 'PagingFiles' -Value @("$path 2048 8192") -Type MultiString -ErrorAction Stop
-        Write-Output "setup.ps1: Pagefile set to $path 2048-8192 (takes effect after reboot)."
+        # Size from plan when available (min_size_gb), else 2048-8192.
+        $maxMb = 8192
+        foreach ($d in @($diskPlan)) {
+            if ([string]$d.role -eq 'pagefile' -and $d.min_size_gb) {
+                $maxMb = [Math]::Max(2048, ([int]$d.min_size_gb) * 1024)
+            }
+        }
+        $minMb = [Math]::Min(2048, $maxMb)
+        Set-ItemProperty -Path $mm -Name 'PagingFiles' -Value @("$path $minMb $maxMb") -Type MultiString -ErrorAction Stop
+        Write-Output "setup.ps1: Pagefile set to $path $minMb-$maxMb (takes effect after reboot)."
     } catch {
-        Write-Output "setup.ps1: Pagefile configuration failed: $($_.Exception.Message)"
+        throw "Pagefile configuration failed: $($_.Exception.Message)"
     }
 }
 Write-Output "setup.ps1: Disk reconcile complete."
@@ -242,19 +320,24 @@ if (-not $adapter) { throw "No physical network adapter found." }
 $ifIndex = $adapter.ifIndex
 Write-Output "setup.ps1: Using adapter '$($adapter.Name)' (ifIndex $ifIndex, MAC $($adapter.MacAddress))."
 
-# Clear any existing IPv4 address / default route first so re-runs are idempotent.
+{% if use_dhcp %}
+# DHCP mode: remove only *manual* addresses/routes so a template static IP does
+# not stick. Do not strip an existing DHCP lease before renew -- that left
+# guests on APIPA when ipconfig /renew hung or timed out.
 Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-    Where-Object { $_.IPAddress -notlike '127.*' } |
+    Where-Object { $_.IPAddress -notlike '127.*' -and $_.PrefixOrigin -eq 'Manual' } |
     ForEach-Object {
         Remove-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
     }
 Get-NetRoute -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-    Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' -or $_.NextHop -ne '0.0.0.0' } |
+    Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -ne '0.0.0.0' } |
     ForEach-Object {
-        Remove-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix $_.DestinationPrefix -Confirm:$false -ErrorAction SilentlyContinue
+        # Keep DHCP-learned defaults; drop leftover manual defaults from the template.
+        if ($_.Protocol -eq 'NetMgmt' -or $_.Protocol -eq 'Local') {
+            Remove-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix $_.DestinationPrefix -Confirm:$false -ErrorAction SilentlyContinue
+        }
     }
 
-{% if use_dhcp %}
 Write-Output "setup.ps1: Enabling DHCP on ifIndex $ifIndex."
 Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Enabled
 {% if dns_list %}
@@ -263,15 +346,20 @@ Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @({% for d 
 {% else %}
 Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses
 {% endif %}
-# Clearing addresses above drops the lease; renew so the guest is not left without IPv4.
-# Redirect inside cmd.exe -- never pipe ipconfig stderr into PowerShell (2>&1 + Stop
-# aborts the whole script on DHCP timeout).
-Write-Output "setup.ps1: Renewing DHCP lease on '$($adapter.Name)'."
+# Renew with a hard timeout -- unbounded ipconfig /renew can stall SetupComplete
+# until the process is killed (leaving no setup.done and a stale lock).
+Write-Output "setup.ps1: Renewing DHCP lease on '$($adapter.Name)' (60s timeout)."
 $renewLog = 'C:\ProgramData\GuestOS\dhcprenew.txt'
-cmd.exe /c "ipconfig /renew `"$($adapter.Name)`" >`"C:\ProgramData\GuestOS\dhcprenew.txt`" 2>&1" | Out-Null
+$renewArgs = "/c ipconfig /renew `"$($adapter.Name)`" >`"$renewLog`" 2>&1"
+$renewProc = Start-Process -FilePath 'cmd.exe' -ArgumentList $renewArgs -PassThru -WindowStyle Hidden
+if (-not $renewProc.WaitForExit(60000)) {
+    Write-Output "setup.ps1: WARNING: ipconfig /renew timed out after 60s; killing."
+    try { Stop-Process -Id $renewProc.Id -Force -ErrorAction SilentlyContinue } catch {}
+}
 if (Test-Path -LiteralPath $renewLog) {
     Get-Content -LiteralPath $renewLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Output $_ }
 }
+$lease = $null
 for ($i = 0; $i -lt 12; $i++) {
     $lease = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notlike '127.*' } |
@@ -286,6 +374,17 @@ if (-not $lease) {
     Write-Output "setup.ps1: WARNING: no DHCP lease yet; Windows may still be acquiring one."
 }
 {% else %}
+# Static mode: clear existing IPv4 / default route so re-runs are idempotent.
+Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -notlike '127.*' } |
+    ForEach-Object {
+        Remove-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+    }
+Get-NetRoute -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' -or $_.NextHop -ne '0.0.0.0' } |
+    ForEach-Object {
+        Remove-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix $_.DestinationPrefix -Confirm:$false -ErrorAction SilentlyContinue
+    }
 $ip      = '{{ ip_address }}'
 $prefix  = {{ netmask_cidr }}
 $gateway = '{{ gateway }}'
@@ -355,12 +454,18 @@ Get-LocalUser | Where-Object { $keepLocalUsers -notcontains $_.Name } | ForEach-
     }
 }
 
-# One-shot AutoLogon from unattend -- clear so later reboots stay at the logon screen.
+# One-shot AutoLogon from unattend -- clear so later reboots stay at the logon screen
+# and FirstLogonCommands do not re-fire after success.
 try {
     $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
     Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value '0' -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $winlogon -Name AutoLogonCount -Value 0 -Type DWord -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path $winlogon -Name DefaultPassword -ErrorAction SilentlyContinue
 } catch {}
+
+# Scrub plaintext admin password from answer files left on disk.
+Remove-Item -LiteralPath 'C:\Windows\System32\Sysprep\unattended.xml' -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath 'C:\Windows\Panther\unattend.xml' -Force -ErrorAction SilentlyContinue
 
 {% if join_domain %}
 # --- Domain join -----------------------------------------------------------
@@ -392,8 +497,8 @@ for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
 # Scrub the credential-bearing script from disk regardless of outcome.
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 
-# Mark complete before reboot so FirstLogonCommands / SetupComplete re-entry is a no-op.
-'ok' | Set-Content -Path 'C:\ProgramData\GuestOS\setup.done' -Encoding ASCII
+# Mark complete before reboot so FirstLogonCommands re-entry is a no-op.
+Write-GuestOsSetupMarker -Status done -Detail 'ok'
 
 if ($joined) {
     Write-Output "setup.ps1: Restarting to finalize domain membership."
@@ -408,8 +513,8 @@ if ($joined) {
     try { Stop-Transcript | Out-Null } catch {}
 }
 {% else %}
-# Mark complete before reboot so FirstLogonCommands / SetupComplete re-entry is a no-op.
-'ok' | Set-Content -Path 'C:\ProgramData\GuestOS\setup.done' -Encoding ASCII
+# Mark complete before reboot so FirstLogonCommands re-entry is a no-op.
+Write-GuestOsSetupMarker -Status done -Detail 'ok'
 
 if ($pagefileLetter) {
     Write-Output "setup.ps1: Restarting so pagefile on ${pagefileLetter}: becomes active."
@@ -419,3 +524,15 @@ if ($pagefileLetter) {
     try { Stop-Transcript | Out-Null } catch {}
 }
 {% endif %}
+} catch {
+    $msg = $_.Exception.Message
+    Write-Output "setup.ps1: FATAL: $msg"
+    try { Write-GuestOsSetupMarker -Status failed -Detail ("fail: " + $msg) } catch {
+        New-Item -ItemType Directory -Force -Path 'C:\ProgramData\GuestOS' | Out-Null
+        ("fail: " + $msg) | Set-Content -Path 'C:\ProgramData\GuestOS\setup.failed' -Encoding ASCII
+    }
+    try { Stop-Transcript | Out-Null } catch {}
+    exit 1
+} finally {
+    Remove-Item -LiteralPath 'C:\ProgramData\GuestOS\setup.lock' -Force -ErrorAction SilentlyContinue
+}

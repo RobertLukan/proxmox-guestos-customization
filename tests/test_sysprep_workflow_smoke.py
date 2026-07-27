@@ -181,7 +181,7 @@ def test_sysprep_workflow_mocked_success(app, monkeypatch):
         assert calls['sleeps'] >= 1  # initial boot-settle wait (mocked)
 
 
-def test_sysprep_workflow_disables_manage_disks_on_non_server_2019(app, monkeypatch):
+def test_sysprep_workflow_rejects_manage_disks_on_non_server_2019(app, monkeypatch):
     _patch_workflow_side_effects(monkeypatch, clone_vmid=9057)
     import app.celery_app as ca
 
@@ -202,7 +202,8 @@ def test_sysprep_workflow_disables_manage_disks_on_non_server_2019(app, monkeypa
             ),
         )
         task = db.session.get(Task, task_id)
-        assert task.status == 'SUCCESS'
+        assert task.status == 'FAILURE'
+        assert 'manage_disks is only supported' in (task.message or '')
 
 
 def test_sysprep_workflow_mocked_clone_failure(app, monkeypatch):

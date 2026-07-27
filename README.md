@@ -98,6 +98,8 @@ Validated guests: **Windows Server 2019**, **Windows 11**.
 
 TLS hardening: [`docs/TLS_PRODUCTION.md`](docs/TLS_PRODUCTION.md).  
 PDM / machine API: [`docs/PDM_INTEGRATION.md`](docs/PDM_INTEGRATION.md).  
+OpenAPI start payload: [`docs/openapi.yaml`](docs/openapi.yaml).  
+Failure triage: [`docs/FAILURE_RUNBOOK.md`](docs/FAILURE_RUNBOOK.md).
 1.x → 2.0: [`docs/MIGRATE_2.0.md`](docs/MIGRATE_2.0.md).
 
 ### Quick local / venv setup

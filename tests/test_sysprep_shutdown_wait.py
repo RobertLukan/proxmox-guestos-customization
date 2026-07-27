@@ -1,6 +1,7 @@
 """Tests for post-sysprep shutdown / reboot detection."""
 
 import app.celery_app as ca
+import app.sysprep_power as sp
 
 
 class _StatusCurrent:
@@ -53,9 +54,9 @@ class _FakeProxmox:
 def test_wait_returns_stopped(monkeypatch):
     fake = _FakeProxmox()
     fake.status = 'stopped'
-    monkeypatch.setattr(ca, 'get_proxmox_api', lambda: fake)
-    monkeypatch.setattr(ca, '_get_vm_node', lambda vmid: 'node1')
-    monkeypatch.setattr(ca.time, 'sleep', lambda _s: None)
+    monkeypatch.setattr(sp, 'get_proxmox_api', lambda: fake)
+    monkeypatch.setattr(sp, '_get_vm_node', lambda vmid: 'node1')
+    monkeypatch.setattr(sp.time, 'sleep', lambda _s: None)
 
     assert ca._wait_for_sysprep_shutdown(125, timeout=30, poll=1) == 'stopped'
 
@@ -77,9 +78,9 @@ def test_wait_returns_running_after_missed_stop(monkeypatch):
             fake.agent_up = True
             fake.status = 'running'
 
-    monkeypatch.setattr(ca, 'get_proxmox_api', lambda: fake)
-    monkeypatch.setattr(ca, '_get_vm_node', lambda vmid: 'node1')
-    monkeypatch.setattr(ca.time, 'sleep', _sleep)
+    monkeypatch.setattr(sp, 'get_proxmox_api', lambda: fake)
+    monkeypatch.setattr(sp, '_get_vm_node', lambda vmid: 'node1')
+    monkeypatch.setattr(sp.time, 'sleep', _sleep)
 
     # agent_down_for=0 makes the sustained-outage flag trip as soon as agent drops;
     # the next poll with agent up returns 'running'.
@@ -91,9 +92,9 @@ def test_wait_returns_running_after_missed_stop(monkeypatch):
 
 def test_wait_timeout_when_never_stops(monkeypatch):
     fake = _FakeProxmox()
-    monkeypatch.setattr(ca, 'get_proxmox_api', lambda: fake)
-    monkeypatch.setattr(ca, '_get_vm_node', lambda vmid: 'node1')
-    monkeypatch.setattr(ca.time, 'sleep', lambda _s: None)
+    monkeypatch.setattr(sp, 'get_proxmox_api', lambda: fake)
+    monkeypatch.setattr(sp, '_get_vm_node', lambda vmid: 'node1')
+    monkeypatch.setattr(sp.time, 'sleep', lambda _s: None)
 
     # Freeze deadline by making time.time advance past timeout quickly.
     start = {'t': 1000.0}
@@ -102,7 +103,7 @@ def test_wait_timeout_when_never_stops(monkeypatch):
         start['t'] += 20
         return start['t']
 
-    monkeypatch.setattr(ca.time, 'time', _time)
+    monkeypatch.setattr(sp.time, 'time', _time)
 
     assert ca._wait_for_sysprep_shutdown(125, timeout=30, poll=1) is None
 
@@ -126,9 +127,9 @@ def test_wait_for_vm_stopped_ignores_reboot_path(monkeypatch):
         start['t'] += 50
         return start['t']
 
-    monkeypatch.setattr(ca, 'get_proxmox_api', lambda: fake)
-    monkeypatch.setattr(ca, '_get_vm_node', lambda vmid: 'node1')
-    monkeypatch.setattr(ca.time, 'sleep', _sleep)
-    monkeypatch.setattr(ca.time, 'time', _time)
+    monkeypatch.setattr(sp, 'get_proxmox_api', lambda: fake)
+    monkeypatch.setattr(sp, '_get_vm_node', lambda vmid: 'node1')
+    monkeypatch.setattr(sp.time, 'sleep', _sleep)
+    monkeypatch.setattr(sp.time, 'time', _time)
 
     assert ca._wait_for_vm_stopped(125, timeout=30) is False

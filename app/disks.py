@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from app.util import as_bool as _as_bool
 from app.validators import ValidationError
 
 DISK_ROLES = frozenset({'os', 'data', 'pagefile'})
@@ -21,15 +22,6 @@ COPYABLE_DISK_OPTS = frozenset({
     'queue-size',
     'blocksize',
 })
-
-
-def _as_bool(value, default=False):
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in ('true', '1', 't', 'yes', 'on')
-
 
 def _int_gb(value, field):
     try:

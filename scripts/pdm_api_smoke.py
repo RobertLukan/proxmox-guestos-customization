@@ -82,7 +82,7 @@ def _cleanup_result_vmid(vmid: int, remote_id: str = '') -> None:
 
     from app import app
     from app.proxmox import delete_vm, use_pve_override
-    from app.remotes import resolve_pve_remote
+    from app.remotes import attach_pve_override, resolve_pve_remote
 
     data = {}
     if remote_id:
@@ -94,7 +94,7 @@ def _cleanup_result_vmid(vmid: int, remote_id: str = '') -> None:
             ok, err = resolve_pve_remote(data, _json_field_error)
             if not ok:
                 raise RuntimeError(f'cleanup remote_id resolve failed: {err}')
-        with use_pve_override(data.get('_pve')):
+        with use_pve_override(attach_pve_override(data)):
             delete_vm(vmid)
     print(f'OK   cleaned up result VMID {vmid}')
 

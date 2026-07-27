@@ -2,6 +2,26 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server --requirepass "$$REDIS_PASSWORD"
+        else
+          exec redis-server
+        fi
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG; else redis-cli ping | grep -q PONG; fi",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     volumes:
       - redis-data:/data
     networks:
@@ -12,16 +32,31 @@ services:
     image: proxmox-guestos-customization-web:latest
     build: .
     # Initialize the database (idempotent) then start the web server.
-    command: sh -c "python init_db.py && gunicorn --bind 0.0.0.0:5001 wsgi:app"
+    command: >
+      sh -c " . /app/deploy/compose-redis-env.sh
+      && python init_db.py
+      && gunicorn --bind 0.0.0.0:5001 --workers 2 --timeout 120 wsgi:app"
     env_file: .env
     environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
     # Bound to loopback for local admin/debug; public HTTPS is via caddy:443.
     ports:
       - "127.0.0.1:5001:5001"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/api/health', timeout=3)\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
     volumes:
       # Persist the SQLite database (Flask-SQLAlchemy stores it under instance/).
       - app-instance:/app/instance
@@ -32,13 +67,19 @@ services:
   worker:
     image: proxmox-guestos-customization-worker:latest
     build: .
-    command: celery -A app.celery worker --loglevel=info
+    command: >
+      sh -c " . /app/deploy/compose-redis-env.sh
+      && celery -A app.celery worker --loglevel=info"
     env_file: .env
     environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_healthy
     volumes:
       - app-instance:/app/instance
     restart: unless-stopped
@@ -49,7 +90,8 @@ services:
     image: caddy:2.8-alpine
     restart: unless-stopped
     depends_on:
-      - web
+      web:
+        condition: service_healthy
     ports:
       - "443:443"
     environment:

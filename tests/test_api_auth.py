@@ -5,10 +5,14 @@ pytestmark = pytest.mark.api
 
 
 def test_api_health_and_version(client):
-    assert client.get('/api/health').get_json() == {'status': 'ok'}
+    health = client.get('/api/health').get_json()
+    assert health['status'] == 'ok'
+    assert 'checks' in health
+    assert health['checks'].get('database') == 'ok'
     ver = client.get('/api/version').get_json()
     assert 'version' in ver
     assert ver['version'] == client.application.config['APP_VERSION']
+    assert ver.get('min_pdm_guestos') == '2.3.0'
 
 
 def test_sysprep_start_requires_auth(client):
@@ -156,7 +160,7 @@ def test_sysprep_existing_api_disabled(client, app):
     assert 'disabled' in resp.get_json().get('error', '').lower()
 
 
-def test_sysprep_workflow_known_remote_id_attaches_pve(client, app, monkeypatch):
+def test_sysprep_workflow_known_remote_id_does_not_put_secrets_in_celery(client, app, monkeypatch):
     app.config['API_TOKENS'] = frozenset({'good-token'})
     app.config['PVE_REMOTES'] = {
         'lab': {
@@ -192,9 +196,7 @@ def test_sysprep_workflow_known_remote_id_attaches_pve(client, app, monkeypatch)
     )
     assert resp.status_code == 200
     assert captured['data']['remote_id'] == 'lab'
-    assert captured['data']['_pve']['host'] == 'pve.lab'
-    assert captured['data']['_pve']['user'] == 'api@pve'
-    assert captured['data']['_pve']['password'] == 'secret'
+    assert '_pve' not in captured['data']
 
 
 def test_task_status_allows_api_token(client, app):
@@ -213,7 +215,7 @@ def test_task_status_allows_api_token(client, app):
 
 
 def test_resolve_pve_remote_helper(app):
-    from app.remotes import resolve_pve_remote
+    from app.remotes import resolve_pve_remote, attach_pve_override
     from app.routes import _json_field_error
 
     app.config['PVE_REMOTES'] = {
@@ -223,8 +225,13 @@ def test_resolve_pve_remote_helper(app):
     with app.app_context():
         ok, err = resolve_pve_remote(data, _json_field_error)
     assert ok and err is None
-    assert data['_pve']['host'] == 'h'
-    assert data['_pve']['verify_ssl'] is True
+    assert '_pve' not in data
+    assert data['remote_id'] == 'lab'
+    with app.app_context():
+        override = attach_pve_override(data)
+    assert override['host'] == 'h'
+    assert override['verify_ssl'] is True
+    assert override['password'] == 'p'
 
     data2 = {'remote_id': 'nope'}
     with app.app_context():

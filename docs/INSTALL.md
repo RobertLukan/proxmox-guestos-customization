@@ -115,7 +115,7 @@ Minimum production-oriented settings:
 | `GUESTOS_TLS_HOST` | Public DNS name operators type in the browser |
 | `GUESTOS_API_TOKEN` | Long random; shared only with PDM `guestos.cfg` |
 | `GUESTOS_LAUNCH_SECRET` | Long random; **must match** PDM `launch-secret` |
-| `GUESTOS_CORS_ORIGINS` | Restrict to PDM origin(s), or leave unset if browsers only use PDM proxy |
+| `GUESTOS_CORS_ORIGINS` | Empty (default) disables CORS; set PDM origin(s) or `*` only for lab direct browser calls |
 | `DOMAIN_PROFILES_JSON` | Real AD profiles if you join domains (no placeholders) |
 | `PVE_REMOTES_JSON` | Optional named remotes for multi-cluster / PDM `remote_id` |
 

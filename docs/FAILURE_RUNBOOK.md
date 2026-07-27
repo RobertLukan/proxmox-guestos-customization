@@ -1,0 +1,63 @@
+# GuestOS failure runbook
+
+Operational guide when Clone + Sysprep jobs fail or stall. For the API contract
+see [PDM_INTEGRATION.md](PDM_INTEGRATION.md) and [openapi.yaml](openapi.yaml).
+
+## Quick triage
+
+| Symptom | Likely cause | First checks |
+|---------|--------------|--------------|
+| Task `FAILURE` early (“Invalid sysprep input”) | Bad hostname/IP/domain/`manage_disks` | Task message; Server 2019 name/tag for disks |
+| Stuck ~60–85% “Waiting for QEMU Guest Agent” | Guest agent / first-boot loop | Console on clone; QGA package; template health |
+| Stuck ~88–92% after Sysprep | Shutdown wait missed / hung generalize | Console; agent bounce; orphaned clone VMID in task |
+| `verification failed` / `setup.done missing` | FirstLogon `setup.ps1` never finished | Guest `C:\ProgramData\GuestOS\` markers + transcript |
+| `setup.ps1 failed` | Network, disk serial, pagefile, domain join | `setup.failed` contents; guest event log |
+| DHCP verify fail after `setup.done` | No lease on expected NIC | Bridge/VLAN; DHCP server; MAC match |
+| Domain verify fail | Join or reboot incomplete | Creds/OU/DNS; `PartOfDomain` via QGA |
+| Disk verify fail / `pagefile_pending_reboot` | Volume/pagefile not ready | Serials; drive letters; reboot once then re-check |
+
+## Marker files (guest)
+
+Under `C:\ProgramData\GuestOS\` (and mirrored under `C:\Windows\GuestOS\`):
+
+- `setup.done` — FirstLogon setup finished; required for SUCCESS
+- `setup.failed` — setup threw; verify fails with detail
+- `setup.lock` / transcript — concurrent run / debugging
+
+Also written: `HKLM\SOFTWARE\GuestOS` `SetupStatus=done|failed` (survives ProgramData cleanup).
+
+**Do not run `setup.ps1` from SetupComplete.cmd** — that path runs during specialize and
+specialize cleanup can delete `ProgramData\GuestOS` after the script finishes, which
+drops `setup.done` while leaving IP/disks applied. FirstLogonCommands is the only runner.
+
+## Agent hang
+
+1. Open the clone console (VMID on the task / PDM GuestOS tab).
+2. Confirm QEMU Guest Agent is running inside Windows.
+3. If OOBE is stuck, check AutoLogon (`LogonCount=3`) and that `setup.ps1` exists.
+4. Do not re-run in-place Sysprep on a production VM; delete the clone and start a new customize.
+
+## Verify failed but Sysprep ran
+
+The guest may be usable. Inspect markers, hostname, IP, and disks, then either:
+
+- Fix manually and keep the VM, or
+- Delete the clone and re-run Customize with corrected payload (static IP, domain, disks).
+
+## Orphaned clones
+
+Failed jobs leave the clone on the Proxmox remote. Note `result_vmid` from the task ledger (`GET /api/tasks/<id>` or PDM GuestOS tab) and remove it in PVE when appropriate.
+
+## Silent disk skip (removed)
+
+`manage_disks=true` on a non–Server-2019 template now **fails validation** (no silent disable). Name/tag the template (`server2019`, `win2019`, `ws2019`, `guestos-disk`, …) or omit `manage_disks`. Disk customize is not exposed in the PDM Customize UI — use the machine API / smoke script.
+
+## Compose / Redis
+
+- `/api/health` reports `database` + `redis` (503 when degraded).
+- Set `REDIS_PASSWORD` in `.env`; Compose wires it into Celery URLs via `deploy/compose-redis-env.sh`.
+- Durable launch JTIs use Redis when available, else SQLite `launch_jti`.
+
+## SQLite ledger backup
+
+Default DB is under the Compose `app-instance` volume (`instance/site.db`). Backup that volume (or the file) before upgrades; restore by replacing the file while web/worker are stopped.

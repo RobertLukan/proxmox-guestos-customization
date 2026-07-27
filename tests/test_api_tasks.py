@@ -79,6 +79,26 @@ def test_api_tasks_filter_remote_and_running(client, app):
     assert tasks[0]['hostname'] == 'HOST2'
 
 
+def test_api_tasks_pagination(client, app):
+    app.config['API_TOKENS'] = frozenset({'tok'})
+    _seed_tasks(app)
+    resp = client.get(
+        '/api/tasks?limit=1&offset=0',
+        headers={'Authorization': 'Bearer tok'},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body['limit'] == 1
+    assert body['offset'] == 0
+    assert body['count'] == 1
+    assert body['total'] >= 3
+    page2 = client.get(
+        '/api/tasks?limit=1&offset=1',
+        headers={'Authorization': 'Bearer tok'},
+    ).get_json()
+    assert page2['tasks'][0]['id'] != body['tasks'][0]['id']
+
+
 def test_api_task_detail(client, app):
     app.config['API_TOKENS'] = frozenset({'tok'})
     _seed_tasks(app)

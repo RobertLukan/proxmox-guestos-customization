@@ -103,8 +103,9 @@ BEHIND_REVERSE_PROXY = os.environ.get('BEHIND_REVERSE_PROXY', 'False').lower() i
 GUESTOS_PATH_PREFIX = (os.environ.get('GUESTOS_PATH_PREFIX') or '').strip().rstrip('/')
 
 # Comma-separated browser Origins allowed to call the machine API (PDM UI).
-# Use * to allow any Origin (lab only). Empty disables CORS headers.
-GUESTOS_CORS_ORIGINS = (os.environ.get('GUESTOS_CORS_ORIGINS') or '*').strip()
+# Empty (default) disables CORS — prefer the PDM server proxy.
+# Use * only for lab browsers that call GuestOS directly with an API token.
+GUESTOS_CORS_ORIGINS = (os.environ.get('GUESTOS_CORS_ORIGINS') or '').strip()
 
 # Shared HMAC secret for PDM → GuestOS one-click launch URLs (short-lived).
 # Must match launch-secret in PDM /etc/proxmox-datacenter-manager/guestos.cfg.

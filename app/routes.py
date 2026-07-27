@@ -217,11 +217,47 @@ def task_status(task_id):
 
 @app.route('/api/health')
 def api_health():
-    return jsonify({'status': 'ok'})
+    """Liveness plus shallow dependency checks for Compose/load balancers."""
+    checks = {'app': 'ok'}
+    status = 'ok'
+    # SQLite / DB
+    try:
+        db.session.execute(db.text('SELECT 1'))
+        checks['database'] = 'ok'
+    except Exception as e:  # noqa: BLE001
+        checks['database'] = f'error: {e}'
+        status = 'degraded'
+    # Redis (Celery broker) — skip in unit tests so CI does not require Redis.
+    broker = (app.config.get('CELERY_BROKER_URL') or '').strip()
+    if app.config.get('TESTING'):
+        checks['redis'] = 'skipped'
+    elif broker.startswith('redis'):
+        try:
+            import redis  # type: ignore
+            client = redis.Redis.from_url(
+                broker, socket_connect_timeout=1, socket_timeout=1
+            )
+            client.ping()
+            checks['redis'] = 'ok'
+        except Exception as e:  # noqa: BLE001
+            checks['redis'] = f'error: {e}'
+            status = 'degraded'
+    else:
+        checks['redis'] = 'skipped'
+    code = 200 if status == 'ok' else 503
+    return jsonify({
+        'status': status,
+        'version': app.config.get('APP_VERSION', '0.0.0'),
+        'checks': checks,
+    }), code
+
 
 @app.route('/api/version')
 def api_version():
-    return jsonify({'version': app.config.get('APP_VERSION', '0.0.0')})
+    return jsonify({
+        'version': app.config.get('APP_VERSION', '0.0.0'),
+        'min_pdm_guestos': '2.3.0',
+    })
 
 
 @app.route('/api/tasks', methods=['GET', 'OPTIONS'])
@@ -235,6 +271,10 @@ def api_list_tasks():
         limit = min(max(int(request.args.get('limit') or 100), 1), 500)
     except ValueError:
         limit = 100
+    try:
+        offset = max(int(request.args.get('offset') or 0), 0)
+    except ValueError:
+        offset = 0
     status = (request.args.get('status') or '').strip()
     remote_id = (request.args.get('remote_id') or '').strip()
     running_only = str(request.args.get('running') or '').lower() in ('1', 'true', 'yes')
@@ -255,10 +295,14 @@ def api_list_tasks():
     else:
         q = q.filter(Task.name == kind)
 
-    rows = q.order_by(Task.timestamp.desc()).limit(limit).all()
+    total = q.count()
+    rows = q.order_by(Task.timestamp.desc()).offset(offset).limit(limit).all()
     return jsonify({
         'tasks': [t.to_dict() for t in rows],
         'count': len(rows),
+        'total': total,
+        'limit': limit,
+        'offset': offset,
     })
 
 
@@ -328,7 +372,14 @@ def start_sysprep_workflow():
     template_vmid = data.get('template_vmid')
     if not template_vmid:
         return _json_field_error('template_vmid is required.', template_vmid='Required.')
-    with use_pve_override(data.get('_pve')):
+
+    # Validate template with resolved remotes, but never enqueue PVE secrets.
+    from app.remotes import attach_pve_override
+    try:
+        pve_override = attach_pve_override(data)
+    except ValueError as e:
+        return _json_field_error(str(e), remote_id=str(e))
+    with use_pve_override(pve_override):
         try:
             require_sysprep_template(template_vmid)
         except ValueError as e:
@@ -337,6 +388,9 @@ def start_sysprep_workflow():
     # API / PDM clients may omit bridge; default to the configured primary bridge.
     if not (data.get('bridge') or '').strip():
         data['bridge'] = app.config.get('PRIMARY_BRIDGE') or 'vmbr0'
+
+    # Celery payload must not carry server-side PVE credentials.
+    data.pop('_pve', None)
 
     task_id = str(uuid.uuid4())
     vm_uuid = str(uuid.uuid4())
