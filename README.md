@@ -1,207 +1,132 @@
 # Proxmox GuestOS Utility
 
-A Flask web application to automate cloning and **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize).
+**Current release: [2.3.0](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize).
 
-GuestOS **2.1** is **Sysprep-only** (WinRM removed in 2.0 — see
-[docs/MIGRATE_2.0.md](docs/MIGRATE_2.0.md)). Optional **Configure disks** can
-reconcile OS/data/pagefile volumes at customize time.
+> **Not an official Proxmox product.** Lab-validated on Windows Server 2019 and Windows 11. Support is community / GitHub issues only — [open an issue](https://github.com/RobertLukan/proxmox-guestos-customization/issues).
+
+GuestOS is **Sysprep-only** (WinRM removed in 2.0 — see [docs/MIGRATE_2.0.md](docs/MIGRATE_2.0.md)). In-place Sysprep of existing/production VMs is **disabled**.
 
 | Path | Status | How it works |
 |------|--------|----------------|
 | **Sysprep customize** | **Supported** (only path) | Template → clone → guest-agent writes unattend + `setup.ps1` → `sysprep /generalize` → verify |
 
-In-place Sysprep of existing/production VMs is **disabled** (protects live guests).
+## Start here
 
-## Recent Improvements
+1. **Deploy GuestOS alone** (recommended first step): Docker Compose + TLS — follow [docs/INSTALL.md](docs/INSTALL.md) §1–2.
+2. Prepare a **Windows golden image** template — [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md).
+3. Open the UI, change the default password, run one **Clone + Sysprep** smoke.
+4. *(Optional / advanced)* Wire **Proxmox Datacenter Manager** with the AGPL GuestOS fork — [docs/INSTALL.md](docs/INSTALL.md) §3 and [PDM integration](docs/PDM_INTEGRATION.md).
 
--   **2.1 — Configure disks (Server 2019):** optional OS / data / pagefile reconcile at customize time (attach, online, extend, verify). Applied only for **Windows Server 2019** templates; Win11 keeps a flat disk layout.
--   **Template-only customize:** PDM and GuestOS only run clone+Sysprep from Windows Proxmox templates (VMware-style golden image).
--   **Static IP reliability (Server 2019 / Win11):** `setup.ps1` lives under `C:\ProgramData\GuestOS\` and is invoked by unattend **FirstLogonCommands** (Sysprep often removes `C:\Windows\Setup\Scripts`).
--   **Domain join via Sysprep:** validated on **Windows Server 2019** in lab (profile credentials + `setup.ps1`).
--   **TLS + launch token:** Compose includes Caddy on `:443`; PDM can open a short-lived HMAC `/launch` URL that creates a GuestOS session (no second password).
--   **Security hardening:** validated guest values, server-side domain credentials, CSRF, required `SECRET_KEY`.
--   **Packaging & CI:** `Dockerfile`, `docker-compose.yml`, offline compose, `pytest` + GitHub Actions.
+### Screenshots
+
+| Template select | Sysprep wizard | Task progress | PDM Customize |
+|-----------------|----------------|---------------|---------------|
+| ![Initial](screenshots/Initial.png) | ![Clone](screenshots/Clone.png) | ![Progress](screenshots/Progress.png) | ![PDM](screenshots/PDM-2.jpg) |
+
+## What’s stable vs advanced
+
+| Area | Notes |
+|------|--------|
+| Clone + Sysprep (hostname, static/DHCP, optional AD join) | **Stable** — validated on Server 2019 and Win11 in lab |
+| Configure disks (OS / data / pagefile) | **Server 2019 only** (template name/tag); not exposed in the PDM Customize UI — use GuestOS UI or machine API |
+| PDM Customize + GuestOS tab | **Optional** AGPL fork; build/install `.deb`s yourself (no public APT feed yet) |
 
 ## Features
 
--   Clone Windows templates and run **Clone + Sysprep (customize)** in one job.
--   Sysprep applies:
-    -   Hostname + timezone via answer file
-    -   **Static** or **DHCP** networking (IP, prefix, gateway, DNS)
-    -   Optional Active Directory join (profile credentials server-side)
-    -   Domain profiles optionally fill **DNS** and **VLAN**
-    -   Optional **Configure disks** for **Server 2019** templates (attach/online/extend/pagefile verify; skipped for Win11)
--   Background tasks with Celery + Redis.
--   Web UI + machine API for PDM (`/start_sysprep_workflow`, `/api/tasks`, `/task_status/...`).
+- Clone Windows templates and run **Clone + Sysprep (customize)** in one job.
+- Sysprep applies hostname + timezone, **static** or **DHCP** networking, optional AD join (credentials server-side), optional **Configure disks** for Server 2019.
+- Background tasks with Celery + Redis; web UI + machine API for PDM.
 
-## Project Status
+## Workflow overview
 
-**Active development** — Sysprep customize is the only product path (2.1).
+1. Pick a **Windows Proxmox template** (`ostype` `win10` / `win11` / …).
+2. **Clone + Sysprep** → clone, wait for QEMU guest agent, write unattend + `C:\ProgramData\GuestOS\setup.ps1`, run `sysprep /generalize /oobe /shutdown`.
+3. After OOBE, **FirstLogonCommands** runs `setup.ps1` (network, cleanup, optional domain join).
+4. GuestOS verifies setup markers / hostname / expected static IP via the guest agent.
 
--   **Sysprep customization** (hostname + static/DHCP + optional AD join + optional disks): validated on **Windows Server 2019** and **Windows 11** in lab.
--   **Domain join**: live join confirmed on Server 2019; keep real (non-placeholder) `DOMAIN_PROFILES_JSON` for production (see [docs/AD_VALIDATION.md](docs/AD_VALIDATION.md)).
+From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launch` → wizard.
 
-## Workflow Overview
+## Prerequisites (short)
 
-### Sysprep path (golden image — recommended)
+- Proxmox VE API reachable from the GuestOS **worker** (clone, config, start/stop, guest agent).
+- Windows **template** with working QEMU Guest Agent — details: [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md).
+- Linux host with Docker Engine + Compose v2 (recommended), or Python 3.12+ for local/venv.
 
-1. Pick a **Windows Proxmox template** (ostype `win10` / `win11` / …).
-2. **Clone + Sysprep (customize)** → clone, power on, wait for a stable QEMU guest agent, write:
-    -   `C:\Windows\System32\Sysprep\unattended.xml`
-    -   `C:\ProgramData\GuestOS\setup.ps1` (survives `/generalize`)
-    -   optional `C:\Windows\Setup\Scripts\SetupComplete.cmd` (best-effort; often removed by Sysprep)
-3. Runs `sysprep /generalize /oobe /shutdown` with the answer file.
-4. After OOBE, **FirstLogonCommands** (AutoLogon once as Administrator) runs `setup.ps1` to apply network, clean local users, optional domain join.
-5. GuestOS verifies hostname / expected static IP via the guest agent.
+## Installation
 
-From **PDM**: open a **template** → **Customize (GuestOS)** → signed `/launch` deep-link (HTTPS) → wizard.
+**Full guide (GuestOS + optional PDM fork):** [docs/INSTALL.md](docs/INSTALL.md).
 
-## Design Choices
+| Doc | Topic |
+|-----|--------|
+| [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md) | Golden-image checklist |
+| [docs/TLS_PRODUCTION.md](docs/TLS_PRODUCTION.md) | Trusted TLS / `PROXMOX_VERIFY_SSL` |
+| [docs/PDM_INTEGRATION.md](docs/PDM_INTEGRATION.md) | Machine API + PDM + lab notes |
+| [docs/openapi.yaml](docs/openapi.yaml) | Start payload schema |
+| [docs/FAILURE_RUNBOOK.md](docs/FAILURE_RUNBOOK.md) | Failure triage |
+| [docs/MIGRATE_2.0.md](docs/MIGRATE_2.0.md) | 1.x → 2.0 (WinRM removed) |
 
-### Why Sysprep + guest agent (customize)?
-
-No WinRM or temp NIC for hostname/network. Uses the QEMU guest agent and native unattend / FirstLogonCommands. Network config runs from `setup.ps1` so virtio adapters can be selected by MAC. This matches the VMware guest-customization model and is what PDM drives.
-
-## Prerequisites
-
-### Proxmox VE
-
--   Working Proxmox VE cluster/host.
--   API user with privileges to clone, configure, start/stop VMs, and use the guest agent.
-
-### Templates
-
-GuestOS lists and accepts **Windows templates only**, based on Proxmox QEMU `ostype` (`win10`, `win11`, `win8`, …).
-
-#### Sysprep golden image (supported)
-
--   Converted to a Proxmox **template**.
--   **QEMU Guest Agent** installed and working.
--   Prefer a clean image (few extra local users).
-
-Validated guests: **Windows Server 2019**, **Windows 11**.
-
-### Network
-
--   **Sysprep:** static or DHCP on the primary NIC; domain join needs DNS that can resolve the DC.
-
-### Software
-
--   Python 3.12+ (or Docker).
--   Redis (bundled in Compose).
--   Reverse proxy with TLS (Compose **Caddy** service; set `BEHIND_REVERSE_PROXY=True`).
-
-## Installation and Setup
-
-**Full guide (lab vs production, GuestOS + optional PDM fork):**
-[`docs/INSTALL.md`](docs/INSTALL.md).
-
-TLS hardening: [`docs/TLS_PRODUCTION.md`](docs/TLS_PRODUCTION.md).  
-PDM / machine API: [`docs/PDM_INTEGRATION.md`](docs/PDM_INTEGRATION.md).  
-OpenAPI start payload: [`docs/openapi.yaml`](docs/openapi.yaml).  
-Failure triage: [`docs/FAILURE_RUNBOOK.md`](docs/FAILURE_RUNBOOK.md).
-1.x → 2.0: [`docs/MIGRATE_2.0.md`](docs/MIGRATE_2.0.md).
-
-### Quick local / venv setup
+### Docker Compose (recommended)
 
 ```bash
 git clone https://github.com/RobertLukan/proxmox-guestos-customization/
 cd proxmox-guestos-customization
+cp .env.example .env
+# Edit .env: SECRET_KEY, PROXMOX_*, PRIMARY_BRIDGE, BEHIND_REVERSE_PROXY=True,
+# GUESTOS_TLS_HOST=<your-dns-or-ip>, optional GUESTOS_API_TOKEN / GUESTOS_LAUNCH_SECRET
+chmod +x deploy/caddy/gen-selfsigned.sh
+./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"   # lab self-signed; use real certs in prod
+docker compose up -d --build
+curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
+```
+
+- **HTTPS:** `https://<GUESTOS_TLS_HOST>/` (Caddy `:443`)
+- **HTTP loopback debug:** `http://127.0.0.1:5001` on the GuestOS host only
+
+Default UI password: `changeme` — change it immediately via **Change Password**.
+
+### Quick local / venv setup
+
+```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-# edit .env — SECRET_KEY is required
+cp .env.example .env   # SECRET_KEY is required
 python3 init_db.py
 ```
 
-Default login password: `changeme`. Change it immediately via **Change Password**.
+### Offline / Compose V1
 
-## Running with Docker (recommended)
-
-```bash
-cp .env.example .env
-# set SECRET_KEY, GUESTOS_LAUNCH_SECRET, BEHIND_REVERSE_PROXY=True for TLS lab/prod
-chmod +x deploy/caddy/gen-selfsigned.sh
-./deploy/caddy/gen-selfsigned.sh 192.168.123.197   # or your host IP/DNS
-docker compose up -d --build
-```
-
--   **HTTPS (public):** `https://<GUESTOS_TLS_HOST>/` (Caddy `:443`, self-signed in lab)
--   **HTTP loopback debug:** `http://127.0.0.1:5001` on the GuestOS host only
-
-Compose starts **web**, **worker**, **Redis**, and **Caddy**. SQLite lives in the `app-instance` volume.
-
-### Older hosts (Compose V1)
-
-If `docker compose` is missing but `docker-compose` exists:
-
-```bash
-docker-compose up -d
-```
-
-### Offline / air-gapped deploy
-
-See `docker-compose.offline.yml` (images only; add Caddy/certs separately if you need TLS offline). Prefer `--platform linux/amd64` when building for Proxmox utility VMs.
-
-## Running manually
-
-Terminal 1 (with Redis running locally):
-
-```bash
-source venv/bin/activate
-# BEHIND_REVERSE_PROXY=False in .env for direct HTTP
-python3 run.py
-```
-
-Terminal 2:
-
-```bash
-source venv/bin/activate
-celery -A app.celery worker --loglevel=info
-```
-
-Production-style: Compose Caddy + `BEHIND_REVERSE_PROXY=True`, or your own TLS proxy in front of gunicorn.
+See `docker-compose.offline.yml`. Prefer `--platform linux/amd64` for Proxmox utility VMs. If only `docker-compose` (V1) exists: `docker-compose up -d`.
 
 ## Configuration
 
-See `.env.example`. Key variables:
+See [`.env.example`](.env.example). Key variables:
 
 | Variable | Purpose |
 |----------|---------|
-| `PROXMOX_HOST` / `USER` / `PASSWORD` | Proxmox API (default remote) |
-| `PROXMOX_VERIFY_SSL` | TLS verify for Proxmox API (default `False`) |
-| `GUESTOS_API_TOKEN` / `API_TOKENS` | Machine API auth for PDM sysprep start+poll |
+| `PROXMOX_HOST` / `USER` / `PASSWORD` | Proxmox API (user + password; dedicated least-privilege user preferred) |
+| `PROXMOX_VERIFY_SSL` | TLS verify for Proxmox API (use `True` in production) |
+| `GUESTOS_API_TOKEN` / `API_TOKENS` | Machine API auth for PDM / integrators |
 | `PVE_REMOTES_JSON` | Optional named remotes (`remote_id` in sysprep JSON) |
-| `GUESTOS_LAUNCH_SECRET` | HMAC secret for PDM `/launch` one-click session (match PDM UI bake-in) |
-| `GUESTOS_LAUNCH_TTL` | Launch token lifetime seconds (default `300`) |
-| `GUESTOS_TLS_HOST` | Hostname/IP for Caddy TLS (default lab IP) |
-| `GUESTOS_PATH_PREFIX` | Optional subpath mount (leave empty for site-root HTTPS) |
-| `PRIMARY_BRIDGE` | Bridge for the cloned VM's network interface |
+| `GUESTOS_LAUNCH_SECRET` | HMAC secret for PDM `/launch` (must match PDM `guestos.cfg`) |
+| `GUESTOS_TLS_HOST` | Hostname/IP for Caddy TLS |
+| `PRIMARY_BRIDGE` | Bridge for the cloned VM NIC |
 | `SECRET_KEY` | **Required** — sessions + CSRF |
-| `APP_VERSION` | Optional override of `VERSION` file |
-| `BEHIND_REVERSE_PROXY` | ProxyFix + Secure cookies |
-| `DATABASE_URL` | SQLAlchemy URL (default SQLite under `instance/`) |
-| `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Redis |
-| `PORT` | Listen port (default `5001`) |
+| `BEHIND_REVERSE_PROXY` | ProxyFix + Secure cookies (set `True` with Compose Caddy) |
 | `DOMAIN_PROFILES_JSON` | Named AD/network profiles |
-
-## Lab helper scripts
-
-```bash
-venv/bin/python scripts/smoke_check.py
-python3 scripts/pdm_api_smoke.py --base-url https://192.168.123.197 --token "$GUESTOS_API_TOKEN"
-python3 scripts/ad_join_validate.py --check-dns
-```
-
-PDM notes: [docs/PDM_INTEGRATION.md](docs/PDM_INTEGRATION.md).  
-AD join checklist: [docs/AD_VALIDATION.md](docs/AD_VALIDATION.md).
 
 ## Usage
 
-1. Open **https://\<host\>/** (accept the lab self-signed cert once) or loopback HTTP for debug.
-2. Log in (or arrive via PDM **Customize** launch link); change the default password.
+1. Open `https://<GUESTOS_TLS_HOST>/`.
+2. Log in; change the default password.
 3. Run **Clone + Sysprep** from a Windows template.
+
+Smoke helpers (after `.env` is set):
+
+```bash
+venv/bin/python scripts/smoke_check.py
+python3 scripts/pdm_api_smoke.py --base-url "https://${GUESTOS_TLS_HOST}" --token "$GUESTOS_API_TOKEN"
+```
 
 ## Development / Testing
 
@@ -214,11 +139,11 @@ pytest
 
 ## Security notes
 
--   Run behind TLS (`BEHIND_REVERSE_PROXY=True`). For non-lab deploys see [`docs/TLS_PRODUCTION.md`](docs/TLS_PRODUCTION.md) (`PROXMOX_VERIFY_SSL`, trusted Caddy cert, PDM `verify-tls`).
--   Keep `GUESTOS_LAUNCH_SECRET` / `GUESTOS_API_TOKEN` on the GuestOS host and in PDM `guestos.cfg` only (not in UI wasm).
--   Do not re-enable in-place Sysprep on arbitrary VMs.
--   Sysprep + the QEMU guest agent keep guest management ports closed (no WinRM).
+- Run behind TLS (`BEHIND_REVERSE_PROXY=True`). Production: [docs/TLS_PRODUCTION.md](docs/TLS_PRODUCTION.md).
+- Keep `GUESTOS_LAUNCH_SECRET` / `GUESTOS_API_TOKEN` on the GuestOS host and in PDM `guestos.cfg` only (not in UI wasm).
+- Do not re-enable in-place Sysprep on arbitrary VMs.
 
 ## License
 
-See repository license file.
+- **This repository (GuestOS app):** [MIT](LICENSE).
+- **Optional PDM UI/server fork** ([proxmox-datacenter-manager-guestos](https://github.com/RobertLukan/proxmox-datacenter-manager-guestos)): **AGPL-3** — see that repo’s `README.GUESTOS.md`.

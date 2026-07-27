@@ -95,7 +95,7 @@ services:
     ports:
       - "443:443"
     environment:
-      - GUESTOS_TLS_HOST=${GUESTOS_TLS_HOST:-192.168.123.197}
+      - GUESTOS_TLS_HOST=${GUESTOS_TLS_HOST:-guestos.example.com}
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./deploy/caddy/certs:/etc/caddy/certs:ro

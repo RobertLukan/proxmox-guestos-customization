@@ -56,8 +56,14 @@ shipped in the PDM UI wasm and are never needed by end users.
 
 ### Windows golden image
 
+Full checklist: **[WINDOWS_TEMPLATE.md](WINDOWS_TEMPLATE.md)** (guest agent,
+ostype, convert-to-template, Server 2019 disk tags, what Sysprep does on the
+clone).
+
+Short form:
+
 - Converted to a Proxmox **template**.
-- QEMU **Guest Agent** installed and working.
+- QEMU **Guest Agent** installed, enabled in Options, and working.
 - `ostype` is a Windows type (`win10`, `win11`, …).
 - Prefer a clean image (few extra local users).
 
@@ -74,9 +80,10 @@ python3 -c 'import secrets; print(secrets.token_hex(32))'  # GUESTOS_LAUNCH_SECR
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'  # GUESTOS_API_TOKEN
 ```
 
-Create a dedicated Proxmox API user/token with rights to clone templates,
-configure NICs, start/stop VMs, and use the guest agent. Prefer a token over
-embedding `root@pam` passwords.
+Create a dedicated Proxmox API **user** with rights to clone templates,
+configure NICs, start/stop VMs, and use the guest agent. GuestOS authenticates
+to PVE with `PROXMOX_USER` + `PROXMOX_PASSWORD` (see `.env.example`). Prefer a
+least-privilege user over embedding `root@pam`.
 
 ---
 
@@ -108,7 +115,7 @@ Minimum production-oriented settings:
 | Variable | Production expectation |
 |----------|------------------------|
 | `SECRET_KEY` | Required; random |
-| `PROXMOX_HOST` / `USER` / `PASSWORD` (or API token fields you use) | Real cluster API |
+| `PROXMOX_HOST` / `USER` / `PASSWORD` | Real cluster API (user + password) |
 | `PROXMOX_VERIFY_SSL` | **`True`** with a trusted PVE cert (or install your CA into the containers) |
 | `PRIMARY_BRIDGE` | Bridge clones should land on (e.g. `vmbr0`) |
 | `BEHIND_REVERSE_PROXY` | **`True`** (Compose Caddy, or your own TLS proxy) |
@@ -264,5 +271,6 @@ Do **not** expose Redis or `:5001` on a public interface.
 - [ ] Real `DOMAIN_PROFILES_JSON` if joining AD
 - [ ] One successful Customize (or API workflow) on a disposable template clone
 
-More detail: [TLS_PRODUCTION.md](TLS_PRODUCTION.md), [PDM_INTEGRATION.md](PDM_INTEGRATION.md),
+More detail: [WINDOWS_TEMPLATE.md](WINDOWS_TEMPLATE.md), [TLS_PRODUCTION.md](TLS_PRODUCTION.md),
+[PDM_INTEGRATION.md](PDM_INTEGRATION.md),
 PDM fork [README.GUESTOS.md](https://github.com/RobertLukan/proxmox-datacenter-manager-guestos/blob/guestos-sysprep/README.GUESTOS.md).

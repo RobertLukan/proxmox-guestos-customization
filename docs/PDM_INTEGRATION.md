@@ -21,7 +21,7 @@ Current app version is in [`VERSION`](../VERSION) and `GET /api/version`.
 ```bash
 GUESTOS_API_TOKEN=generate-a-long-random-string
 BEHIND_REVERSE_PROXY=True
-GUESTOS_TLS_HOST=192.168.123.197
+GUESTOS_TLS_HOST=guestos.example.com   # your DNS or IP; see Lab notes for maintainer lab
 GUESTOS_LAUNCH_SECRET=must-match-pdm-guestos-cfg
 # optional multi-cluster:
 # PVE_REMOTES_JSON={"lab":{"host":"pve.example","user":"api@pve","password":"...","verify_ssl":false}}
@@ -106,7 +106,7 @@ GuestOS verifies HMAC (`GUESTOS_LAUNCH_SECRET`), creates a session, redirects to
 ## Smoke check from the PDM host
 
 ```bash
-export GUESTOS_URL=https://192.168.123.197
+export GUESTOS_URL=https://guestos.example.com   # or your lab URL — see Lab notes
 export GUESTOS_API_TOKEN=your-token
 
 curl -fk "$GUESTOS_URL/api/health"
@@ -114,7 +114,7 @@ curl -fk "$GUESTOS_URL/api/version"
 python3 scripts/pdm_api_smoke.py --base-url "$GUESTOS_URL" --token "$GUESTOS_API_TOKEN"
 ```
 
-(Use `-k` / configure trust for the lab self-signed cert.)
+(Use `-k` / configure trust for a lab self-signed cert.)
 
 Example start (**template** clone + Sysprep — lab only):
 
@@ -197,12 +197,15 @@ Failure triage: [FAILURE_RUNBOOK.md](FAILURE_RUNBOOK.md). Start payload schema:
 [openapi.yaml](openapi.yaml).
 ## Lab notes
 
+**Maintainer lab inventory only** — not required for your deployment. Copy
+these values only if you are on this same lab network.
+
 | Item | Value |
 |------|--------|
 | GuestOS host | `192.168.123.197` (`guestos-lab`) |
 | GuestOS URL | `https://192.168.123.197` |
 | PDM host | `192.168.123.198` (`pdm-lab`) |
 | PDM remote | `vie-1` |
-| Windows templates | VMID **120** / **122** |
+| Windows templates | VMID **120** / **122** / **127** |
 
 AD join: [AD_VALIDATION.md](AD_VALIDATION.md).
