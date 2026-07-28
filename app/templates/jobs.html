@@ -4,12 +4,20 @@
 {% block content %}
 <h1>Customization Jobs</h1>
 <p class="page-lead">History of GuestOS clone+Sysprep (and related) jobs. The PDM <em>GuestOS</em> tab reads the same ledger via <code>/api/tasks</code>.</p>
+{% if batch %}
+<div class="alert alert-info">
+  Showing batch <code>{{ batch.id }}</code> — accepted {{ batch.accepted_items }},
+  rejected {{ batch.rejected_items }}, cancelled {{ batch.cancelled_items }}.
+  <a href="{{ url_for('jobs_page') }}">Clear batch filter</a>
+</div>
+{% endif %}
 {% if tasks %}
 <div class="table-responsive">
 <table class="table table-sm align-middle">
   <thead>
     <tr>
       <th>Started</th>
+      <th>Batch</th>
       <th>Name</th>
       <th>Hostname</th>
       <th>Remote</th>
@@ -23,6 +31,14 @@
     {% for t in tasks %}
     <tr>
       <td class="text-nowrap small">{{ t.timestamp }}</td>
+      <td>
+        {% if t.batch_id %}
+          <a href="{{ url_for('jobs_page', batch_id=t.batch_id) }}"><code>{{ t.batch_id[:8] }}</code></a>
+          {% if t.sequence_no %}<span class="text-muted">#{{ t.sequence_no }}</span>{% endif %}
+        {% else %}
+          —
+        {% endif %}
+      </td>
       <td>{{ t.name }}</td>
       <td>{{ t.hostname or '—' }}</td>
       <td>{{ t.remote_id or '—' }}</td>

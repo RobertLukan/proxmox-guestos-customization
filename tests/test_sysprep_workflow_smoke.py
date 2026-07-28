@@ -96,6 +96,11 @@ def _patch_workflow_side_effects(monkeypatch, *, clone_vmid=9055, fail_clone=Fal
     monkeypatch.setattr(ca, '_complete_sysprep_power_cycle', _power_cycle)
     monkeypatch.setattr(ca, '_verify_sysprep_result', _verify)
     monkeypatch.setattr(
+        ca.sysprep_verify_task,
+        'apply_async',
+        lambda args=None, queue=None, **kwargs: ca.sysprep_verify_task.run(*args),
+    )
+    monkeypatch.setattr(
         ca,
         'reconcile_vm_disks',
         lambda vmid, plan: (_ for _ in ()).throw(AssertionError('reconcile should not run')),
@@ -230,7 +235,8 @@ def test_sysprep_workflow_api_enqueues_then_mocked_task_succeeds(client, app, mo
 
     class _Task:
         @staticmethod
-        def delay(task_id, data):
+        def apply_async(args=None, queue=None, **kwargs):
+            task_id, data = args
             captured['task_id'] = task_id
             captured['data'] = data
 

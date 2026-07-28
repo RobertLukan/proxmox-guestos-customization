@@ -2,6 +2,7 @@
 
 Operational guide when Clone + Sysprep jobs fail or stall. For the API contract
 see [PDM_INTEGRATION.md](PDM_INTEGRATION.md) and [openapi.yaml](openapi.yaml).
+Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONING.md).
 
 ## Quick triage
 
@@ -57,6 +58,24 @@ Failed jobs leave the clone on the Proxmox remote. Note `result_vmid` from the t
 - `/api/health` reports `database` + `redis` (503 when degraded).
 - Set `REDIS_PASSWORD` in `.env`; Compose wires it into Celery URLs via `deploy/compose-redis-env.sh`.
 - Durable launch JTIs use Redis when available, else SQLite `launch_jti`.
+
+## Bulk saturation
+
+Symptoms:
+
+- `POST /start_sysprep_bulk_workflow` returns admission-limit errors.
+- `GET /api/metrics` shows sustained high `tasks.inflight` or skewed `inflight_by_remote`.
+- Batch rows stay `PENDING` for long periods.
+- API/UI errors mentioning daily / batch / inflight / storage limits.
+
+Mitigations:
+
+1. Retry with fewer rows per batch (max 10 by default).
+2. Check `GET /api/provision_limits` for remaining daily quota and storage %.
+3. Free Proxmox storage if used ≥ 80% (hard block) or reduce load if ≥ 65% (warning).
+4. Scale workers by queue (`clone_queue` and `verify_queue`) and host resources.
+5. There is **no** in-app override — provision exceptions directly in Proxmox VE.
+6. Tune `BULK_MAX_*` / `PROVISION_MAX_PER_DAY` / `STORAGE_*_PCT` only after validating capacity.
 
 ## SQLite ledger backup
 

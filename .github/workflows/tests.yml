@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
       - name: Run web + core tests
-        run: pytest -m "not api" --cov=app --cov-report=term --cov-fail-under=55
+        run: pytest -m "not api" --cov=app --cov-report=term --cov-fail-under=55 --cov-config=tests/coveragerc.not_api
 
   test-api:
     name: Machine API / PDM surface

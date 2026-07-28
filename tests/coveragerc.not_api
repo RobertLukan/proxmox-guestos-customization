@@ -1,0 +1,12 @@
+# Coverage config for CI job: pytest -m "not api"
+# This subset validates standalone web/CSRF behavior and excludes workflow/API
+# engine modules that are covered in the dedicated API job.
+[run]
+source = app
+omit =
+    app/celery_app.py
+    app/proxmox.py
+    app/remotes.py
+    app/task_progress.py
+    app/sysprep_verify.py
+    app/sysprep_power.py

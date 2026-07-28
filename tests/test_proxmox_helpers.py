@@ -221,3 +221,91 @@ def test_delete_vm_stops_then_deletes(monkeypatch):
     pm.delete_vm(9055)
     assert calls['stop'] == 1
     assert calls['delete'] == 1
+
+
+def test_is_vmid_collision_error():
+    assert pm._is_vmid_collision_error(
+        '500 Internal Server Error: unable to create VM 124: config file already exists'
+    )
+    assert pm._is_vmid_collision_error('already exists on node pve')
+    assert not pm._is_vmid_collision_error('clone storage full')
+
+
+def test_clone_vm_retries_on_vmid_collision(monkeypatch):
+    calls = {'nextid': 0, 'clone': 0}
+
+    class _TaskStatus:
+        def get(self):
+            return {'status': 'stopped', 'exitstatus': 'OK'}
+
+    class _Tasks:
+        def __call__(self, _upid):
+            return type('T', (), {'status': _TaskStatus()})()
+
+    class _Config:
+        def get(self):
+            return {'net0': 'virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0', 'ostype': 'win11'}
+
+        def post(self, **kwargs):
+            return None
+
+        def set(self, **kwargs):
+            return None
+
+    class _CloneEndpoint:
+        def post(self, **params):
+            calls['clone'] += 1
+            if calls['clone'] == 1:
+                raise Exception('500 unable to create VM 124: config file already exists')
+            return 'UPID:pve:000:000:000:qmclone:125:root@pam:'
+
+    class _QemuTemplate:
+        def __init__(self):
+            self.config = _Config()
+            self.clone = _CloneEndpoint()
+
+    class _QemuNew:
+        def __init__(self):
+            self.config = _Config()
+
+    class _Node:
+        def __init__(self):
+            self.tasks = _Tasks()
+
+        def qemu(self, vmid):
+            if str(vmid) == '127':
+                return _QemuTemplate()
+            return _QemuNew()
+
+    class _Nodes:
+        def __call__(self, _node):
+            return _Node()
+
+    class _NextId:
+        def get(self, reserve=None):
+            calls['nextid'] += 1
+            return 124 if calls['nextid'] == 1 else 125
+
+    class _Resources:
+        def get(self, type=None):
+            return [{'vmid': 127, 'template': 1, 'node': 'pve', 'name': 'Win11'}]
+
+    class _ClusterOk:
+        def __init__(self):
+            self.nextid = _NextId()
+            self.resources = _Resources()
+
+    class _Px:
+        def __init__(self):
+            self.nodes = _Nodes()
+            self.cluster = _ClusterOk()
+
+    monkeypatch.setattr(pm, 'get_proxmox_api', lambda: _Px())
+    monkeypatch.setattr(pm, 'require_windows_guest', lambda *a, **k: 'win11')
+    monkeypatch.setattr(pm, '_update_vm_tags', lambda *a, **k: (True, 'ok'))
+    monkeypatch.setattr(pm.time, 'sleep', lambda *_a, **_k: None)
+
+    result = pm.clone_vm(127, 'VDI-001', 2, 4096, 'vmbr0', None)
+    assert result['vmid'] == 125
+    assert calls['clone'] == 2
+    assert calls['nextid'] == 2

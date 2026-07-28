@@ -36,7 +36,8 @@ def test_sysprep_start_with_api_token_skips_csrf(client, app, monkeypatch):
 
     class _Task:
         @staticmethod
-        def delay(task_id, data):
+        def apply_async(args=None, queue=None, **kwargs):
+            task_id, data = args
             captured['task_id'] = task_id
             captured['data'] = data
 
@@ -72,7 +73,8 @@ def test_sysprep_start_defaults_bridge_from_primary(client, app, monkeypatch):
 
     class _Task:
         @staticmethod
-        def delay(task_id, data):
+        def apply_async(args=None, queue=None, **kwargs):
+            task_id, data = args
             captured['data'] = data
 
     monkeypatch.setattr('app.routes.sysprep_workflow_task', _Task)
@@ -98,7 +100,7 @@ def test_sysprep_start_defaults_bridge_from_primary(client, app, monkeypatch):
 def test_sysprep_start_session_still_needs_csrf(client, monkeypatch):
     class _Task:
         @staticmethod
-        def delay(*args, **kwargs):
+        def apply_async(*args, **kwargs):
             return None
 
     monkeypatch.setattr('app.routes.sysprep_workflow_task', _Task)
@@ -127,7 +129,7 @@ def test_sysprep_unknown_remote_id(client, app, monkeypatch):
 
     class _Task:
         @staticmethod
-        def delay(*args, **kwargs):
+        def apply_async(*args, **kwargs):
             raise AssertionError('should not enqueue')
 
     monkeypatch.setattr('app.routes.sysprep_workflow_task', _Task)
@@ -174,7 +176,8 @@ def test_sysprep_workflow_known_remote_id_does_not_put_secrets_in_celery(client,
 
     class _Task:
         @staticmethod
-        def delay(task_id, data):
+        def apply_async(args=None, queue=None, **kwargs):
+            task_id, data = args
             captured['data'] = data
 
     monkeypatch.setattr('app.routes.sysprep_workflow_task', _Task)

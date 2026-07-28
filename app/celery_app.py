@@ -62,6 +62,7 @@ __all__ = [
     '_render_sysprep_files',
     '_write_sysprep_files',
     '_sysprep_wait_timings',
+    'sysprep_verify_task',
 ]
 
 
@@ -94,6 +95,11 @@ def _sysprep_wait_timings(data=None):
     return boot, stable
 
 
+def _task_cancelled(task_id):
+    task = Task.query.get(task_id)
+    return bool(task and task.status == 'CANCELLED')
+
+
 @celery.task(bind=True)
 def sysprep_workflow_task(self, task_id, data):
     with app.app_context():
@@ -108,6 +114,8 @@ def sysprep_workflow_task(self, task_id, data):
             return
         with use_pve_override(pve_override):
             try:
+                if _task_cancelled(task_id):
+                    return
                 # 0. Validate user-supplied network + domain values before templating.
                 try:
                     require_windows_guest(data['template_vmid'])
@@ -118,12 +126,17 @@ def sysprep_workflow_task(self, task_id, data):
                     ):
                         raise ValidationError(
                             'manage_disks is only supported for Windows Server 2019 '
-                            'templates (name/tag must include server2019, win2019, '
-                            'ws2019, or guestos-disk). Win11 and other guests keep a '
-                            'flat disk layout — omit manage_disks or retarget a '
-                            'Server 2019 template.'
+                            'templates (name/tag must include windowsserver2019, '
+                            'server2019, win2019, ws2019, or guestos-disk). Win11 and '
+                            'other guests keep a flat disk layout — omit manage_disks '
+                            'or retarget a Server 2019 template.'
                         )
                     prepare_disk_plan(data)
+                    from app.proxmox import classify_windows_guest_family
+                    from app.provision_limits import validate_resource_caps, check_storage_for_template
+                    family = classify_windows_guest_family(data['template_vmid'])
+                    validate_resource_caps(data, family)
+                    check_storage_for_template(data['template_vmid'])
                 except ValidationError as e:
                     task = Task.query.get(task_id)
                     task.status = 'FAILURE'
@@ -138,6 +151,8 @@ def sysprep_workflow_task(self, task_id, data):
                     return
 
                 # 1. Clone the VM
+                if _task_cancelled(task_id):
+                    return
                 update_task_progress(task_id, 10, "Cloning VM...")
                 clone_result = clone_vm(
                     data['template_vmid'],
@@ -169,6 +184,8 @@ def sysprep_workflow_task(self, task_id, data):
 
                 # 2. Resolve the primary NIC MAC (for robust adapter selection) and
                 #    render the answer file + post-setup scripts.
+                if _task_cancelled(task_id):
+                    return
                 update_task_progress(task_id, 35, "Generating sysprep files...")
                 mac = get_primary_mac_address(new_vmid)
                 if mac:
@@ -176,6 +193,8 @@ def sysprep_workflow_task(self, task_id, data):
                 unattended_xml, setup_ps1, setup_complete = _render_sysprep_files(data)
 
                 # 3. Power on the VM
+                if _task_cancelled(task_id):
+                    return
                 update_task_progress(task_id, 50, "Powering on VM...")
                 power_on_vm(new_vmid)
                 # Win11 (and some Server builds) reboot several times before the
@@ -191,16 +210,22 @@ def sysprep_workflow_task(self, task_id, data):
                     time.sleep(boot_settle)
 
                 # 4. Wait for a *stable* QEMU Guest Agent (not just the first ping).
+                if _task_cancelled(task_id):
+                    return
                 update_task_progress(task_id, 60, "Waiting for QEMU Guest Agent to stabilize...")
                 wait_for_guest_agent(new_vmid, timeout=1200, stable_for=agent_stable)
                 update_task_progress(task_id, 70, "QEMU Guest Agent is ready.")
 
                 # 5. Write the answer file + post-setup scripts to the guest.
+                if _task_cancelled(task_id):
+                    return
                 update_task_progress(task_id, 80, "Writing sysprep files to guest...")
                 _write_sysprep_files(new_vmid, unattended_xml, setup_ps1, setup_complete)
                 update_task_progress(task_id, 85, "Sysprep files written successfully.")
 
                 # 6. Run Sysprep
+                if _task_cancelled(task_id):
+                    return
                 update_task_progress(task_id, 88, "Running Sysprep...")
                 sysprep_command = (
                     r'cmd.exe /c "C:\Windows\System32\Sysprep\sysprep.exe '
@@ -222,39 +247,14 @@ def sysprep_workflow_task(self, task_id, data):
                     db.session.commit()
                     return
 
-                update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
-                verify_summary, verify_ok = _verify_sysprep_result(
-                    new_vmid,
-                    data.get('hostname'),
-                    expected_ip=None if data.get('use_dhcp') else data.get('ip_address'),
-                    expected_domain=data.get('domain_name') if data.get('join_domain') else None,
-                    on_progress=lambda msg: update_task_progress(task_id, 98, msg),
+                if _task_cancelled(task_id):
+                    return
+                update_task_progress(task_id, 95, "Clone and Sysprep phase complete; queued for verification...")
+                sysprep_verify_task.apply_async(
+                    args=(task_id, new_vmid, data),
+                    queue='verify_queue',
                 )
-                if data.get('manage_disks') and data.get('disk_guest_plan'):
-                    disk_summary, disk_ok = _verify_disks(
-                        new_vmid,
-                        data['disk_guest_plan'],
-                        on_progress=lambda msg: update_task_progress(task_id, 98, msg),
-                    )
-                    verify_summary = f'{verify_summary}; {disk_summary}'
-                    verify_ok = verify_ok and disk_ok
-
-                task = Task.query.get(task_id)
-                if verify_ok:
-                    task.status = 'SUCCESS'
-                    task.progress = 100
-                    task.message = (
-                        f"Sysprep workflow for {data['hostname']} completed. "
-                        f"Verify: {verify_summary}"
-                    )
-                else:
-                    task.status = 'FAILURE'
-                    task.progress = 100
-                    task.message = (
-                        f"Sysprep finished but verification failed for {data['hostname']}: "
-                        f"{verify_summary}"
-                    )
-                db.session.commit()
+                return
 
             except Exception as e:
                 app.logger.error(f"Task {task_id} failed: {e}", exc_info=True)
@@ -262,6 +262,61 @@ def sysprep_workflow_task(self, task_id, data):
                 task.status = 'FAILURE'
                 task.message = f"An error occurred: {e}"
                 db.session.commit()
+
+
+@celery.task(bind=True)
+def sysprep_verify_task(self, task_id, vmid, data):
+    with app.app_context():
+        if _task_cancelled(task_id):
+            return
+        try:
+            update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
+            verify_summary, verify_ok = _verify_sysprep_result(
+                vmid,
+                data.get('hostname'),
+                expected_ip=None if data.get('use_dhcp') else data.get('ip_address'),
+                expected_domain=data.get('domain_name') if data.get('join_domain') else None,
+                on_progress=lambda msg: update_task_progress(task_id, 98, msg),
+            )
+            if data.get('manage_disks') and data.get('disk_guest_plan'):
+                disk_summary, disk_ok = _verify_disks(
+                    vmid,
+                    data['disk_guest_plan'],
+                    on_progress=lambda msg: update_task_progress(task_id, 98, msg),
+                )
+                verify_summary = f'{verify_summary}; {disk_summary}'
+                verify_ok = verify_ok and disk_ok
+
+            task = Task.query.get(task_id)
+            if not task:
+                return
+            if task.status == 'CANCELLED':
+                return
+            if verify_ok:
+                task.status = 'SUCCESS'
+                task.progress = 100
+                task.message = (
+                    f"Sysprep workflow for {data['hostname']} completed. "
+                    f"Verify: {verify_summary}"
+                )
+            else:
+                task.status = 'FAILURE'
+                task.progress = 100
+                task.message = (
+                    f"Sysprep finished but verification failed for {data['hostname']}: "
+                    f"{verify_summary}"
+                )
+            db.session.commit()
+        except Exception as e:
+            app.logger.error(f"Verify task {task_id} failed: {e}", exc_info=True)
+            task = Task.query.get(task_id)
+            if not task:
+                return
+            if task.status == 'CANCELLED':
+                return
+            task.status = 'FAILURE'
+            task.message = f"An error occurred during verify phase: {e}"
+            db.session.commit()
 
 
 @celery.task(bind=True)

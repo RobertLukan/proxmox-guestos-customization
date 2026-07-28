@@ -75,10 +75,15 @@ def _looks_like_windows_server_2019_name(name):
     )
 
 
-def _tags_indicate_server_2019(tags):
-    """True when Proxmox tags include an explicit GuestOS / 2019 disk capability."""
+def _parse_proxmox_tags(tags):
+    """Return a lowercased set of Proxmox VM tags."""
     raw = str(tags or '')
-    parts = {p.strip().lower() for p in raw.replace(';', ',').split(',') if p.strip()}
+    return {p.strip().lower() for p in raw.replace(';', ',').split(',') if p.strip()}
+
+
+def _tags_indicate_server_2019(tags):
+    """True when Proxmox tags include an explicit GuestOS / server capability."""
+    parts = _parse_proxmox_tags(tags)
     markers = {
         'guestos-disk',
         'guestos-disks',
@@ -86,8 +91,70 @@ def _tags_indicate_server_2019(tags):
         'server2019',
         'win2019',
         'ws2019',
+        # Lab / operator convention (template 120): windowsserver2019
+        'windowsserver2019',
+        'windowsserver2022',
+        'windowsserver2016',
+    }
+    if parts & markers:
+        return True
+    # Prefix match for windowsserver* / guestos-server*
+    for tag in parts:
+        if tag.startswith('windowsserver') or tag.startswith('guestos-server'):
+            return True
+    return False
+
+
+def _tags_indicate_windows11(tags):
+    """True when tags explicitly mark a Windows 11 / VDI desktop template."""
+    parts = _parse_proxmox_tags(tags)
+    markers = {
+        'windows11',
+        'win11',
+        'guestos-win11',
+        'guestos-windows11',
+        'vdi',
+        'guestos-vdi',
     }
     return bool(parts & markers)
+
+
+def _looks_like_windows11_name(name):
+    s = str(name or '').strip().lower().replace('_', ' ').replace('-', ' ')
+    if not s:
+        return False
+    compact = s.replace(' ', '')
+    return (
+        'windows11' in compact
+        or 'win11' in compact
+        or 'w11' in compact
+    )
+
+
+def _template_name_tags(vmid, node=None, proxmox=None):
+    """Return ``(name, tags, ostype)`` for a VM/template, best-effort."""
+    proxmox = proxmox or get_proxmox_api()
+    name = None
+    tags = None
+    ostype = None
+    if proxmox:
+        for vm in proxmox.cluster.resources.get(type='vm'):
+            if str(vm.get('vmid')) == str(vmid):
+                name = vm.get('name')
+                tags = vm.get('tags')
+                node = node or vm.get('node')
+                break
+        node = node or _get_vm_node(vmid)
+        if node:
+            try:
+                cfg = proxmox.nodes(node).qemu(vmid).config.get() or {}
+            except Exception as e:
+                logging.warning(f"Could not read template metadata for VM {vmid}: {e}")
+                cfg = {}
+            name = name or cfg.get('name')
+            tags = tags if tags not in (None, '') else cfg.get('tags')
+            ostype = cfg.get('ostype')
+    return name, tags, ostype
 
 
 def is_windows_server_2019_template(vmid, node=None, proxmox=None):
@@ -95,31 +162,62 @@ def is_windows_server_2019_template(vmid, node=None, proxmox=None):
 
     Proxmox ``ostype`` cannot reliably distinguish Server 2019 from Win11 for
     all templates in this lab (often both are ``win10``), so this helper uses
-    template name and optional tags (``guestos-disk``, ``server2019``, …).
+    template name and optional tags (``windowsserver2019``, ``guestos-disk``, …).
+    """
+    name, tags, _ostype = _template_name_tags(vmid, node=node, proxmox=proxmox)
+    if _looks_like_windows_server_2019_name(name):
+        return True
+    return _tags_indicate_server_2019(tags)
+
+
+def classify_windows_guest_family(vmid, node=None, proxmox=None):
+    """Classify a Windows template as ``server`` or ``win11`` for resource caps.
+
+    Preference order:
+    1. Explicit tags (``windowsserver2019``, ``windows11``, …)
+    2. Name heuristics
+    3. ``ostype == win11`` → win11; otherwise default to win11/desktop caps
+       (safe for VDI; Server must be tagged/named).
+    """
+    name, tags, ostype = _template_name_tags(vmid, node=node, proxmox=proxmox)
+    if _tags_indicate_server_2019(tags) or _looks_like_windows_server_2019_name(name):
+        return 'server'
+    if _tags_indicate_windows11(tags) or _looks_like_windows11_name(name):
+        return 'win11'
+    if str(ostype or '').strip().lower() == 'win11':
+        return 'win11'
+    return 'win11'
+
+
+def get_template_storage_usage(vmid, proxmox=None):
+    """Return used% for the template boot-disk storage (clone target).
+
+    Returns a dict with ``storage``, ``node``, ``used``, ``total``, ``avail``,
+    ``used_pct`` (0–100 float), or raises ``ValueError`` / ``Exception`` on
+    failure to resolve storage.
     """
     proxmox = proxmox or get_proxmox_api()
     if not proxmox:
-        return False
-    # Prefer cluster resource name/tags (cheap call).
-    for vm in proxmox.cluster.resources.get(type='vm'):
-        if str(vm.get('vmid')) == str(vmid):
-            if _looks_like_windows_server_2019_name(vm.get('name')):
-                return True
-            if _tags_indicate_server_2019(vm.get('tags')):
-                return True
-            break
-    # Fallback to config name/tags when cluster payload has no useful name.
-    node = node or _get_vm_node(vmid)
-    if not node:
-        return False
+        raise Exception('Failed to connect to Proxmox.')
+    boot = get_boot_disk_spec(vmid)
+    storage = boot['storage']
+    node = boot['node']
     try:
-        cfg = proxmox.nodes(node).qemu(vmid).config.get() or {}
+        status = proxmox.nodes(node).storage(storage).status.get() or {}
     except Exception as e:
-        logging.warning(f"Could not read template name for VM {vmid}: {e}")
-        return False
-    if _looks_like_windows_server_2019_name(cfg.get('name')):
-        return True
-    return _tags_indicate_server_2019(cfg.get('tags'))
+        raise Exception(f'Could not read storage status for {storage!r} on {node}: {e}')
+    total = float(status.get('total') or 0)
+    used = float(status.get('used') or 0)
+    avail = float(status.get('avail') or max(0.0, total - used))
+    used_pct = (used / total * 100.0) if total > 0 else 0.0
+    return {
+        'storage': storage,
+        'node': node,
+        'used': used,
+        'total': total,
+        'avail': avail,
+        'used_pct': used_pct,
+    }
 
 
 def is_windows_ostype(ostype):
@@ -280,8 +378,36 @@ def _update_vm_tags(vmid, node, tags_to_add=None, tags_to_remove=None):
     except Exception as e:
         return False, f"Failed to update VM tags: {e}"
 
-def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan):
-    """Clones a Windows template VM and returns the new VMID."""
+def _is_vmid_collision_error(exc):
+    """True when Proxmox rejected create/clone because the VMID is already taken."""
+    msg = str(exc or '').lower()
+    return (
+        'config file already exists' in msg
+        or 'already exists on node' in msg
+        or re.search(r'vm\s+\d+\s+already exists', msg) is not None
+    )
+
+
+def _allocate_next_vmid(proxmox):
+    """Ask cluster for next free VMID; prefer temporary reservation when supported."""
+    try:
+        # Newer PVE: reserve=1 holds the id briefly so parallel nextid callers diverge.
+        return proxmox.cluster.nextid.get(reserve=1)
+    except TypeError:
+        return proxmox.cluster.nextid.get()
+    except Exception as e:
+        # Older APIs may reject unknown query params — fall back.
+        if 'reserve' in str(e).lower() or 'param' in str(e).lower():
+            return proxmox.cluster.nextid.get()
+        raise
+
+
+def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan, max_attempts=5):
+    """Clones a Windows template VM and returns the new VMID.
+
+    Retries VMID allocation when concurrent clones race on ``/cluster/nextid``
+    (classic ``config file already exists`` under bulk provisioning).
+    """
     proxmox = get_proxmox_api()
     if not proxmox:
         raise Exception("Failed to connect to Proxmox.")
@@ -294,17 +420,49 @@ def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan):
 
     node = template_info['node']
     require_windows_guest(template_vmid, node=node, proxmox=proxmox)
-    new_vmid = proxmox.cluster.nextid.get()
-    
-    clone_params = {'newid': new_vmid, 'name': hostname, 'full': 1}
-    upid = proxmox.nodes(node).qemu(template_vmid).clone.post(**clone_params)
-    task_node = upid.split(':')[1]
 
-    while proxmox.nodes(task_node).tasks(upid).status.get()['status'] == 'running':
-        time.sleep(2)
+    last_error = None
+    new_vmid = None
+    for attempt in range(1, max(1, int(max_attempts)) + 1):
+        new_vmid = _allocate_next_vmid(proxmox)
+        clone_params = {'newid': new_vmid, 'name': hostname, 'full': 1}
+        try:
+            upid = proxmox.nodes(node).qemu(template_vmid).clone.post(**clone_params)
+        except Exception as e:
+            last_error = e
+            if _is_vmid_collision_error(e) and attempt < max_attempts:
+                logging.warning(
+                    "Clone VMID collision on %s (attempt %s/%s): %s — retrying with a new id.",
+                    new_vmid, attempt, max_attempts, e,
+                )
+                time.sleep(min(2 * attempt, 5))
+                continue
+            raise
 
-    if proxmox.nodes(task_node).tasks(upid).status.get().get('exitstatus') != 'OK':
-        raise Exception("Cloning failed.")
+        task_node = upid.split(':')[1]
+        while proxmox.nodes(task_node).tasks(upid).status.get()['status'] == 'running':
+            time.sleep(2)
+
+        status = proxmox.nodes(task_node).tasks(upid).status.get() or {}
+        exitstatus = status.get('exitstatus')
+        if exitstatus == 'OK':
+            break
+
+        err_detail = exitstatus or status.get('status') or 'unknown'
+        last_error = Exception(f"Cloning failed: {err_detail}")
+        if _is_vmid_collision_error(err_detail) and attempt < max_attempts:
+            logging.warning(
+                "Clone task failed with VMID collision on %s (attempt %s/%s): %s — retrying.",
+                new_vmid, attempt, max_attempts, err_detail,
+            )
+            time.sleep(min(2 * attempt, 5))
+            continue
+        raise last_error
+    else:
+        raise Exception(
+            f"Cloning failed after {max_attempts} VMID attempts"
+            + (f": {last_error}" if last_error else "")
+        )
 
     vm_uuid = str(uuid.uuid4())
     _update_vm_tags(new_vmid, node, tags_to_add=[f'uuid:{vm_uuid}', 'lifecycle-cloning'])
@@ -319,7 +477,7 @@ def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan):
     if vlan:
         net0_config += f',tag={vlan}'
     proxmox.nodes(node).qemu(new_vmid).config.post(cores=cores, memory=ram, net0=net0_config, agent=1)
-    
+
     return {'vmid': new_vmid, 'uuid': vm_uuid}
 
 

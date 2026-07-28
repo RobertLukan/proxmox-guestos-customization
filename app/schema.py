@@ -11,6 +11,12 @@ _TASK_EXTRA_COLUMNS = (
     ('remote_id', 'VARCHAR(128)'),
     ('template_vmid', 'INTEGER'),
     ('hostname', 'VARCHAR(128)'),
+    ('batch_id', 'VARCHAR(36)'),
+    ('request_id', 'VARCHAR(64)'),
+    ('sequence_no', 'INTEGER'),
+    ('submitter', 'VARCHAR(128)'),
+    ('error_code', 'VARCHAR(64)'),
+    ('error_details', 'VARCHAR(1024)'),
 )
 
 
@@ -28,4 +34,9 @@ def ensure_task_schema():
         if name in existing:
             continue
         db.session.execute(text(f'ALTER TABLE task ADD COLUMN {name} {col_type}'))
+    # SQLite additive indexes for high-volume task APIs.
+    db.session.execute(text('CREATE INDEX IF NOT EXISTS ix_task_batch_id ON task (batch_id)'))
+    db.session.execute(text('CREATE INDEX IF NOT EXISTS ix_task_request_id ON task (request_id)'))
+    db.session.execute(text('CREATE INDEX IF NOT EXISTS ix_task_status_timestamp ON task (status, timestamp)'))
+    db.session.execute(text('CREATE INDEX IF NOT EXISTS ix_task_remote_timestamp ON task (remote_id, timestamp)'))
     db.session.commit()

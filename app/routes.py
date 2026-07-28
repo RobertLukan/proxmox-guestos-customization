@@ -1,11 +1,29 @@
 from flask import render_template, request, Response, redirect, url_for, json, jsonify, flash
 from app import app, db, celery, login_manager, csrf
-from app.proxmox import get_template_vms, get_network_bridges, require_windows_guest, require_sysprep_template, require_sysprep_existing_target, is_proxmox_template, use_pve_override
+from app.proxmox import (
+    get_template_vms,
+    get_network_bridges,
+    require_windows_guest,
+    require_sysprep_template,
+    require_sysprep_existing_target,
+    is_proxmox_template,
+    use_pve_override,
+    classify_windows_guest_family,
+)
 from app.celery_app import sysprep_workflow_task
-from app.models import Task, User
+from app.models import Task, User, BatchRequest
 from app.api_auth import login_or_api_token_required, with_session_csrf
 from app.remotes import resolve_pve_remote
 from app.launch_token import verify_launch_token
+from app.provision_limits import (
+    PVE_ADMIN_HINT,
+    validate_resource_caps,
+    check_daily_quota,
+    check_storage_for_template,
+    provision_limits_snapshot,
+)
+from app.bulk_validate import validate_bulk_items
+from app.validators import ValidationError
 from flask_login import login_user, logout_user, login_required, current_user
 import uuid
 import logging
@@ -33,6 +51,109 @@ def _json_field_error(message, **field_errors):
     if field_errors:
         payload['errors'] = field_errors
     return jsonify(payload), 400
+
+
+def _request_submitter():
+    if current_user.is_authenticated:
+        return f'user:{getattr(current_user, "id", "unknown")}'
+    # API tokens are not identities; keep this coarse to avoid logging secrets.
+    return 'api-token'
+
+
+def _task_is_running(status):
+    return status in ('PENDING', 'STARTED', 'PROGRESS')
+
+
+def _apply_task_filters(query):
+    status = (request.args.get('status') or '').strip()
+    remote_id = (request.args.get('remote_id') or '').strip()
+    running_only = str(request.args.get('running') or '').lower() in ('1', 'true', 'yes')
+    batch_id = (request.args.get('batch_id') or '').strip()
+    if remote_id:
+        query = query.filter(Task.remote_id == remote_id)
+    if status:
+        query = query.filter(Task.status == status)
+    if running_only:
+        query = query.filter(Task.status.in_(('PENDING', 'STARTED', 'PROGRESS')))
+    if batch_id:
+        query = query.filter(Task.batch_id == batch_id)
+    kind = (request.args.get('kind') or 'customization').strip().lower()
+    if kind == 'customization':
+        query = query.filter(Task.name.in_(('Sysprep Workflow', 'Sysprep Existing VM', 'Clone for Sysprep')))
+    elif kind != 'all':
+        query = query.filter(Task.name == kind)
+    return query
+
+
+def _summarize_batch(batch):
+    q = Task.query.filter(Task.batch_id == batch.id)
+    total = q.count()
+    accepted = q.filter(Task.status != 'REJECTED').count()
+    rejected = q.filter(Task.status == 'REJECTED').count()
+    cancelled = q.filter(Task.status == 'CANCELLED').count()
+    running = q.filter(Task.status.in_(('PENDING', 'STARTED', 'PROGRESS'))).count()
+    succeeded = q.filter(Task.status == 'SUCCESS').count()
+    failed = q.filter(Task.status == 'FAILURE').count()
+    return {
+        **batch.to_dict(),
+        'tasks_total': total,
+        'running_items': running,
+        'succeeded_items': succeeded,
+        'failed_items': failed,
+        'accepted_items': accepted,
+        'rejected_items': rejected,
+        'cancelled_items': cancelled,
+    }
+
+
+def _bulk_admission_ok(remote_id):
+    inflight_statuses = ('PENDING', 'STARTED', 'PROGRESS')
+    global_running = Task.query.filter(Task.status.in_(inflight_statuses)).count()
+    if global_running >= app.config.get('BULK_MAX_CONCURRENT_GLOBAL', 10):
+        return False, (
+            f'Global inflight task limit reached '
+            f'({app.config.get("BULK_MAX_CONCURRENT_GLOBAL", 10)}). {PVE_ADMIN_HINT}',
+            {'global_limit': app.config.get('BULK_MAX_CONCURRENT_GLOBAL', 10)},
+        )
+    if remote_id:
+        remote_running = Task.query.filter(
+            Task.status.in_(inflight_statuses),
+            Task.remote_id == remote_id,
+        ).count()
+        if remote_running >= app.config.get('BULK_MAX_CONCURRENT_PER_REMOTE', 10):
+            return False, (
+                f'Inflight task limit reached for remote {remote_id!r}. {PVE_ADMIN_HINT}',
+                {'remote_limit': app.config.get('BULK_MAX_CONCURRENT_PER_REMOTE', 10)},
+            )
+    active_batches = BatchRequest.query.filter(
+        BatchRequest.status.in_(('ACCEPTED', 'RUNNING'))
+    ).count()
+    if active_batches >= app.config.get('BULK_MAX_INFLIGHT_BATCHES', 10):
+        return False, (
+            f'Inflight batch limit reached. {PVE_ADMIN_HINT}',
+            {'batch_limit': app.config.get('BULK_MAX_INFLIGHT_BATCHES', 10)},
+        )
+    return True, None
+
+
+def _admit_resource_and_quota(payload, template_vmid, extra_items=1):
+    """Validate family caps, daily quota, and storage.
+
+    On success: ``(True, warnings_list, family, caps)``
+    On failure: ``(False, flask_error_tuple, None, None)`` where flask_error_tuple
+    is ``(response, status_code)``.
+    """
+    family = classify_windows_guest_family(template_vmid)
+    try:
+        caps = validate_resource_caps(payload, family)
+        check_daily_quota(extra_items=extra_items)
+        _level, storage = check_storage_for_template(template_vmid)
+    except ValidationError as e:
+        return False, _json_field_error(str(e)), None, None
+    warnings = []
+    if storage and storage.get('level') == 'warn' and storage.get('message'):
+        warnings.append(storage['message'])
+    return True, warnings, family, caps
 
 
 def apply_domain_profile_network(data):
@@ -275,34 +396,26 @@ def api_list_tasks():
         offset = max(int(request.args.get('offset') or 0), 0)
     except ValueError:
         offset = 0
-    status = (request.args.get('status') or '').strip()
-    remote_id = (request.args.get('remote_id') or '').strip()
-    running_only = str(request.args.get('running') or '').lower() in ('1', 'true', 'yes')
 
-    q = Task.query
-    if remote_id:
-        q = q.filter(Task.remote_id == remote_id)
-    if status:
-        q = q.filter(Task.status == status)
-    if running_only:
-        q = q.filter(Task.status.in_(('PENDING', 'STARTED', 'PROGRESS')))
-    # Prefer customization-related jobs; still include others when not filtered.
-    kind = (request.args.get('kind') or 'customization').strip().lower()
-    if kind == 'customization':
-        q = q.filter(Task.name.in_(('Sysprep Workflow', 'Sysprep Existing VM', 'Clone for Sysprep')))
-    elif kind == 'all':
-        pass
-    else:
-        q = q.filter(Task.name == kind)
-
+    q = _apply_task_filters(Task.query)
     total = q.count()
-    rows = q.order_by(Task.timestamp.desc()).offset(offset).limit(limit).all()
+    cursor = (request.args.get('cursor') or '').strip()
+    ordered = q.order_by(Task.timestamp.desc(), Task.id.desc())
+    if cursor:
+        try:
+            rows = ordered.filter(Task.id < cursor).limit(limit).all()
+        except Exception:
+            rows = ordered.offset(offset).limit(limit).all()
+    else:
+        rows = ordered.offset(offset).limit(limit).all()
+    next_cursor = rows[-1].id if rows else None
     return jsonify({
         'tasks': [t.to_dict() for t in rows],
         'count': len(rows),
         'total': total,
         'limit': limit,
         'offset': offset,
+        'next_cursor': next_cursor,
     })
 
 
@@ -321,13 +434,86 @@ def api_get_task(task_id):
 @login_required
 def jobs_page():
     """Simple GuestOS job history page (same ledger as the PDM tab)."""
-    rows = (
-        Task.query
-        .order_by(Task.timestamp.desc())
-        .limit(200)
+    batch_id = (request.args.get('batch_id') or '').strip()
+    q = Task.query
+    if batch_id:
+        q = q.filter(Task.batch_id == batch_id)
+    rows = q.order_by(Task.timestamp.desc()).limit(500).all()
+    batch = BatchRequest.query.get(batch_id) if batch_id else None
+    return render_template('jobs.html', tasks=rows, batch_id=batch_id or None, batch=batch)
+
+
+@app.route('/api/metrics')
+@login_or_api_token_required
+def api_metrics():
+    inflight_statuses = ('PENDING', 'STARTED', 'PROGRESS')
+    by_status = {
+        s: Task.query.filter(Task.status == s).count()
+        for s in ('PENDING', 'STARTED', 'PROGRESS', 'SUCCESS', 'FAILURE', 'CANCELLED')
+    }
+    by_remote = {}
+    remote_rows = (
+        db.session.query(Task.remote_id, db.func.count(Task.id))
+        .filter(Task.status.in_(inflight_statuses))
+        .group_by(Task.remote_id)
         .all()
     )
-    return render_template('jobs.html', tasks=rows)
+    for remote_id, count in remote_rows:
+        by_remote[remote_id or 'default'] = int(count)
+    return jsonify({
+        'app_version': app.config.get('APP_VERSION', '0.0.0'),
+        'tasks': {
+            'inflight': sum(by_status.get(s, 0) for s in inflight_statuses),
+            'by_status': by_status,
+            'inflight_by_remote': by_remote,
+        },
+        'batches': {
+            'running': BatchRequest.query.filter(BatchRequest.status == 'RUNNING').count(),
+            'accepted': BatchRequest.query.filter(BatchRequest.status == 'ACCEPTED').count(),
+            'cancelled': BatchRequest.query.filter(BatchRequest.status == 'CANCELLED').count(),
+            'failed': BatchRequest.query.filter(BatchRequest.status == 'FAILED').count(),
+        },
+    })
+
+
+@app.route('/api/provision_limits', methods=['GET', 'OPTIONS'])
+@login_or_api_token_required
+def api_provision_limits():
+    """Return resource ceilings, remaining daily/batch quota, and storage status."""
+    if request.method == 'OPTIONS':
+        return ('', 204)
+    template_vmid = (request.args.get('template_vmid') or '').strip() or None
+    remote_id = (request.args.get('remote_id') or '').strip() or None
+    family = 'win11'
+    from app.remotes import attach_pve_override
+    data = {}
+    if template_vmid:
+        data['template_vmid'] = template_vmid
+    if remote_id:
+        data['remote_id'] = remote_id
+    try:
+        if data:
+            ok, err = resolve_pve_remote(data, _json_field_error)
+            if not ok:
+                snap = provision_limits_snapshot(family='win11', template_vmid=None)
+                snap['warning'] = 'Could not resolve remote; showing default Win11 caps only.'
+                return jsonify(snap)
+            try:
+                pve_override = attach_pve_override(data)
+            except ValueError:
+                pve_override = None
+            with use_pve_override(pve_override):
+                if template_vmid:
+                    family = classify_windows_guest_family(template_vmid)
+                return jsonify(
+                    provision_limits_snapshot(family=family, template_vmid=template_vmid)
+                )
+    except Exception as e:
+        logging.warning('provision_limits: %s', e)
+        snap = provision_limits_snapshot(family='win11', template_vmid=None)
+        snap['warning'] = str(e)
+        return jsonify(snap)
+    return jsonify(provision_limits_snapshot(family='win11', template_vmid=None))
 
 
 @app.route('/workflow/<task_id>')
@@ -384,6 +570,19 @@ def start_sysprep_workflow():
             require_sysprep_template(template_vmid)
         except ValueError as e:
             return jsonify({'error': str(e)}), 400
+        ok_admit, admit_result, _family, _caps = _admit_resource_and_quota(
+            data, template_vmid, extra_items=1
+        )
+        if not ok_admit:
+            return admit_result
+        warnings = admit_result
+        family = classify_windows_guest_family(template_vmid)
+        if _as_request_bool(data.get('manage_disks')) and family != 'server':
+            return _json_field_error(
+                'manage_disks / Configure disks is only available for Windows Server '
+                'templates. Windows 11 keeps a flat disk layout.',
+                manage_disks='Not allowed for Win11.',
+            )
 
     # API / PDM clients may omit bridge; default to the configured primary bridge.
     if not (data.get('bridge') or '').strip():
@@ -404,13 +603,282 @@ def start_sysprep_workflow():
         hostname=(hostname or None),
         template_vmid=int(data['template_vmid']) if str(data.get('template_vmid', '')).isdigit() else None,
         remote_id=(data.get('remote_id') or None),
+        submitter=_request_submitter(),
     )
     db.session.add(task)
     db.session.commit()
 
-    sysprep_workflow_task.delay(task_id, data)
+    sysprep_workflow_task.apply_async(
+        args=(task_id, data),
+        queue='clone_queue',
+    )
 
-    return jsonify({'task_id': task_id})
+    resp = {'task_id': task_id}
+    if warnings:
+        resp['warnings'] = warnings
+    return jsonify(resp)
+
+
+@app.route('/start_sysprep_bulk_workflow', methods=['POST'])
+@csrf.exempt
+@login_or_api_token_required
+@with_session_csrf
+def start_sysprep_bulk_workflow():
+    payload = request.json or {}
+    shared = payload.get('shared') or {}
+    items = payload.get('items') or []
+    if not isinstance(items, list) or not items:
+        return _json_field_error('items is required and must be a non-empty array.', items='Required.')
+    max_items = app.config.get('BULK_MAX_ITEMS', 10)
+    if len(items) > max_items:
+        return _json_field_error(
+            f'Batch exceeds max items ({max_items}). {PVE_ADMIN_HINT}',
+            items=f'Max {max_items}.',
+        )
+
+    network_mode = (shared.get('network_mode') or 'static').strip().lower()
+    try:
+        validate_bulk_items(items, network_mode=network_mode)
+    except ValidationError as e:
+        return _json_field_error(str(e), items=str(e))
+
+    request_id = (
+        request.headers.get('Idempotency-Key')
+        or payload.get('request_id')
+        or str(uuid.uuid4())
+    ).strip()
+    if not request_id:
+        request_id = str(uuid.uuid4())
+
+    existing = BatchRequest.query.filter_by(request_id=request_id).first()
+    if existing:
+        existing.idempotent_replay = True
+        existing.updated_at = db.func.now()
+        db.session.commit()
+        return jsonify({
+            'batch_id': existing.id,
+            'request_id': existing.request_id,
+            'idempotent_replay': True,
+            'summary': _summarize_batch(existing),
+        }), 200
+
+    template_vmid = shared.get('template_vmid')
+    remote_id = (shared.get('remote_id') or '').strip() or None
+    ok, details = _bulk_admission_ok(remote_id)
+    if not ok:
+        return _json_field_error(details[0], **details[1])
+
+    # Shared resource/quota/storage admit (uses shared payload + template).
+    from app.remotes import attach_pve_override
+    try:
+        pve_override_shared = attach_pve_override(dict(shared))
+    except ValueError as e:
+        return _json_field_error(str(e), remote_id=str(e))
+    warnings = []
+    with use_pve_override(pve_override_shared):
+        if template_vmid:
+            try:
+                require_sysprep_template(template_vmid)
+            except ValueError as e:
+                return jsonify({'error': str(e)}), 400
+            family = classify_windows_guest_family(template_vmid)
+            if family != 'win11':
+                return _json_field_error(
+                    'Bulk/batch provisioning is only available for Windows 11 '
+                    'templates (tag windows11). Windows Server templates must use '
+                    'single Customize. ' + PVE_ADMIN_HINT,
+                    template_vmid='Bulk not allowed for Server templates.',
+                )
+            if _as_request_bool(shared.get('manage_disks')):
+                return _json_field_error(
+                    'manage_disks / Configure disks is not available for Windows 11 '
+                    'bulk provisioning (flat disk layout).',
+                    manage_disks='Not allowed for Win11.',
+                )
+            ok_admit, admit_result, _family, _caps = _admit_resource_and_quota(
+                shared, template_vmid, extra_items=len(items)
+            )
+            if not ok_admit:
+                return admit_result
+            warnings = admit_result
+
+    batch_id = str(uuid.uuid4())
+    batch = BatchRequest(
+        id=batch_id,
+        request_id=request_id,
+        status='RUNNING',
+        submitted_by=_request_submitter(),
+        remote_id=remote_id,
+        template_vmid=int(template_vmid) if str(template_vmid or '').isdigit() else None,
+        total_items=len(items),
+        message='Batch accepted.',
+    )
+    db.session.add(batch)
+    db.session.flush()
+
+    accepted = 0
+    rejected = 0
+    task_refs = []
+
+    for idx, item in enumerate(items, start=1):
+        data = dict(shared)
+        data.update(item or {})
+        if not (data.get('hostname') or '').strip():
+            rejected += 1
+            continue
+        ok, err = resolve_domain_join_from_request(data)
+        if not ok:
+            rejected += 1
+            continue
+        ok, err = resolve_pve_remote(data, _json_field_error)
+        if not ok:
+            rejected += 1
+            continue
+        tvmid = data.get('template_vmid')
+        if not tvmid:
+            rejected += 1
+            continue
+        try:
+            pve_override = attach_pve_override(data)
+        except ValueError:
+            rejected += 1
+            continue
+        with use_pve_override(pve_override):
+            try:
+                require_sysprep_template(tvmid)
+            except ValueError:
+                rejected += 1
+                continue
+        if not (data.get('bridge') or '').strip():
+            data['bridge'] = app.config.get('PRIMARY_BRIDGE') or 'vmbr0'
+        data.pop('_pve', None)
+
+        task_id = str(uuid.uuid4())
+        vm_uuid = str(uuid.uuid4())
+        hostname = data.get('hostname')
+        task = Task(
+            id=task_id,
+            name='Sysprep Workflow',
+            description=f'Batch {batch_id} item {idx}: {hostname}',
+            vm_uuid=vm_uuid,
+            hostname=(hostname or None),
+            template_vmid=int(data['template_vmid']) if str(data.get('template_vmid', '')).isdigit() else None,
+            remote_id=(data.get('remote_id') or None),
+            batch_id=batch_id,
+            request_id=request_id,
+            sequence_no=idx,
+            submitter=batch.submitted_by,
+        )
+        db.session.add(task)
+        accepted += 1
+        task_refs.append((task_id, data))
+
+    batch.accepted_items = accepted
+    batch.rejected_items = rejected
+    batch.status = 'RUNNING' if accepted else 'FAILED'
+    if not accepted:
+        batch.message = 'No valid items were accepted from this batch.'
+    db.session.commit()
+
+    for task_id, data in task_refs:
+        sysprep_workflow_task.apply_async(
+            args=(task_id, data),
+            queue='clone_queue',
+        )
+
+    resp = {
+        'batch_id': batch_id,
+        'request_id': request_id,
+        'accepted_count': accepted,
+        'rejected_count': rejected,
+        'task_ids': [t for t, _ in task_refs],
+        'idempotent_replay': False,
+    }
+    if warnings:
+        resp['warnings'] = warnings
+    return jsonify(resp), 200
+
+
+@app.route('/api/batches', methods=['GET', 'OPTIONS'])
+@login_or_api_token_required
+def api_list_batches():
+    if request.method == 'OPTIONS':
+        return ('', 204)
+    try:
+        limit = min(max(int(request.args.get('limit') or 100), 1), 500)
+    except ValueError:
+        limit = 100
+    try:
+        offset = max(int(request.args.get('offset') or 0), 0)
+    except ValueError:
+        offset = 0
+    status = (request.args.get('status') or '').strip()
+    remote_id = (request.args.get('remote_id') or '').strip()
+    q = BatchRequest.query
+    if status:
+        q = q.filter(BatchRequest.status == status)
+    if remote_id:
+        q = q.filter(BatchRequest.remote_id == remote_id)
+    total = q.count()
+    rows = q.order_by(BatchRequest.timestamp.desc()).offset(offset).limit(limit).all()
+    return jsonify({
+        'batches': [_summarize_batch(b) for b in rows],
+        'count': len(rows),
+        'total': total,
+        'limit': limit,
+        'offset': offset,
+    })
+
+
+@app.route('/api/batches/<batch_id>', methods=['GET', 'OPTIONS'])
+@login_or_api_token_required
+def api_get_batch(batch_id):
+    if request.method == 'OPTIONS':
+        return ('', 204)
+    batch = BatchRequest.query.get(batch_id)
+    if not batch:
+        return jsonify({'error': 'Batch not found'}), 404
+    tasks = (
+        Task.query.filter(Task.batch_id == batch_id)
+        .order_by(Task.sequence_no.asc(), Task.timestamp.asc())
+        .limit(1000)
+        .all()
+    )
+    return jsonify({
+        'batch': _summarize_batch(batch),
+        'tasks': [t.to_dict() for t in tasks],
+    })
+
+
+@app.route('/api/batches/<batch_id>/cancel', methods=['POST', 'OPTIONS'])
+@csrf.exempt
+@login_or_api_token_required
+@with_session_csrf
+def api_cancel_batch(batch_id):
+    if request.method == 'OPTIONS':
+        return ('', 204)
+    batch = BatchRequest.query.get(batch_id)
+    if not batch:
+        return jsonify({'error': 'Batch not found'}), 404
+    cancellable = (
+        Task.query.filter(
+            Task.batch_id == batch_id,
+            Task.status.in_(('PENDING', 'STARTED', 'PROGRESS')),
+        )
+        .all()
+    )
+    for task in cancellable:
+        task.status = 'CANCELLED'
+        task.progress = 100
+        task.message = 'Cancelled by operator.'
+    batch.status = 'CANCELLED'
+    batch.cancelled_items = len(cancellable)
+    batch.message = 'Batch cancelled; running tasks marked cancelled best-effort.'
+    db.session.commit()
+    return jsonify({
+        'batch_id': batch_id,
+        'cancelled_items': len(cancellable),
+    }), 200
 
 @app.route('/clone_form')
 @login_required

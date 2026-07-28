@@ -35,6 +35,11 @@ if (Test-GuestOsAlreadyDone) {
     exit 0
 }
 
+function Invoke-GuestOsLogoff {
+    Write-Output "setup.ps1: Logging off interactive session to end at lock screen."
+    shutdown /l /f
+}
+
 # Overlapping FirstLogon invocations: first writer wins the lock.
 # SetupComplete must NOT run this script (specialize can delete ProgramData\GuestOS
 # after SetupComplete returns). Take over when the lock owner PID is gone or
@@ -511,6 +516,7 @@ if ($joined) {
 } else {
     Write-Output "setup.ps1: Domain join FAILED after retries; leaving machine in workgroup."
     try { Stop-Transcript | Out-Null } catch {}
+    Invoke-GuestOsLogoff
 }
 {% else %}
 # Mark complete before reboot so FirstLogonCommands re-entry is a no-op.
@@ -522,6 +528,7 @@ if ($pagefileLetter) {
     shutdown /r /t 5
 } else {
     try { Stop-Transcript | Out-Null } catch {}
+    Invoke-GuestOsLogoff
 }
 {% endif %}
 } catch {

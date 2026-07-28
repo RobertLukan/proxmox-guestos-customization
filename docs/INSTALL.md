@@ -271,6 +271,6 @@ Do **not** expose Redis or `:5001` on a public interface.
 - [ ] Real `DOMAIN_PROFILES_JSON` if joining AD
 - [ ] One successful Customize (or API workflow) on a disposable template clone
 
-More detail: [WINDOWS_TEMPLATE.md](WINDOWS_TEMPLATE.md), [TLS_PRODUCTION.md](TLS_PRODUCTION.md),
+More detail: [WINDOWS_TEMPLATE.md](WINDOWS_TEMPLATE.md), [BULK_PROVISIONING.md](BULK_PROVISIONING.md), [TLS_PRODUCTION.md](TLS_PRODUCTION.md),
 [PDM_INTEGRATION.md](PDM_INTEGRATION.md),
 PDM fork [README.GUESTOS.md](https://github.com/RobertLukan/proxmox-datacenter-manager-guestos/blob/guestos-sysprep/README.GUESTOS.md).

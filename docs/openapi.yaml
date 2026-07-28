@@ -68,9 +68,111 @@ paths:
           schema:
             type: integer
             default: 0
+        - in: query
+          name: cursor
+          schema:
+            type: string
+          description: Optional keyset cursor (task id from previous page).
+        - in: query
+          name: batch_id
+          schema:
+            type: string
+          description: Filter tasks by a batch id.
       responses:
         '200':
           description: Paginated task list
+  /api/batches:
+    get:
+      summary: List bulk provisioning batches
+      security:
+        - bearerAuth: []
+        - apiToken: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+        - in: query
+          name: remote_id
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 100
+            maximum: 500
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Paginated batch list
+  /api/batches/{batch_id}:
+    get:
+      summary: Get one batch and its tasks
+      security:
+        - bearerAuth: []
+        - apiToken: []
+      parameters:
+        - in: path
+          name: batch_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Batch payload
+        '404':
+          description: Not found
+  /api/batches/{batch_id}/cancel:
+    post:
+      summary: Cancel pending/running items in a batch (best effort)
+      security:
+        - bearerAuth: []
+        - apiToken: []
+      parameters:
+        - in: path
+          name: batch_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Cancel summary
+        '404':
+          description: Not found
+  /api/metrics:
+    get:
+      summary: Runtime counters for tasks and batches
+      security:
+        - bearerAuth: []
+        - apiToken: []
+      responses:
+        '200':
+          description: Metrics payload
+  /api/provision_limits:
+    get:
+      summary: Resource ceilings, remaining daily/batch quota, and storage status
+      security:
+        - bearerAuth: []
+        - apiToken: []
+      parameters:
+        - in: query
+          name: template_vmid
+          schema:
+            type: integer
+        - in: query
+          name: remote_id
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Limits snapshot (family caps, quotas, storage warn/block)
+        '401':
+          description: Unauthorized
   /start_sysprep_workflow:
     post:
       summary: Start clone + Sysprep workflow
@@ -96,6 +198,32 @@ paths:
                     format: uuid
         '400':
           description: Validation error
+        '401':
+          description: Unauthorized
+  /start_sysprep_bulk_workflow:
+    post:
+      summary: Start clone + Sysprep workflow for many desktops
+      security:
+        - bearerAuth: []
+        - apiToken: []
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          schema:
+            type: string
+          required: false
+          description: Optional client idempotency key for replay-safe retries.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SysprepBulkStart'
+      responses:
+        '200':
+          description: Batch accepted (or idempotent replay)
+        '400':
+          description: Validation or admission error
         '401':
           description: Unauthorized
 components:
@@ -190,3 +318,29 @@ components:
         fast_waits:
           type: boolean
           description: Lab-only shorter boot/agent waits
+    SysprepBulkStart:
+      type: object
+      required:
+        - shared
+        - items
+      properties:
+        request_id:
+          type: string
+          description: Optional idempotency key (or provide Idempotency-Key header).
+        shared:
+          $ref: '#/components/schemas/SysprepStart'
+        items:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            type: object
+            properties:
+              hostname:
+                type: string
+              ip_address:
+                type: string
+              vlan:
+                type: integer
+              domain_profile:
+                type: string

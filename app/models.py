@@ -8,6 +8,15 @@ def _utcnow():
     """Timezone-aware UTC now (replaces the deprecated datetime.utcnow)."""
     return datetime.now(timezone.utc)
 
+
+def _timestamp_iso(ts):
+    """Return a timestamp as an ISO-8601 string with a trailing 'Z'."""
+    if ts is None:
+        return None
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    return ts.isoformat() + 'Z'
+
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     password_hash = db.Column(db.String(128))
@@ -35,17 +44,18 @@ class Task(db.Model):
     remote_id = db.Column(db.String(128), nullable=True, index=True)
     template_vmid = db.Column(db.Integer, nullable=True, index=True)
     hostname = db.Column(db.String(128), nullable=True, index=True)
+    batch_id = db.Column(db.String(36), nullable=True, index=True)
+    request_id = db.Column(db.String(64), nullable=True, index=True)
+    sequence_no = db.Column(db.Integer, nullable=True)
+    submitter = db.Column(db.String(128), nullable=True)
+    error_code = db.Column(db.String(64), nullable=True)
+    error_details = db.Column(db.String(1024), nullable=True)
 
     def __repr__(self):
         return '<Task {}> '.format(self.name)
 
     def _timestamp_iso(self, ts):
-        """Return a timestamp as an ISO-8601 string with a trailing 'Z'."""
-        if ts is None:
-            return None
-        if ts.tzinfo is not None:
-            ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
-        return ts.isoformat() + 'Z'
+        return _timestamp_iso(ts)
 
     def to_dict(self):
         return {
@@ -64,9 +74,15 @@ class Task(db.Model):
             'remote_id': self.remote_id,
             'template_vmid': self.template_vmid,
             'hostname': self.hostname,
+            'batch_id': self.batch_id,
+            'request_id': self.request_id,
+            'sequence_no': self.sequence_no,
+            'submitter': self.submitter,
+            'error_code': self.error_code,
+            'error_details': self.error_details,
         }
 
-    def update_status(self, status, progress=None, message=None, result_vmid=None, result_ip_address=None, vm_uuid=None, redirect_url=None):
+    def update_status(self, status, progress=None, message=None, result_vmid=None, result_ip_address=None, vm_uuid=None, redirect_url=None, error_code=None, error_details=None):
         self.status = status
         self.updated_at = _utcnow()
         if progress is not None:
@@ -81,4 +97,44 @@ class Task(db.Model):
             self.vm_uuid = vm_uuid
         if redirect_url is not None:
             self.redirect_url = redirect_url
+        if error_code is not None:
+            self.error_code = error_code
+        if error_details is not None:
+            self.error_details = error_details
         db.session.commit()
+
+
+class BatchRequest(db.Model):
+    """Batch submission ledger for idempotency and operator status views."""
+    id = db.Column(db.String(36), primary_key=True)
+    request_id = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    status = db.Column(db.String(32), nullable=False, default='ACCEPTED', index=True)
+    submitted_by = db.Column(db.String(128), nullable=True)
+    remote_id = db.Column(db.String(128), nullable=True, index=True)
+    template_vmid = db.Column(db.Integer, nullable=True, index=True)
+    total_items = db.Column(db.Integer, nullable=False, default=0)
+    accepted_items = db.Column(db.Integer, nullable=False, default=0)
+    rejected_items = db.Column(db.Integer, nullable=False, default=0)
+    cancelled_items = db.Column(db.Integer, nullable=False, default=0)
+    idempotent_replay = db.Column(db.Boolean, nullable=False, default=False)
+    message = db.Column(db.String(512), default='')
+    timestamp = db.Column(db.DateTime(timezone=True), index=True, default=_utcnow)
+    updated_at = db.Column(db.DateTime(timezone=True), index=True, default=_utcnow, onupdate=_utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'request_id': self.request_id,
+            'status': self.status,
+            'submitted_by': self.submitted_by,
+            'remote_id': self.remote_id,
+            'template_vmid': self.template_vmid,
+            'total_items': self.total_items,
+            'accepted_items': self.accepted_items,
+            'rejected_items': self.rejected_items,
+            'cancelled_items': self.cancelled_items,
+            'idempotent_replay': bool(self.idempotent_replay),
+            'message': self.message,
+            'timestamp': _timestamp_iso(self.timestamp),
+            'updated_at': _timestamp_iso(self.updated_at or self.timestamp),
+        }

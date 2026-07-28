@@ -124,3 +124,57 @@ try:
     SYSPREP_AGENT_STABLE_SECONDS = int(os.environ.get('SYSPREP_AGENT_STABLE_SECONDS') or '60')
 except ValueError:
     SYSPREP_AGENT_STABLE_SECONDS = 60
+
+# Bulk / provisioning safeguards (no superadmin bypass — use PVE for exceptions).
+try:
+    BULK_MAX_ITEMS = max(1, int(os.environ.get('BULK_MAX_ITEMS') or '10'))
+except ValueError:
+    BULK_MAX_ITEMS = 10
+try:
+    BULK_MAX_INFLIGHT_BATCHES = max(1, int(os.environ.get('BULK_MAX_INFLIGHT_BATCHES') or '10'))
+except ValueError:
+    BULK_MAX_INFLIGHT_BATCHES = 10
+try:
+    BULK_MAX_CONCURRENT_PER_REMOTE = max(1, int(os.environ.get('BULK_MAX_CONCURRENT_PER_REMOTE') or '10'))
+except ValueError:
+    BULK_MAX_CONCURRENT_PER_REMOTE = 10
+try:
+    BULK_MAX_CONCURRENT_GLOBAL = max(1, int(os.environ.get('BULK_MAX_CONCURRENT_GLOBAL') or '10'))
+except ValueError:
+    BULK_MAX_CONCURRENT_GLOBAL = 10
+try:
+    PROVISION_MAX_PER_DAY = max(1, int(os.environ.get('PROVISION_MAX_PER_DAY') or '20'))
+except ValueError:
+    PROVISION_MAX_PER_DAY = 20
+try:
+    WIN11_MAX_CORES = max(1, int(os.environ.get('WIN11_MAX_CORES') or '8'))
+except ValueError:
+    WIN11_MAX_CORES = 8
+try:
+    WIN11_MAX_RAM_MB = max(512, int(os.environ.get('WIN11_MAX_RAM_MB') or '65536'))
+except ValueError:
+    WIN11_MAX_RAM_MB = 65536
+try:
+    WIN11_MAX_DISK_GB = max(1, int(os.environ.get('WIN11_MAX_DISK_GB') or '600'))
+except ValueError:
+    WIN11_MAX_DISK_GB = 600
+try:
+    SERVER_MAX_CORES = max(1, int(os.environ.get('SERVER_MAX_CORES') or '16'))
+except ValueError:
+    SERVER_MAX_CORES = 16
+try:
+    SERVER_MAX_RAM_MB = max(512, int(os.environ.get('SERVER_MAX_RAM_MB') or '65536'))
+except ValueError:
+    SERVER_MAX_RAM_MB = 65536
+try:
+    SERVER_MAX_DISK_GB = max(1, int(os.environ.get('SERVER_MAX_DISK_GB') or '2048'))
+except ValueError:
+    SERVER_MAX_DISK_GB = 2048
+try:
+    STORAGE_WARN_PCT = float(os.environ.get('STORAGE_WARN_PCT') or '65')
+except ValueError:
+    STORAGE_WARN_PCT = 65.0
+try:
+    STORAGE_BLOCK_PCT = float(os.environ.get('STORAGE_BLOCK_PCT') or '80')
+except ValueError:
+    STORAGE_BLOCK_PCT = 80.0

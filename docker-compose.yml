@@ -69,7 +69,29 @@ services:
     build: .
     command: >
       sh -c " . /app/deploy/compose-redis-env.sh
-      && celery -A app.celery worker --loglevel=info"
+      && celery -A app.celery worker --loglevel=info -Q clone_queue --hostname=clone@%h --concurrency=${CLONE_WORKER_CONCURRENCY:-4} --prefetch-multiplier=${CLONE_PREFETCH_MULTIPLIER:-1}"
+    env_file: .env
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+    depends_on:
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    volumes:
+      - app-instance:/app/instance
+    restart: unless-stopped
+    networks:
+      - guestos
+
+  verify-worker:
+    image: proxmox-guestos-customization-worker:latest
+    build: .
+    command: >
+      sh -c " . /app/deploy/compose-redis-env.sh
+      && celery -A app.celery worker --loglevel=info -Q verify_queue --hostname=verify@%h --concurrency=${VERIFY_WORKER_CONCURRENCY:-2} --prefetch-multiplier=${VERIFY_PREFETCH_MULTIPLIER:-1}"
     env_file: .env
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}

@@ -28,15 +28,30 @@ Validated in lab: **Windows Server 2019**, **Windows 11**.
 - Domain join needs DNS that can resolve the domain controller (see
   [AD_VALIDATION.md](AD_VALIDATION.md)).
 
+## Template tags (resource family)
+
+GuestOS classifies caps primarily from Proxmox **tags**:
+
+| Tag | Family | Caps (defaults) |
+|-----|--------|-----------------|
+| `windows11` | Win11 / VDI | 8 cores, 64 GB RAM, 600 GB requested disks |
+| `windowsserver2019` (or `windowsserver*`) | Server | 16 cores, 64 GB RAM, 2 TB requested disks |
+
+Lab examples: template **127** → `windows11`; template **120** → `windowsserver2019`.
+
+Also accepted: name heuristics and tags such as `guestos-disk`, `server2019`, `win11`, `vdi`.
+
 ## Optional: Configure disks (Server 2019 only)
 
 `manage_disks` attaches/onlines/extends OS, data, and pagefile volumes at
-customize time. It is **not** available for Win11 (flat disk layout).
+customize time. It is **not** available for Win11 (flat disk layout) — the Disks
+wizard step is hidden for `windows11` templates and the API rejects
+`manage_disks=true` for non-Server families.
 
 The template must be recognized as Server 2019 via **name or tags**, for example:
 
 - Name contains: `server2019`, `win2019`, `ws2019`, …
-- Or tags such as: `guestos-disk`, `guestos-disks`, `server2019`, …
+- Or tags such as: `windowsserver2019`, `guestos-disk`, `guestos-disks`, `server2019`, …
 
 If `manage_disks=true` on a non–2019 template, the job **fails validation**
 (no silent skip). Disk customize is exposed in the **GuestOS UI / machine API**,

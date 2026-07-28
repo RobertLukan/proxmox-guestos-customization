@@ -4,37 +4,86 @@
 <h1>New VM with Sysprep</h1>
 <p class="page-lead">Clone from template {{ template_vmid }} and run Sysprep in the <strong>same</strong> job. For clone-only then Sysprep later, use the home page instead.</p>
 <div id="form-alert" class="alert alert-danger" role="alert"></div>
+<div id="limits-alert" class="alert alert-warning" role="status" hidden></div>
+<div id="limits-info" class="alert alert-secondary py-2" role="status">
+    Loading provisioning limits…
+</div>
 
 <form id="sysprep-form" data-wizard novalidate>
     <input type="hidden" name="template_vmid" value="{{ template_vmid }}">
     {% if remote_id %}
     <input type="hidden" name="remote_id" id="remote_id" value="{{ remote_id }}">
     {% endif %}
+    <div class="mb-3" id="provision_mode_group">
+        <label for="provision_mode" class="form-label">Provision mode</label>
+        <select id="provision_mode" class="form-select">
+            <option value="single" selected>Single desktop</option>
+            <option value="bulk">Bulk desktops (batch)</option>
+        </select>
+        <div class="form-text" id="provision_mode_help">Bulk mode creates one batch and enqueues one task per row (Windows 11 only).</div>
+    </div>
 
     <ol class="wizard-steps" aria-label="Steps">
         <li data-step="0" class="is-active">Basics</li>
         <li data-step="1">Network</li>
         <li data-step="2">Domain</li>
-        <li data-step="3">Disks</li>
+        <li data-step="3" id="wizard-step-disks">Disks</li>
         <li data-step="4">Review</li>
     </ol>
 
     <div class="wizard-panel" data-step="0">
         <h2 class="step-title">Basic configuration</h2>
-        <div class="mb-3">
+        <div class="mb-3" id="single-hostname-group">
             <label for="hostname" class="form-label">New Hostname</label>
             <input type="text" name="hostname" id="hostname" class="form-control" maxlength="15" data-required="true" data-validate="hostname">
             <div class="form-text">NetBIOS-safe: 1–15 letters, digits, or hyphens.</div>
             <div class="invalid-feedback"></div>
         </div>
+        <div id="bulk-fields" hidden>
+            <h3 class="h6 mt-3">Bulk desktop list</h3>
+            <div class="mb-3">
+                <label for="bulk_network_input_mode" class="form-label">Bulk row network mode</label>
+                <select id="bulk_network_input_mode" class="form-select">
+                    <option value="static" selected>Static (hostname,ip/prefix[,vlan] per row)</option>
+                    <option value="dhcp">DHCP (hostname[,vlan] per row)</option>
+                </select>
+            </div>
+            <div class="mb-3">
+                <label for="bulk_rows" class="form-label">Desktop rows (CSV lines)</label>
+                <textarea id="bulk_rows" class="form-control" rows="8" placeholder="WIN11-VDI-001,192.168.10.101/24,210&#10;WIN11-VDI-002,192.168.10.102/24,210"></textarea>
+                <div class="form-text" id="bulk_rows_help">
+                    One desktop per line. Static: <code>hostname,ip/prefix[,vlan]</code>.
+                    DHCP: <code>hostname[,vlan]</code>.
+                </div>
+                <div class="form-text fw-semibold" id="bulk_rows_remaining">Rows: 0 — remaining capacity loading…</div>
+                <div class="form-text" id="bulk_disk_sum_info">Requested disk sum: — (informational only)</div>
+                <div class="text-danger small" id="bulk_csv_warn" hidden></div>
+            </div>
+            <div class="mb-3" id="bulk_gateway_group">
+                <label for="bulk_gateway" class="form-label">Default Gateway</label>
+                <input type="text" id="bulk_gateway" class="form-control" data-validate="ipv4">
+                <div class="form-text">Required for bulk static mode. Example: <code>192.168.10.1</code></div>
+                <div class="invalid-feedback"></div>
+            </div>
+            <div class="mb-3" id="bulk_dns_group">
+                <label for="bulk_dns_servers" class="form-label">DNS Servers (comma-separated)</label>
+                <input type="text" id="bulk_dns_servers" class="form-control" data-validate="dns_list" placeholder="10.0.0.10,10.0.0.11">
+                <div class="form-text">Use this in bulk mode instead of Domain Profile DNS fill.</div>
+                <div class="invalid-feedback"></div>
+            </div>
+        </div>
         <div class="mb-3">
             <label for="cores" class="form-label">CPU Cores</label>
-            <input type="number" name="cores" id="cores" class="form-control" value="2" min="1" data-required="true">
+            <input type="number" name="cores" id="cores" class="form-control" value="2" min="1" max="8" data-required="true">
+            <div class="form-text" id="cores_ceiling_help">Max depends on template family (Win11 / Server).</div>
+            <div class="text-danger small" id="cores_ceiling_warn" hidden></div>
             <div class="invalid-feedback"></div>
         </div>
         <div class="mb-3">
             <label for="ram" class="form-label">RAM (MB)</label>
-            <input type="number" name="ram" id="ram" class="form-control" value="4096" min="512" data-required="true">
+            <input type="number" name="ram" id="ram" class="form-control" value="4096" min="512" max="65536" data-required="true">
+            <div class="form-text" id="ram_ceiling_help">Max 65536 MB (64 GB) unless limited further by template family.</div>
+            <div class="text-danger small" id="ram_ceiling_warn" hidden></div>
             <div class="invalid-feedback"></div>
         </div>
         <div class="mb-3">
@@ -66,7 +115,7 @@
             </select>
             <div class="invalid-feedback"></div>
         </div>
-        <div class="mb-3">
+        <div class="mb-3" id="domain_profile_group">
             <label for="domain_profile" class="form-label">Domain Profile (optional)</label>
             <select class="form-select" id="domain_profile" name="domain_profile">
                 <option value="">Select a profile</option>
@@ -77,12 +126,12 @@
             <div class="form-text">Fills DNS and VLAN from the profile. Domain-join credentials stay on the server.</div>
             <div class="invalid-feedback"></div>
         </div>
-        <div class="mb-3">
+        <div class="mb-3" id="vlan_group">
             <label for="vlan" class="form-label">VLAN (optional)</label>
             <input type="number" name="vlan" id="vlan" class="form-control" data-validate="vlan" min="1" max="4094">
             <div class="invalid-feedback"></div>
         </div>
-        <div class="mb-3">
+        <div class="mb-3" id="network_mode_group">
             <label for="network_mode" class="form-label">Network Mode</label>
             <select class="form-select" id="network_mode" name="network_mode">
                 <option value="static" selected>Static</option>
@@ -90,12 +139,12 @@
             </select>
         </div>
         <div id="static_fields">
-            <div class="mb-3">
+            <div class="mb-3" id="static_ip_group">
                 <label for="ip_address" class="form-label">IP Address</label>
                 <input type="text" name="ip_address" id="ip_address" class="form-control" data-required="true" data-validate="ipv4">
                 <div class="invalid-feedback"></div>
             </div>
-            <div class="mb-3">
+            <div class="mb-3" id="netmask_group">
                 <label for="netmask_cidr" class="form-label">Netmask (CIDR)</label>
                 <select class="form-select" id="netmask_cidr" name="netmask_cidr" data-required="true" data-validate="netmask">
                     <option value="24">24 (255.255.255.0)</option>
@@ -106,13 +155,13 @@
                 </select>
                 <div class="invalid-feedback"></div>
             </div>
-            <div class="mb-3">
+            <div class="mb-3" id="gateway_group">
                 <label for="gateway" class="form-label">Default Gateway</label>
                 <input type="text" name="gateway" id="gateway" class="form-control" data-required="true" data-validate="ipv4">
                 <div class="invalid-feedback"></div>
             </div>
         </div>
-        <div class="mb-3">
+        <div class="mb-3" id="dns_servers_group">
             <label for="dns_servers" class="form-label">DNS Servers (comma-separated)</label>
             <input type="text" name="dns_servers" id="dns_servers" class="form-control" data-validate="dns_list"
                    placeholder="Optional under DHCP; recommended when joining a domain">
@@ -156,8 +205,13 @@
         <p class="form-text mb-0">You can skip this step if the VM should remain workgroup-joined.</p>
     </div>
 
-    <div class="wizard-panel" data-step="3" hidden>
+    <div class="wizard-panel" data-step="3" id="disks-wizard-panel" hidden>
         <h2 class="step-title">Disks (optional)</h2>
+        <p class="form-text" id="disks_unavailable_help" hidden>
+            Disk configure is only available for Windows Server templates
+            (tag <code>windowsserver2019</code> / Server 2019). Windows 11 keeps a flat disk layout.
+        </p>
+        <div id="disks_controls">
         <div class="form-check mb-3">
             <input type="checkbox" class="form-check-input" id="manage_disks_checkbox">
             <label class="form-check-label" for="manage_disks_checkbox">Configure disks</label>
@@ -173,6 +227,8 @@
             <div class="mb-3">
                 <label for="os_grow_to_gb" class="form-label">Grow OS disk to (GB, optional)</label>
                 <input type="number" class="form-control" id="os_grow_to_gb" name="os_grow_to_gb" min="1" placeholder="Leave blank to keep template size">
+                <div class="form-text" id="disk_ceiling_help">Total requested disks (OS grow + data + pagefile) are capped per OS family.</div>
+                <div class="text-danger small" id="disk_ceiling_warn" hidden></div>
             </div>
             <div class="form-check mb-3">
                 <input type="checkbox" class="form-check-input" id="ensure_pagefile_disk" checked>
@@ -196,6 +252,7 @@
             </div>
         </div>
         <p class="form-text mb-0">Leave unchecked to keep today’s Sysprep-only behavior (no disk changes).</p>
+        </div>
     </div>
 
     <div class="wizard-panel" data-step="4" hidden>
@@ -221,6 +278,369 @@
     var profileSelect = form.querySelector('#domain_profile');
     var dnsEl = form.querySelector('#dns_servers');
     var vlanEl = form.querySelector('#vlan');
+    var provisionMode = form.querySelector('#provision_mode');
+    var provisionModeGroup = form.querySelector('#provision_mode_group');
+    var provisionModeHelp = form.querySelector('#provision_mode_help');
+    var bulkFields = form.querySelector('#bulk-fields');
+    var bulkRows = form.querySelector('#bulk_rows');
+    var singleHostnameGroup = form.querySelector('#single-hostname-group');
+    var singleHostname = form.querySelector('#hostname');
+    var networkModeGroup = form.querySelector('#network_mode_group');
+    var networkModeSelect = form.querySelector('#network_mode');
+    var staticIpGroup = form.querySelector('#static_ip_group');
+    var bulkNetworkInputMode = form.querySelector('#bulk_network_input_mode');
+    var ipAddressInput = form.querySelector('#ip_address');
+    var netmaskInput = form.querySelector('#netmask_cidr');
+    var gatewayInput = form.querySelector('#gateway');
+    var domainProfileGroup = form.querySelector('#domain_profile_group');
+    var vlanGroup = form.querySelector('#vlan_group');
+    var netmaskGroup = form.querySelector('#netmask_group');
+    var gatewayGroup = form.querySelector('#gateway_group');
+    var dnsServersGroup = form.querySelector('#dns_servers_group');
+    var bulkGatewayGroup = form.querySelector('#bulk_gateway_group');
+    var bulkDnsGroup = form.querySelector('#bulk_dns_group');
+    var bulkGateway = form.querySelector('#bulk_gateway');
+    var bulkDnsServers = form.querySelector('#bulk_dns_servers');
+    var limitsInfo = document.getElementById('limits-info');
+    var limitsAlert = document.getElementById('limits-alert');
+    var bulkRowsRemaining = document.getElementById('bulk_rows_remaining');
+    var bulkDiskSumInfo = document.getElementById('bulk_disk_sum_info');
+    var bulkCsvWarn = document.getElementById('bulk_csv_warn');
+    var coresInput = form.querySelector('#cores');
+    var ramInput = form.querySelector('#ram');
+    var coresHelp = document.getElementById('cores_ceiling_help');
+    var ramHelp = document.getElementById('ram_ceiling_help');
+    var diskHelp = document.getElementById('disk_ceiling_help');
+    var coresWarn = document.getElementById('cores_ceiling_warn');
+    var ramWarn = document.getElementById('ram_ceiling_warn');
+    var diskWarn = document.getElementById('disk_ceiling_warn');
+    var provisionLimits = null;
+    var wizardApi = null;
+    var disksWizardPanel = document.getElementById('disks-wizard-panel');
+    var disksWizardStep = document.getElementById('wizard-step-disks');
+    var disksControls = document.getElementById('disks_controls');
+    var disksUnavailableHelp = document.getElementById('disks_unavailable_help');
+    var manageDisksCheckbox = form.querySelector('#manage_disks_checkbox');
+    var adminHintDefault =
+        'Additional VMs or larger resources must be configured directly in Proxmox VE by an administrator.';
+
+    function setFieldWarn(el, warnEl, message) {
+        if (!el || !warnEl) return;
+        if (message) {
+            warnEl.hidden = false;
+            warnEl.textContent = message;
+            el.classList.add('is-invalid');
+        } else {
+            warnEl.hidden = true;
+            warnEl.textContent = '';
+            el.classList.remove('is-invalid');
+        }
+    }
+
+    function validateResourceCeilings() {
+        if (!provisionLimits) return true;
+        var hint = provisionLimits.admin_hint || adminHintDefault;
+        var ok = true;
+        var coresVal = parseInt((coresInput && coresInput.value) || '0', 10);
+        if (coresInput && !isNaN(coresVal) && coresVal > provisionLimits.max_cores) {
+            setFieldWarn(
+                coresInput,
+                coresWarn,
+                'Over limit for ' + provisionLimits.family +
+                    ': max ' + provisionLimits.max_cores + ' cores. ' + hint
+            );
+            ok = false;
+        } else {
+            setFieldWarn(coresInput, coresWarn, '');
+        }
+        var ramVal = parseInt((ramInput && ramInput.value) || '0', 10);
+        if (ramInput && !isNaN(ramVal) && ramVal > provisionLimits.max_ram_mb) {
+            setFieldWarn(
+                ramInput,
+                ramWarn,
+                'Over limit for ' + provisionLimits.family +
+                    ': max ' + provisionLimits.max_ram_mb + ' MB RAM. ' + hint
+            );
+            ok = false;
+        } else {
+            setFieldWarn(ramInput, ramWarn, '');
+        }
+        var diskEl = form.querySelector('#os_grow_to_gb');
+        var diskGb = window.GuestOSForms
+            ? GuestOSForms.estimateRequestedDiskGb(form)
+            : 0;
+        if (diskGb > provisionLimits.max_disk_gb) {
+            setFieldWarn(
+                diskEl,
+                diskWarn,
+                'Over limit for ' + provisionLimits.family +
+                    ': max ' + provisionLimits.max_disk_gb +
+                    ' GB total requested disks (currently ' + diskGb + ' GB). ' + hint
+            );
+            ok = false;
+        } else {
+            setFieldWarn(diskEl, diskWarn, '');
+        }
+        return ok;
+    }
+
+    function countBulkLines() {
+        if (!bulkRows) return 0;
+        return (bulkRows.value || '').split(/\r?\n/).filter(function (l) {
+            return (l || '').trim();
+        }).length;
+    }
+
+    function updateBulkCsvValidation() {
+        if (!bulkCsvWarn || !window.GuestOSForms) return true;
+        if (!(provisionMode && provisionMode.value === 'bulk')) {
+            bulkCsvWarn.hidden = true;
+            bulkCsvWarn.textContent = '';
+            if (bulkRows) bulkRows.classList.remove('is-invalid');
+            return true;
+        }
+        var mode = (bulkNetworkInputMode && bulkNetworkInputMode.value) || 'static';
+        var text = (bulkRows && bulkRows.value) || '';
+        if (!String(text).trim()) {
+            bulkCsvWarn.hidden = true;
+            bulkCsvWarn.textContent = '';
+            if (bulkRows) bulkRows.classList.remove('is-invalid');
+            return true;
+        }
+        var check = GuestOSForms.validateBulkCsvText(text, mode);
+        if (!check.ok) {
+            bulkCsvWarn.hidden = false;
+            bulkCsvWarn.textContent = check.errors.slice(0, 4).join(' ');
+            if (bulkRows) bulkRows.classList.add('is-invalid');
+            return false;
+        }
+        bulkCsvWarn.hidden = true;
+        bulkCsvWarn.textContent = '';
+        if (bulkRows) bulkRows.classList.remove('is-invalid');
+        return true;
+    }
+
+    function updateBulkDiskSum() {
+        if (!bulkDiskSumInfo || !window.GuestOSForms) return;
+        var used = countBulkLines();
+        var est = GuestOSForms.estimateBulkDiskSumGb(form, used);
+        if (!est.per_vm_gb) {
+            bulkDiskSumInfo.textContent =
+                'Requested disk sum: none (Configure disks off — thin clone; informational only, not enforced).';
+        } else {
+            bulkDiskSumInfo.textContent =
+                'Requested disk sum: ' + est.per_vm_gb + ' GB × ' + est.items +
+                ' VMs = ' + est.batch_sum_gb + ' GB (informational only, not enforced per batch).';
+        }
+        updateBulkCsvValidation();
+        validateResourceCeilings();
+    }
+
+    function updateBulkRemaining() {
+        if (!bulkRowsRemaining || !provisionLimits) return;
+        var used = countBulkLines();
+        var left = Math.max(0, (provisionLimits.batch_remaining || 0) - used);
+        bulkRowsRemaining.textContent =
+            'Rows entered: ' + used +
+            ' — can still add ' + left +
+            ' (batch max ' + provisionLimits.bulk_max_items +
+            ', daily remaining ' + provisionLimits.daily_remaining +
+            '/' + provisionLimits.daily_max + ').';
+        if (used > (provisionLimits.batch_remaining || 0)) {
+            bulkRowsRemaining.classList.add('text-danger');
+        } else {
+            bulkRowsRemaining.classList.remove('text-danger');
+        }
+        updateBulkDiskSum();
+    }
+
+    function applyLimitsToForm(limits) {
+        provisionLimits = limits || null;
+        if (!limits) return;
+        var bulkAllowed = limits.bulk_allowed !== false && limits.family === 'win11';
+        var disksAllowed = limits.family === 'server';
+        if (provisionModeGroup) {
+            provisionModeGroup.hidden = !bulkAllowed;
+            provisionModeGroup.style.display = bulkAllowed ? '' : 'none';
+        }
+        if (!bulkAllowed && provisionMode) {
+            provisionMode.value = 'single';
+            applyProvisionMode();
+        }
+        if (provisionModeHelp) {
+            provisionModeHelp.textContent = bulkAllowed
+                ? 'Bulk mode creates one batch and enqueues one task per row (Windows 11 only).'
+                : 'Bulk/batch is unavailable for Windows Server templates — use single Customize.';
+        }
+        // Disk configure is Server-only; hide/skip the Disks wizard step for Win11.
+        if (disksWizardPanel) {
+            if (disksAllowed) disksWizardPanel.removeAttribute('data-wizard-disabled');
+            else disksWizardPanel.setAttribute('data-wizard-disabled', 'true');
+        }
+        if (disksWizardStep) {
+            if (disksAllowed) disksWizardStep.removeAttribute('data-wizard-disabled');
+            else disksWizardStep.setAttribute('data-wizard-disabled', 'true');
+        }
+        if (manageDisksCheckbox && !disksAllowed) {
+            manageDisksCheckbox.checked = false;
+            manageDisksCheckbox.dispatchEvent(new Event('change'));
+        }
+        if (disksControls) {
+            disksControls.hidden = !disksAllowed;
+            disksControls.style.display = disksAllowed ? '' : 'none';
+        }
+        if (disksUnavailableHelp) {
+            disksUnavailableHelp.hidden = disksAllowed;
+        }
+        if (wizardApi && typeof wizardApi.refresh === 'function') {
+            wizardApi.refresh();
+        }
+        if (coresInput) {
+            coresInput.max = String(limits.max_cores);
+        }
+        if (ramInput) {
+            ramInput.max = String(limits.max_ram_mb);
+        }
+        if (coresHelp) {
+            coresHelp.textContent = 'Ceiling for ' + limits.family + ': max ' + limits.max_cores + ' cores.';
+        }
+        if (ramHelp) {
+            ramHelp.textContent =
+                'Ceiling for ' + limits.family + ': max ' + limits.max_ram_mb + ' MB RAM.';
+        }
+        if (diskHelp) {
+            diskHelp.textContent =
+                'Total requested disks capped at ' + limits.max_disk_gb +
+                ' GB for ' + limits.family + '. Thin clones without Configure disks do not count.';
+        }
+        if (limitsInfo) {
+            limitsInfo.textContent =
+                'Limits (' + limits.family + '): ' +
+                limits.max_cores + ' cores / ' + limits.max_ram_mb + ' MB RAM / ' +
+                limits.max_disk_gb + ' GB disks · daily ' +
+                limits.daily_used + '/' + limits.daily_max +
+                (bulkAllowed
+                    ? (' · batch max ' + limits.bulk_max_items +
+                       ' · inflight ' + limits.inflight_global + '/' + limits.inflight_global_max)
+                    : ' · bulk disabled (Server)');
+        }
+        if (limitsAlert) {
+            var storage = limits.storage || {};
+            if (storage.level === 'block' || storage.level === 'warn') {
+                limitsAlert.hidden = false;
+                limitsAlert.className = storage.level === 'block'
+                    ? 'alert alert-danger'
+                    : 'alert alert-warning';
+                limitsAlert.textContent = storage.message || 'Storage capacity warning.';
+            } else {
+                limitsAlert.hidden = true;
+                limitsAlert.textContent = '';
+            }
+        }
+        updateBulkRemaining();
+        validateResourceCeilings();
+    }
+
+    async function refreshProvisionLimits() {
+        var qs = new URLSearchParams();
+        qs.set('template_vmid', '{{ template_vmid }}');
+        {% if remote_id %}
+        qs.set('remote_id', '{{ remote_id }}');
+        {% endif %}
+        try {
+            var res = await fetch('{{ url_for('api_provision_limits') }}?' + qs.toString(), {
+                headers: { 'Accept': 'application/json' },
+            });
+            var body = await res.json();
+            if (res.ok) applyLimitsToForm(body);
+            else if (limitsInfo) limitsInfo.textContent = 'Could not load provisioning limits.';
+        } catch (e) {
+            if (limitsInfo) limitsInfo.textContent = 'Could not load provisioning limits.';
+        }
+    }
+
+    function applyProvisionMode() {
+        var isBulk = provisionMode && provisionMode.value === 'bulk';
+        var isBulkStatic = isBulk && bulkNetworkInputMode && bulkNetworkInputMode.value === 'static';
+        if (singleHostnameGroup) {
+            singleHostnameGroup.hidden = isBulk;
+            singleHostnameGroup.style.display = isBulk ? 'none' : '';
+        }
+        if (singleHostname) {
+            if (isBulk) {
+                singleHostname.removeAttribute('data-required');
+                singleHostname.value = '';
+            } else {
+                singleHostname.setAttribute('data-required', 'true');
+            }
+        }
+        if (networkModeGroup) {
+            networkModeGroup.hidden = isBulk;
+            networkModeGroup.style.display = isBulk ? 'none' : '';
+        }
+        if (staticIpGroup) {
+            staticIpGroup.hidden = isBulk;
+            staticIpGroup.style.display = isBulk ? 'none' : '';
+        }
+        if (netmaskGroup) {
+            netmaskGroup.hidden = isBulk;
+            netmaskGroup.style.display = isBulk ? 'none' : '';
+        }
+        if (gatewayGroup) {
+            gatewayGroup.hidden = isBulk;
+            gatewayGroup.style.display = isBulk ? 'none' : '';
+        }
+        if (dnsServersGroup) {
+            dnsServersGroup.hidden = isBulk;
+            dnsServersGroup.style.display = isBulk ? 'none' : '';
+        }
+        if (domainProfileGroup) {
+            domainProfileGroup.hidden = isBulkStatic;
+            domainProfileGroup.style.display = isBulkStatic ? 'none' : '';
+        }
+        if (vlanGroup) {
+            vlanGroup.hidden = isBulk;
+            vlanGroup.style.display = isBulk ? 'none' : '';
+        }
+        if (bulkGatewayGroup) {
+            bulkGatewayGroup.hidden = !isBulkStatic;
+            bulkGatewayGroup.style.display = isBulkStatic ? '' : 'none';
+        }
+        if (bulkDnsGroup) {
+            bulkDnsGroup.hidden = !isBulk;
+            bulkDnsGroup.style.display = isBulk ? '' : 'none';
+        }
+        if (bulkGateway) {
+            if (isBulkStatic) bulkGateway.setAttribute('data-required', 'true');
+            else bulkGateway.removeAttribute('data-required');
+        }
+        if (ipAddressInput && netmaskInput && gatewayInput) {
+            if (isBulk) {
+                ipAddressInput.removeAttribute('data-required');
+                netmaskInput.removeAttribute('data-required');
+                gatewayInput.removeAttribute('data-required');
+            } else if (networkModeSelect && networkModeSelect.value === 'static') {
+                ipAddressInput.setAttribute('data-required', 'true');
+                netmaskInput.setAttribute('data-required', 'true');
+                gatewayInput.setAttribute('data-required', 'true');
+            }
+        }
+        if (isBulk) {
+            profileSelect.value = '';
+        }
+        if (networkModeSelect && isBulk && bulkNetworkInputMode) {
+            networkModeSelect.value = bulkNetworkInputMode.value;
+            networkModeSelect.dispatchEvent(new Event('change'));
+        }
+        if (networkModeSelect && !isBulk) {
+            networkModeSelect.dispatchEvent(new Event('change'));
+        }
+        if (bulkFields) {
+            bulkFields.hidden = !isBulk;
+            bulkFields.style.display = isBulk ? '' : 'none';
+        }
+        updateBulkCsvValidation();
+    }
 
     GuestOSForms.wireNetworkMode(form);
     GuestOSForms.wireDomainJoin(form);
@@ -228,18 +648,110 @@
     profileSelect.addEventListener('change', function () {
         GuestOSForms.applyDomainProfile(profileSelect, domainProfiles, dnsEl, vlanEl);
     });
+    if (provisionMode) {
+        provisionMode.addEventListener('change', applyProvisionMode);
+    }
+    if (bulkNetworkInputMode && networkModeSelect) {
+        bulkNetworkInputMode.addEventListener('change', function () {
+            if (provisionMode && provisionMode.value === 'bulk') {
+                networkModeSelect.value = bulkNetworkInputMode.value;
+                networkModeSelect.dispatchEvent(new Event('change'));
+                applyProvisionMode();
+            }
+        });
+    }
+    applyProvisionMode();
+    if (bulkRows) {
+        bulkRows.addEventListener('input', updateBulkRemaining);
+    }
+    ['#manage_disks_checkbox', '#ensure_pagefile_disk', '#ensure_data_disk',
+     '#os_grow_to_gb', '#pagefile_size_gb', '#data_size_gb'].forEach(function (sel) {
+        var el = form.querySelector(sel);
+        if (el) el.addEventListener('change', updateBulkDiskSum);
+        if (el) el.addEventListener('input', updateBulkDiskSum);
+    });
+    if (coresInput) {
+        coresInput.addEventListener('input', validateResourceCeilings);
+        coresInput.addEventListener('change', validateResourceCeilings);
+    }
+    if (ramInput) {
+        ramInput.addEventListener('input', validateResourceCeilings);
+        ramInput.addEventListener('change', validateResourceCeilings);
+    }
+    updateBulkDiskSum();
+    refreshProvisionLimits();
 
-    GuestOSWizard.init(form, {
+    wizardApi = GuestOSWizard.init(form, {
         onReview: function () {
             GuestOSForms.fillReview(form, document.getElementById('review-summary'));
         },
         onSubmit: async function (e) {
             e.preventDefault();
             GuestOSForms.clearFormAlert(alertBox);
-            var payload = GuestOSForms.collectSysprepPayload(form);
-            var result = await GuestOSForms.postJson('{{ url_for('start_sysprep_workflow') }}', payload);
+            var isBulk = provisionMode && provisionMode.value === 'bulk';
+            if (isBulk && provisionLimits && provisionLimits.bulk_allowed === false) {
+                GuestOSForms.showFormAlert(
+                    alertBox,
+                    'Bulk/batch provisioning is only available for Windows 11 templates.'
+                );
+                return;
+            }
+            if (!validateResourceCeilings()) {
+                GuestOSForms.showFormAlert(
+                    alertBox,
+                    'Resource values exceed the template family ceiling. ' +
+                    ((provisionLimits && provisionLimits.admin_hint) || adminHintDefault)
+                );
+                return;
+            }
+            var isBulk = provisionMode && provisionMode.value === 'bulk';
+            var payload;
+            try {
+                payload = isBulk
+                    ? GuestOSForms.collectBulkPayload(form)
+                    : GuestOSForms.collectSysprepPayload(form);
+            } catch (err) {
+                GuestOSForms.showFormAlert(alertBox, err && err.message ? err.message : 'Invalid bulk input.');
+                if (bulkRows) bulkRows.focus();
+                return;
+            }
+            if (isBulk && (!payload.items || payload.items.length === 0)) {
+                GuestOSForms.showFormAlert(alertBox, 'Bulk mode requires at least one row.');
+                if (bulkRows) bulkRows.focus();
+                return;
+            }
+            if (isBulk && !updateBulkCsvValidation()) {
+                GuestOSForms.showFormAlert(alertBox, 'Fix CSV validation errors before submitting.');
+                if (bulkRows) bulkRows.focus();
+                return;
+            }
+            if (isBulk && provisionLimits && payload.items.length > provisionLimits.batch_remaining) {
+                GuestOSForms.showFormAlert(
+                    alertBox,
+                    'Too many rows for remaining capacity (' +
+                    provisionLimits.batch_remaining + ' left). ' +
+                    (provisionLimits.admin_hint || '')
+                );
+                if (bulkRows) bulkRows.focus();
+                return;
+            }
+            if (provisionLimits && provisionLimits.storage && provisionLimits.storage.level === 'block') {
+                GuestOSForms.showFormAlert(
+                    alertBox,
+                    provisionLimits.storage.message || 'Storage capacity limit reached.'
+                );
+                return;
+            }
+            var endpoint = isBulk
+                ? '{{ url_for('start_sysprep_bulk_workflow') }}'
+                : '{{ url_for('start_sysprep_workflow') }}';
+            var result = await GuestOSForms.postJson(endpoint, payload);
             if (result.ok) {
-                window.location.href = '{{ url_for('workflow', task_id='') }}' + result.body.task_id;
+                if (isBulk && result.body.batch_id) {
+                    window.location.href = '{{ url_for('jobs_page') }}?batch_id=' + encodeURIComponent(result.body.batch_id);
+                } else {
+                    window.location.href = '{{ url_for('workflow', task_id='') }}' + result.body.task_id;
+                }
                 return;
             }
             GuestOSForms.mapServerErrors(form, result.body.errors);

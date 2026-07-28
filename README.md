@@ -1,6 +1,6 @@
 # Proxmox GuestOS Utility
 
-**Current release: [2.3.0](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize).
+**Current release: [2.4.0](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
 
 > **Not an official Proxmox product.** Lab-validated on Windows Server 2019 and Windows 11. Support is community / GitHub issues only — [open an issue](https://github.com/RobertLukan/proxmox-guestos-customization/issues).
 
@@ -9,40 +9,48 @@ GuestOS is **Sysprep-only** (WinRM removed in 2.0 — see [docs/MIGRATE_2.0.md](
 | Path | Status | How it works |
 |------|--------|----------------|
 | **Sysprep customize** | **Supported** (only path) | Template → clone → guest-agent writes unattend + `setup.ps1` → `sysprep /generalize` → verify |
+| **Bulk Win11 batch** | **Supported** (Win11 tagged templates) | CSV/API batch → one task per desktop → shared network/DNS defaults |
 
 ## Start here
 
 1. **Deploy GuestOS alone** (recommended first step): Docker Compose + TLS — follow [docs/INSTALL.md](docs/INSTALL.md) §1–2.
-2. Prepare a **Windows golden image** template — [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md).
+2. Prepare a **Windows golden image** template — [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md). Tag templates (`windows11` / `windowsserver2019`) so caps and UI modes classify correctly.
 3. Open the UI, change the default password, run one **Clone + Sysprep** smoke.
-4. *(Optional / advanced)* Wire **Proxmox Datacenter Manager** with the AGPL GuestOS fork — [docs/INSTALL.md](docs/INSTALL.md) §3 and [PDM integration](docs/PDM_INTEGRATION.md).
+4. *(Optional)* For VDI fleets, use **Bulk desktops** on a Win11 template — [docs/BULK_PROVISIONING.md](docs/BULK_PROVISIONING.md).
+5. *(Optional / advanced)* Wire **Proxmox Datacenter Manager** with the AGPL GuestOS fork — [docs/INSTALL.md](docs/INSTALL.md) §3 and [PDM integration](docs/PDM_INTEGRATION.md).
 
 ### Screenshots
 
-| Template select | Sysprep wizard | Task progress | PDM Customize |
-|-----------------|----------------|---------------|---------------|
-| ![Initial](screenshots/Initial.png) | ![Clone](screenshots/Clone.png) | ![Progress](screenshots/Progress.png) | ![PDM](screenshots/PDM-2.jpg) |
+| Template select | Sysprep wizard | Bulk Win11 | Jobs / batches | PDM Customize |
+|-----------------|----------------|------------|----------------|---------------|
+| ![Initial](screenshots/Initial.png) | ![Clone](screenshots/Clone.png) | ![Bulk](screenshots/Bulk.png) | ![Progress](screenshots/Progress.png) | ![PDM](screenshots/PDM-2.jpg) |
 
 ## What’s stable vs advanced
 
 | Area | Notes |
 |------|--------|
 | Clone + Sysprep (hostname, static/DHCP, optional AD join) | **Stable** — validated on Server 2019 and Win11 in lab |
-| Configure disks (OS / data / pagefile) | **Server 2019 only** (template name/tag); not exposed in the PDM Customize UI — use GuestOS UI or machine API |
+| Bulk Win11 batch (CSV / API) | **Stable for lab** — max 10/batch, 20/day; Win11 only |
+| Configure disks (OS / data / pagefile) | **Server 2019 only** (name/tag); hidden for Win11 |
+| Provisioning safeguards (cores/RAM/disk/storage) | **Stable** — no in-app override; use PVE for exceptions |
 | PDM Customize + GuestOS tab | **Optional** AGPL fork; build/install `.deb`s yourself (no public APT feed yet) |
 
 ## Features
 
 - Clone Windows templates and run **Clone + Sysprep (customize)** in one job.
-- Sysprep applies hostname + timezone, **static** or **DHCP** networking, optional AD join (credentials server-side), optional **Configure disks** for Server 2019.
-- Background tasks with Celery + Redis; web UI + machine API for PDM.
+- Sysprep applies hostname + timezone, **static** or **DHCP** networking, optional AD join (credentials server-side).
+- **Bulk Win11 provisioning:** CSV rows (`hostname,ip/prefix[,vlan]`), shared gateway/DNS, batch monitor, idempotent API.
+- **Safeguards:** batch/day/inflight limits; Win11 vs Server cores/RAM/disk caps; storage warn@65% / block@80%; live CSV duplicate hostname/IP checks; clone VMID collision retries.
+- **Family-aware UI:** bulk mode for `windows11` only; Configure disks for Server templates only.
+- Background tasks with Celery + Redis (clone + verify queues); web UI + machine API for PDM.
 
 ## Workflow overview
 
-1. Pick a **Windows Proxmox template** (`ostype` `win10` / `win11` / …).
-2. **Clone + Sysprep** → clone, wait for QEMU guest agent, write unattend + `C:\ProgramData\GuestOS\setup.ps1`, run `sysprep /generalize /oobe /shutdown`.
-3. After OOBE, **FirstLogonCommands** runs `setup.ps1` (network, cleanup, optional domain join).
-4. GuestOS verifies setup markers / hostname / expected static IP via the guest agent.
+1. Pick a **Windows Proxmox template** (`ostype` `win10` / `win11` / …) tagged for family.
+2. **Single:** Clone + Sysprep → guest agent writes unattend + `setup.ps1` → `sysprep /generalize /oobe /shutdown`.
+3. **Bulk (Win11):** submit shared settings + CSV desktops → one Celery task per row → Jobs filtered by `batch_id`.
+4. After OOBE, **FirstLogonCommands** runs `setup.ps1` (network, cleanup, optional domain join), then logs off to the login screen.
+5. GuestOS verifies setup markers / hostname / expected static IP via the guest agent.
 
 From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launch` → wizard.
 
@@ -58,11 +66,12 @@ From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launc
 
 | Doc | Topic |
 |-----|--------|
-| [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md) | Golden-image checklist |
+| [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md) | Golden-image checklist + tags |
+| [docs/BULK_PROVISIONING.md](docs/BULK_PROVISIONING.md) | Batch provisioning, quotas, caps |
 | [docs/TLS_PRODUCTION.md](docs/TLS_PRODUCTION.md) | Trusted TLS / `PROXMOX_VERIFY_SSL` |
 | [docs/PDM_INTEGRATION.md](docs/PDM_INTEGRATION.md) | Machine API + PDM + lab notes |
-| [docs/openapi.yaml](docs/openapi.yaml) | Start payload schema |
-| [docs/FAILURE_RUNBOOK.md](docs/FAILURE_RUNBOOK.md) | Failure triage |
+| [docs/openapi.yaml](docs/openapi.yaml) | Start / bulk / limits API schema |
+| [docs/FAILURE_RUNBOOK.md](docs/FAILURE_RUNBOOK.md) | Failure triage + limit saturation |
 | [docs/MIGRATE_2.0.md](docs/MIGRATE_2.0.md) | 1.x → 2.0 (WinRM removed) |
 
 ### Docker Compose (recommended)
@@ -114,12 +123,16 @@ See [`.env.example`](.env.example). Key variables:
 | `SECRET_KEY` | **Required** — sessions + CSRF |
 | `BEHIND_REVERSE_PROXY` | ProxyFix + Secure cookies (set `True` with Compose Caddy) |
 | `DOMAIN_PROFILES_JSON` | Named AD/network profiles |
+| `BULK_MAX_ITEMS` / `PROVISION_MAX_PER_DAY` | Batch size (default 10) and daily task quota (20) |
+| `BULK_MAX_CONCURRENT_GLOBAL` | Inflight clone/sysprep tasks (default 10) |
+| `WIN11_*` / `SERVER_*` | Cores / RAM / disk ceilings per template family |
+| `STORAGE_WARN_PCT` / `STORAGE_BLOCK_PCT` | Storage used% warn (65) / block (80) |
 
 ## Usage
 
 1. Open `https://<GUESTOS_TLS_HOST>/`.
 2. Log in; change the default password.
-3. Run **Clone + Sysprep** from a Windows template.
+3. Run **Clone + Sysprep** from a Windows template — or **Bulk desktops** on a Win11 template.
 
 Smoke helpers (after `.env` is set):
 
@@ -142,6 +155,7 @@ pytest
 - Run behind TLS (`BEHIND_REVERSE_PROXY=True`). Production: [docs/TLS_PRODUCTION.md](docs/TLS_PRODUCTION.md).
 - Keep `GUESTOS_LAUNCH_SECRET` / `GUESTOS_API_TOKEN` on the GuestOS host and in PDM `guestos.cfg` only (not in UI wasm).
 - Do not re-enable in-place Sysprep on arbitrary VMs.
+- There is **no** superadmin bypass for provisioning caps — size exceptions in Proxmox VE.
 
 ## License
 
