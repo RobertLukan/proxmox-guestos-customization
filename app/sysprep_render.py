@@ -14,34 +14,130 @@ from app.validators import (
     validate_domain,
     validate_hostname,
     validate_ipv4,
+    validate_ipv6,
+    validate_ipv6_prefix,
+    validate_locale,
     validate_mac,
     validate_netmask,
+    validate_timezone,
+    validate_vlan,
+    validate_workgroup,
+)
+from app.windows_identity import (
+    DEFAULT_LOCALE,
+    DEFAULT_TIMEZONE,
+    DEFAULT_WORKGROUP,
 )
 
+
+def _normalize_nics_from_request(data):
+    """Build a list of NIC dicts from ``nics`` or legacy single-NIC fields."""
+    raw_nics = data.get('nics')
+    if isinstance(raw_nics, list) and raw_nics:
+        return raw_nics
+    return [{
+        'bridge': data.get('bridge'),
+        'vlan': data.get('vlan'),
+        'network_mode': data.get('network_mode') or 'static',
+        'ip_address': data.get('ip_address'),
+        'netmask_cidr': data.get('netmask_cidr'),
+        'gateway': data.get('gateway'),
+        'dns_servers': data.get('dns_servers'),
+        'enable_ipv6': data.get('enable_ipv6'),
+        'ipv6_address': data.get('ipv6_address'),
+        'ipv6_prefix': data.get('ipv6_prefix'),
+        'ipv6_gateway': data.get('ipv6_gateway'),
+        'primary_mac_address': data.get('primary_mac_address'),
+    }]
+
+
+def _validate_one_nic(nic, index=0):
+    """Validate and normalize one NIC dict. Mutates and returns nic."""
+    use_dhcp = (str(nic.get('network_mode') or 'static').lower() == 'dhcp')
+    nic['use_dhcp'] = use_dhcp
+    nic['network_mode'] = 'dhcp' if use_dhcp else 'static'
+    nic['vlan'] = validate_vlan(nic.get('vlan'))
+    nic['bridge'] = (nic.get('bridge') or '').strip() or None
+    nic['dns_list'] = validate_dns_servers(nic.get('dns_servers'), allow_ipv6=True)
+    if not use_dhcp:
+        nic['ip_address'] = validate_ipv4(nic.get('ip_address'), field=f'NIC{index} IP address')
+        nic['netmask_cidr'] = validate_netmask(nic.get('netmask_cidr'))
+        nic['gateway'] = validate_ipv4(nic.get('gateway'), field=f'NIC{index} gateway')
+    else:
+        nic['ip_address'] = ''
+        nic['netmask_cidr'] = None
+        nic['gateway'] = ''
+
+    enable_ipv6 = _as_bool(nic.get('enable_ipv6'))
+    nic['enable_ipv6'] = enable_ipv6
+    if enable_ipv6:
+        nic['ipv6_address'] = validate_ipv6(nic.get('ipv6_address'), field=f'NIC{index} IPv6 address')
+        nic['ipv6_prefix'] = validate_ipv6_prefix(nic.get('ipv6_prefix') or 64)
+        gw6 = (nic.get('ipv6_gateway') or '').strip()
+        nic['ipv6_gateway'] = validate_ipv6(gw6, field=f'NIC{index} IPv6 gateway') if gw6 else ''
+    else:
+        nic['ipv6_address'] = ''
+        nic['ipv6_prefix'] = None
+        nic['ipv6_gateway'] = ''
+
+    if nic.get('primary_mac_address'):
+        nic['primary_mac_address'] = validate_mac(nic['primary_mac_address'])
+    return nic
+
+
 def _validate_sysprep_network(data):
-    """Validate/normalize network values before they are rendered into the
-    sysprep templates.
+    """Validate/normalize network + identity values before template render.
 
-    setup.ps1 is not HTML/XML so Flask does not autoescape it; validating the
-    values here (IPs, integer netmask, DNS list, MAC) prevents injection into
-    the generated PowerShell. Mutates ``data`` in place and raises
-    ValidationError. ``dns_list`` (a list of validated IPs) and ``use_dhcp`` are
-    stored back on ``data`` for the templates.
-
-    Two network modes are supported: ``static`` (default; requires IP, netmask
-    and gateway) and ``dhcp`` (no static addressing; DNS is optional and, when
-    supplied, is applied as an override e.g. to reach the domain controller).
+    Mutates ``data`` in place. Builds ``nics`` (validated list) and packs
+    ``nics_b64`` for setup.ps1. Legacy single-NIC fields remain populated from
+    NIC 0 for verify/back-compat.
     """
-    data['use_dhcp'] = (str(data.get('network_mode') or 'static').lower() == 'dhcp')
-    data['dns_list'] = validate_dns_servers(data.get('dns_servers'))
-    if not data['use_dhcp']:
-        data['ip_address'] = validate_ipv4(data.get('ip_address'), field='IP address')
-        data['netmask_cidr'] = validate_netmask(data.get('netmask_cidr'))
-        data['gateway'] = validate_ipv4(data.get('gateway'), field='gateway')
     if data.get('hostname'):
         data['hostname'] = validate_hostname(data['hostname'])
-    if data.get('primary_mac_address'):
-        data['primary_mac_address'] = validate_mac(data['primary_mac_address'])
+
+    data['timezone'] = validate_timezone(data.get('timezone') or DEFAULT_TIMEZONE)
+    data['locale'] = validate_locale(data.get('locale') or DEFAULT_LOCALE)
+
+    nics = [_validate_one_nic(dict(n), i) for i, n in enumerate(_normalize_nics_from_request(data))]
+    if len(nics) > 8:
+        raise ValidationError('At most 8 NICs are supported per VM.')
+    data['nics'] = nics
+
+    # Back-compat primary fields from NIC 0.
+    primary = nics[0]
+    data['use_dhcp'] = primary['use_dhcp']
+    data['network_mode'] = primary['network_mode']
+    data['dns_list'] = primary['dns_list']
+    data['ip_address'] = primary.get('ip_address') or ''
+    data['netmask_cidr'] = primary.get('netmask_cidr')
+    data['gateway'] = primary.get('gateway') or ''
+    data['enable_ipv6'] = primary['enable_ipv6']
+    data['ipv6_address'] = primary.get('ipv6_address') or ''
+    data['ipv6_prefix'] = primary.get('ipv6_prefix')
+    data['ipv6_gateway'] = primary.get('ipv6_gateway') or ''
+    if primary.get('vlan') is not None:
+        data['vlan'] = primary['vlan']
+    if primary.get('bridge'):
+        data['bridge'] = primary['bridge']
+    if primary.get('primary_mac_address'):
+        data['primary_mac_address'] = primary['primary_mac_address']
+
+    # Compact blob for setup.ps1 (validated values only).
+    blob_nics = []
+    for nic in nics:
+        blob_nics.append({
+            'mac': nic.get('primary_mac_address') or '',
+            'dhcp': bool(nic['use_dhcp']),
+            'ip': nic.get('ip_address') or '',
+            'prefix': nic.get('netmask_cidr'),
+            'gateway': nic.get('gateway') or '',
+            'dns': nic.get('dns_list') or [],
+            'ipv6': bool(nic['enable_ipv6']),
+            'ip6': nic.get('ipv6_address') or '',
+            'prefix6': nic.get('ipv6_prefix'),
+            'gw6': nic.get('ipv6_gateway') or '',
+        })
+    data['nics_b64'] = base64.b64encode(json.dumps(blob_nics).encode('utf-8')).decode('ascii')
 
 
 def _prepare_domain_join(data):
@@ -51,9 +147,12 @@ def _prepare_domain_join(data):
     JSON blob (``domain_join_b64``) so no credential bytes are interpolated into
     PowerShell syntax. The raw password is removed from ``data`` afterwards so it
     does not linger in the task payload/logs. Raises ValidationError on bad input.
+
+    When not joining a domain, validates optional ``workgroup`` (defaults to WORKGROUP).
     """
     if not _as_bool(data.get('join_domain')):
         data['join_domain'] = False
+        data['workgroup'] = validate_workgroup(data.get('workgroup') or DEFAULT_WORKGROUP)
         return
 
     domain = validate_domain(data.get('domain_name'))
@@ -70,6 +169,7 @@ def _prepare_domain_join(data):
     data['join_domain'] = True
     data['domain_name'] = domain
     data['domain_ou'] = ou
+    data['workgroup'] = ''
     data['domain_join_b64'] = base64.b64encode(
         json.dumps(blob).encode('utf-8')
     ).decode('ascii')
@@ -102,5 +202,3 @@ def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
     write_file_to_guest(vmid, unattended_xml, r'C:\Windows\System32\Sysprep\unattended.xml')
     write_file_to_guest(vmid, setup_ps1, r'C:\ProgramData\GuestOS\setup.ps1')
     write_file_to_guest(vmid, setup_complete, r'C:\Windows\Setup\Scripts\SetupComplete.cmd')
-
-

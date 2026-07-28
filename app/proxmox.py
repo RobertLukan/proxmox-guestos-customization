@@ -378,6 +378,91 @@ def _update_vm_tags(vmid, node, tags_to_add=None, tags_to_remove=None):
     except Exception as e:
         return False, f"Failed to update VM tags: {e}"
 
+
+def set_lifecycle_tag(vmid, lifecycle_tag, extra_tags=None):
+    """Set a replacing ``lifecycle-*`` stage tag on the VM (best-effort)."""
+    node = _get_vm_node(vmid)
+    if not node:
+        return False, f"VM {vmid} not found."
+    tags = [lifecycle_tag]
+    if extra_tags:
+        tags.extend(extra_tags)
+    return _update_vm_tags(vmid, node, tags_to_add=tags)
+
+
+def rename_vm(vmid, name):
+    """Rename a Proxmox QEMU guest (best-effort)."""
+    proxmox = get_proxmox_api()
+    if not proxmox:
+        return False, "Failed to connect to Proxmox."
+    node = _get_vm_node(vmid)
+    if not node:
+        return False, f"VM {vmid} not found."
+    try:
+        safe = re.sub(r'[^A-Za-z0-9._-]', '-', str(name or '').strip())[:63].strip('-._')
+        if not safe:
+            safe = f'failed-{vmid}'
+        proxmox.nodes(node).qemu(vmid).config.set(name=safe)
+        return True, safe
+    except Exception as e:
+        return False, f"Failed to rename VM {vmid}: {e}"
+
+
+def mark_vm_customization_failed(vmid, hostname=None):
+    """Rename clone and tag it for failed customization analysis (no delete)."""
+    base = (hostname or f'vm{vmid}').strip() or f'vm{vmid}'
+    # Keep under Proxmox name length; prefer failed-<host>.
+    failed_name = f'failed-{base}'[:63]
+    rename_ok, rename_detail = rename_vm(vmid, failed_name)
+    tag_ok, tag_detail = set_lifecycle_tag(
+        vmid, 'lifecycle-failed', extra_tags=['failed-customization']
+    )
+    parts = []
+    if rename_ok:
+        parts.append(f'renamed to {rename_detail}')
+    else:
+        parts.append(f'rename skipped: {rename_detail}')
+    if tag_ok:
+        parts.append('tagged failed-customization')
+    else:
+        parts.append(f'tag skipped: {tag_detail}')
+    return rename_ok and tag_ok, '; '.join(parts)
+
+
+def get_vm_nic_macs(vmid):
+    """Return MAC addresses for net0, net1, … in index order."""
+    proxmox = get_proxmox_api()
+    if not proxmox:
+        return []
+    node = _get_vm_node(vmid)
+    if not node:
+        return []
+    cfg = proxmox.nodes(node).qemu(vmid).config.get() or {}
+    macs = []
+    for i in range(0, 16):
+        net = cfg.get(f'net{i}')
+        if not net:
+            continue
+        match = re.search(r'([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})', str(net))
+        if match:
+            macs.append(match.group(1))
+        else:
+            macs.append(None)
+    return macs
+
+
+def _build_net_config(bridge, vlan, existing_net=''):
+    """Build a virtio netN config string, preserving MAC when present."""
+    mac_match = re.search(r'([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})', existing_net or '')
+    if mac_match:
+        net_config = f'virtio={mac_match.group(1)},bridge={bridge}'
+    else:
+        net_config = f'virtio,bridge={bridge}'
+    if vlan:
+        net_config += f',tag={vlan}'
+    return net_config
+
+
 def _is_vmid_collision_error(exc):
     """True when Proxmox rejected create/clone because the VMID is already taken."""
     msg = str(exc or '').lower()
@@ -402,11 +487,14 @@ def _allocate_next_vmid(proxmox):
         raise
 
 
-def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan, max_attempts=5):
+def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan, max_attempts=5, nics=None):
     """Clones a Windows template VM and returns the new VMID.
 
     Retries VMID allocation when concurrent clones race on ``/cluster/nextid``
     (classic ``config file already exists`` under bulk provisioning).
+
+    ``nics`` is an optional list of ``{bridge, vlan}`` for multi-NIC (single
+    customize). When omitted, a single ``net0`` is configured from bridge/vlan.
     """
     proxmox = get_proxmox_api()
     if not proxmox:
@@ -467,16 +555,27 @@ def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan, max_attempts=5):
     vm_uuid = str(uuid.uuid4())
     _update_vm_tags(new_vmid, node, tags_to_add=[f'uuid:{vm_uuid}', 'lifecycle-cloning'])
 
-    # Preserve the cloned NIC MAC; only retarget bridge/VLAN (and ensure virtio).
-    existing_net0 = proxmox.nodes(node).qemu(new_vmid).config.get().get('net0', '') or ''
-    mac_match = re.search(r'([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})', existing_net0)
-    if mac_match:
-        net0_config = f'virtio={mac_match.group(1)},bridge={bridge}'
-    else:
-        net0_config = f'virtio,bridge={bridge}'
-    if vlan:
-        net0_config += f',tag={vlan}'
-    proxmox.nodes(node).qemu(new_vmid).config.post(cores=cores, memory=ram, net0=net0_config, agent=1)
+    cfg = proxmox.nodes(node).qemu(new_vmid).config.get() or {}
+    nic_list = list(nics) if nics else [{'bridge': bridge, 'vlan': vlan}]
+    if not nic_list:
+        nic_list = [{'bridge': bridge, 'vlan': vlan}]
+
+    # Drop template NICs beyond the requested count (best-effort).
+    for i in range(len(nic_list), 16):
+        if cfg.get(f'net{i}'):
+            try:
+                proxmox.nodes(node).qemu(new_vmid).config.set(delete=f'net{i}')
+            except Exception as e:
+                logging.warning("Could not delete net%s on VM %s: %s", i, new_vmid, e)
+
+    post_kwargs = {'cores': cores, 'memory': ram, 'agent': 1}
+    for i, nic in enumerate(nic_list):
+        nic_bridge = (nic.get('bridge') or bridge or 'vmbr0').strip()
+        nic_vlan = nic.get('vlan')
+        existing = cfg.get(f'net{i}', '') or ''
+        post_kwargs[f'net{i}'] = _build_net_config(nic_bridge, nic_vlan, existing)
+
+    proxmox.nodes(node).qemu(new_vmid).config.post(**post_kwargs)
 
     return {'vmid': new_vmid, 'uuid': vm_uuid}
 

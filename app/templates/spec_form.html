@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}{% if spec %}Edit Spec{% else %}New Spec{% endif %}{% endblock %}
+{% block content %}
+<h1>{% if spec %}Edit specification{% else %}New specification{% endif %}</h1>
+<p class="page-lead">Non-secret defaults only. Admin password is entered when the operator deploys.</p>
+<form method="post" novalidate>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  {% set p = spec.payload() if spec else {} %}
+  <div class="mb-3">
+    <label class="form-label" for="name">Name</label>
+    <input class="form-control" id="name" name="name" required maxlength="128"
+           value="{{ spec.name if spec else '' }}">
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="description">Description</label>
+    <input class="form-control" id="description" name="description" maxlength="512"
+           value="{{ spec.description if spec else '' }}">
+  </div>
+  <div class="row">
+    <div class="col-md-6 mb-3">
+      <label class="form-label" for="timezone">Time zone</label>
+      <select class="form-select" id="timezone" name="timezone">
+        {% for tz in timezones %}
+        <option value="{{ tz }}" {% if (p.get('timezone') or default_timezone) == tz %}selected{% endif %}>{{ tz }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-6 mb-3">
+      <label class="form-label" for="locale">Locale</label>
+      <select class="form-select" id="locale" name="locale">
+        {% for loc in locales %}
+        <option value="{{ loc }}" {% if (p.get('locale') or default_locale) == loc %}selected{% endif %}>{{ loc }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col-md-4 mb-3">
+      <label class="form-label" for="cores">CPU cores (optional)</label>
+      <input class="form-control" type="number" id="cores" name="cores" min="1"
+             value="{{ p.get('cores') or '' }}">
+    </div>
+    <div class="col-md-4 mb-3">
+      <label class="form-label" for="ram">RAM MB (optional)</label>
+      <input class="form-control" type="number" id="ram" name="ram" min="512"
+             value="{{ p.get('ram') or '' }}">
+    </div>
+    <div class="col-md-4 mb-3">
+      <label class="form-label" for="workgroup">Workgroup</label>
+      <input class="form-control" id="workgroup" name="workgroup" maxlength="15"
+             value="{{ p.get('workgroup') or default_workgroup }}">
+      <div class="form-text">Used when not joining a domain.</div>
+    </div>
+  </div>
+  <h2 class="h5 mt-3">Network defaults</h2>
+  <div class="row">
+    <div class="col-md-4 mb-3">
+      <label class="form-label" for="bridge">Bridge</label>
+      <input class="form-control" id="bridge" name="bridge" value="{{ p.get('bridge') or '' }}">
+    </div>
+    <div class="col-md-4 mb-3">
+      <label class="form-label" for="vlan">VLAN</label>
+      <input class="form-control" type="number" id="vlan" name="vlan" min="1" max="4094"
+             value="{{ p.get('vlan') or '' }}">
+    </div>
+    <div class="col-md-4 mb-3">
+      <label class="form-label" for="network_mode">Network mode</label>
+      <select class="form-select" id="network_mode" name="network_mode">
+        <option value="static" {% if (p.get('network_mode') or 'static') == 'static' %}selected{% endif %}>Static</option>
+        <option value="dhcp" {% if p.get('network_mode') == 'dhcp' %}selected{% endif %}>DHCP</option>
+      </select>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col-md-4 mb-3">
+      <label class="form-label" for="ip_address">IPv4 address</label>
+      <input class="form-control" id="ip_address" name="ip_address" value="{{ p.get('ip_address') or '' }}">
+    </div>
+    <div class="col-md-4 mb-3">
+      <label class="form-label" for="netmask_cidr">Prefix</label>
+      <input class="form-control" id="netmask_cidr" name="netmask_cidr" value="{{ p.get('netmask_cidr') or '24' }}">
+    </div>
+    <div class="col-md-4 mb-3">
+      <label class="form-label" for="gateway">Gateway</label>
+      <input class="form-control" id="gateway" name="gateway" value="{{ p.get('gateway') or '' }}">
+    </div>
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="dns_servers">DNS servers</label>
+    <input class="form-control" id="dns_servers" name="dns_servers" value="{{ p.get('dns_servers') or '' }}">
+  </div>
+  <div class="form-check mb-2">
+    <input class="form-check-input" type="checkbox" id="enable_ipv6" name="enable_ipv6"
+           {% if p.get('enable_ipv6') %}checked{% endif %}>
+    <label class="form-check-label" for="enable_ipv6">Enable IPv6</label>
+  </div>
+  <div class="row" id="ipv6-fields">
+    <div class="col-md-4 mb-3">
+      <label class="form-label" for="ipv6_address">IPv6 address</label>
+      <input class="form-control" id="ipv6_address" name="ipv6_address" value="{{ p.get('ipv6_address') or '' }}">
+    </div>
+    <div class="col-md-4 mb-3">
+      <label class="form-label" for="ipv6_prefix">IPv6 prefix</label>
+      <input class="form-control" type="number" id="ipv6_prefix" name="ipv6_prefix" min="1" max="128"
+             value="{{ p.get('ipv6_prefix') or '64' }}">
+    </div>
+    <div class="col-md-4 mb-3">
+      <label class="form-label" for="ipv6_gateway">IPv6 gateway</label>
+      <input class="form-control" id="ipv6_gateway" name="ipv6_gateway" value="{{ p.get('ipv6_gateway') or '' }}">
+    </div>
+  </div>
+  <h2 class="h5 mt-3">Domain</h2>
+  <div class="form-check mb-2">
+    <input class="form-check-input" type="checkbox" id="join_domain" name="join_domain"
+           {% if p.get('join_domain') %}checked{% endif %}>
+    <label class="form-check-label" for="join_domain">Join domain (credentials from domain profile at deploy)</label>
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="domain_profile">Domain profile</label>
+    <select class="form-select" id="domain_profile" name="domain_profile">
+      <option value="">—</option>
+      {% for name in domain_profiles.keys() %}
+      <option value="{{ name }}" {% if p.get('domain_profile') == name %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="domain_ou">Domain OU</label>
+    <input class="form-control" id="domain_ou" name="domain_ou" value="{{ p.get('domain_ou') or '' }}">
+  </div>
+  <div class="d-flex gap-2">
+    <button type="submit" class="btn btn-primary">Save</button>
+    <a class="btn btn-outline-secondary" href="{{ url_for('specs_page') }}">Cancel</a>
+  </div>
+</form>
+<script>
+(function () {
+  var cb = document.getElementById('enable_ipv6');
+  var box = document.getElementById('ipv6-fields');
+  function sync() { if (box) box.hidden = !(cb && cb.checked); }
+  if (cb) { cb.addEventListener('change', sync); sync(); }
+})();
+</script>
+{% endblock %}

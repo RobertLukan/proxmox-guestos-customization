@@ -308,126 +308,150 @@ if ($pagefileLetter) {
 Write-Output "setup.ps1: Disk reconcile complete."
 {% endif %}
 
-$mac = '{{ primary_mac_address | default("", true) }}'.Replace(':', '-').ToUpper()
-
-# Select the target adapter by MAC; fall back to the first physical adapter so a
-# single-NIC VM still configures correctly even if the MAC could not be resolved.
-$adapter = $null
-if ($mac) {
-    $adapter = Get-NetAdapter -Physical | Where-Object { $_.MacAddress.ToUpper() -eq $mac } | Select-Object -First 1
+# --- Network (one or more NICs from validated Base64 JSON) -----------------
+# Each entry: mac, dhcp, ip, prefix, gateway, dns[], ipv6, ip6, prefix6, gw6
+$nicsBlob = '{{ nics_b64 }}'
+$nics = @(ConvertFrom-Json ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($nicsBlob))))
+if (-not $nics -or $nics.Count -lt 1) {
+    throw "No NIC configuration was provided to setup.ps1."
 }
-if (-not $adapter) {
-    Write-Output "setup.ps1: MAC '$mac' not matched; falling back to first physical adapter."
-    $adapter = Get-NetAdapter -Physical | Sort-Object ifIndex | Select-Object -First 1
-}
-if (-not $adapter) { throw "No physical network adapter found." }
 
-$ifIndex = $adapter.ifIndex
-Write-Output "setup.ps1: Using adapter '$($adapter.Name)' (ifIndex $ifIndex, MAC $($adapter.MacAddress))."
-
-{% if use_dhcp %}
-# DHCP mode: remove only *manual* addresses/routes so a template static IP does
-# not stick. Do not strip an existing DHCP lease before renew -- that left
-# guests on APIPA when ipconfig /renew hung or timed out.
-Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-    Where-Object { $_.IPAddress -notlike '127.*' -and $_.PrefixOrigin -eq 'Manual' } |
-    ForEach-Object {
-        Remove-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+function Get-GuestOsAdapterByMac {
+    param([string]$MacColon)
+    $norm = ($MacColon -replace ':', '-').ToUpper()
+    $adapter = $null
+    if ($norm) {
+        $adapter = Get-NetAdapter -Physical | Where-Object { $_.MacAddress.ToUpper() -eq $norm } | Select-Object -First 1
     }
-Get-NetRoute -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-    Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -ne '0.0.0.0' } |
-    ForEach-Object {
-        # Keep DHCP-learned defaults; drop leftover manual defaults from the template.
-        if ($_.Protocol -eq 'NetMgmt' -or $_.Protocol -eq 'Local') {
-            Remove-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix $_.DestinationPrefix -Confirm:$false -ErrorAction SilentlyContinue
+    if (-not $adapter) {
+        $adapter = Get-NetAdapter -Physical | Sort-Object ifIndex | Select-Object -First 1
+    }
+    return $adapter
+}
+
+function Set-GuestOsNicConfig {
+    param($Nic, $Adapter)
+    if (-not $Adapter) { throw "No physical network adapter found for NIC config." }
+    $ifIndex = $Adapter.ifIndex
+    Write-Output "setup.ps1: Using adapter '$($Adapter.Name)' (ifIndex $ifIndex, MAC $($Adapter.MacAddress))."
+
+    if ($Nic.dhcp) {
+        Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -notlike '127.*' -and $_.PrefixOrigin -eq 'Manual' } |
+            ForEach-Object {
+                Remove-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        Get-NetRoute -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -ne '0.0.0.0' } |
+            ForEach-Object {
+                if ($_.Protocol -eq 'NetMgmt' -or $_.Protocol -eq 'Local') {
+                    Remove-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix $_.DestinationPrefix -Confirm:$false -ErrorAction SilentlyContinue
+                }
+            }
+        Write-Output "setup.ps1: Enabling DHCP on ifIndex $ifIndex."
+        Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Enabled
+        $dns = @($Nic.dns)
+        if ($dns.Count -gt 0) {
+            Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $dns
+        } else {
+            Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses
+        }
+        Write-Output "setup.ps1: Renewing DHCP lease on '$($Adapter.Name)' (60s timeout)."
+        $renewLog = 'C:\ProgramData\GuestOS\dhcprenew.txt'
+        $renewArgs = "/c ipconfig /renew `"$($Adapter.Name)`" >`"$renewLog`" 2>&1"
+        $renewProc = Start-Process -FilePath 'cmd.exe' -ArgumentList $renewArgs -PassThru -WindowStyle Hidden
+        if (-not $renewProc.WaitForExit(60000)) {
+            Write-Output "setup.ps1: WARNING: ipconfig /renew timed out after 60s; killing."
+            try { Stop-Process -Id $renewProc.Id -Force -ErrorAction SilentlyContinue } catch {}
+        }
+        if (Test-Path -LiteralPath $renewLog) {
+            Get-Content -LiteralPath $renewLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Output $_ }
+        }
+    } else {
+        Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -notlike '127.*' } |
+            ForEach-Object {
+                Remove-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        Get-NetRoute -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' -or $_.NextHop -ne '0.0.0.0' } |
+            ForEach-Object {
+                Remove-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix $_.DestinationPrefix -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        $ip = [string]$Nic.ip
+        $prefix = [int]$Nic.prefix
+        $gateway = [string]$Nic.gateway
+        $dns = @($Nic.dns)
+        Write-Output "setup.ps1: Static IP=$ip/$prefix GW=$gateway DNS=$($dns -join ',')"
+        Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Disabled -ErrorAction SilentlyContinue
+        $configured = $false
+        for ($i = 0; $i -lt 5 -and -not $configured; $i++) {
+            try {
+                $existing = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.IPAddress -eq $ip }
+                if (-not $existing) {
+                    New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $ip -PrefixLength $prefix -ErrorAction Stop | Out-Null
+                }
+                $route = Get-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.NextHop -eq $gateway } | Select-Object -First 1
+                if (-not $route) {
+                    New-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -NextHop $gateway -ErrorAction Stop | Out-Null
+                }
+                $configured = $true
+                Write-Output "setup.ps1: Static addressing applied."
+            } catch {
+                Write-Output "setup.ps1: Static IP attempt $($i + 1) failed: $($_.Exception.Message)"
+                Start-Sleep -Seconds 5
+            }
+        }
+        if (-not $configured) {
+            throw "Failed to apply static IP $ip/$prefix via gateway $gateway."
+        }
+        if ($dns.Count -gt 0) {
+            Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $dns
+        } else {
+            Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses
         }
     }
 
-Write-Output "setup.ps1: Enabling DHCP on ifIndex $ifIndex."
-Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Enabled
-{% if dns_list %}
-# Explicit DNS override (e.g. to reach the domain controller) even under DHCP.
-Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @({% for d in dns_list %}'{{ d }}'{% if not loop.last %}, {% endif %}{% endfor %})
-{% else %}
-Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses
-{% endif %}
-# Renew with a hard timeout -- unbounded ipconfig /renew can stall SetupComplete
-# until the process is killed (leaving no setup.done and a stale lock).
-Write-Output "setup.ps1: Renewing DHCP lease on '$($adapter.Name)' (60s timeout)."
-$renewLog = 'C:\ProgramData\GuestOS\dhcprenew.txt'
-$renewArgs = "/c ipconfig /renew `"$($adapter.Name)`" >`"$renewLog`" 2>&1"
-$renewProc = Start-Process -FilePath 'cmd.exe' -ArgumentList $renewArgs -PassThru -WindowStyle Hidden
-if (-not $renewProc.WaitForExit(60000)) {
-    Write-Output "setup.ps1: WARNING: ipconfig /renew timed out after 60s; killing."
-    try { Stop-Process -Id $renewProc.Id -Force -ErrorAction SilentlyContinue } catch {}
-}
-if (Test-Path -LiteralPath $renewLog) {
-    Get-Content -LiteralPath $renewLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Output $_ }
-}
-$lease = $null
-for ($i = 0; $i -lt 12; $i++) {
-    $lease = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notlike '127.*' } |
-        Select-Object -First 1
-    if ($lease) {
-        Write-Output "setup.ps1: DHCP lease: $($lease.IPAddress)"
-        break
-    }
-    Start-Sleep -Seconds 5
-}
-if (-not $lease) {
-    Write-Output "setup.ps1: WARNING: no DHCP lease yet; Windows may still be acquiring one."
-}
-{% else %}
-# Static mode: clear existing IPv4 / default route so re-runs are idempotent.
-Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-    Where-Object { $_.IPAddress -notlike '127.*' } |
-    ForEach-Object {
-        Remove-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
-    }
-Get-NetRoute -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-    Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' -or $_.NextHop -ne '0.0.0.0' } |
-    ForEach-Object {
-        Remove-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix $_.DestinationPrefix -Confirm:$false -ErrorAction SilentlyContinue
-    }
-$ip      = '{{ ip_address }}'
-$prefix  = {{ netmask_cidr }}
-$gateway = '{{ gateway }}'
-$dns     = @({% for d in dns_list %}'{{ d }}'{% if not loop.last %}, {% endif %}{% endfor %})
-Write-Output "setup.ps1: Static IP=$ip/$prefix GW=$gateway DNS=$($dns -join ',')"
-Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Disabled -ErrorAction SilentlyContinue
-# Server 2016/2019: combining -DefaultGateway with New-NetIPAddress often fails when a
-# residual default route exists. Set address and route as separate steps with retries.
-$configured = $false
-for ($i = 0; $i -lt 5 -and -not $configured; $i++) {
-    try {
-        $existing = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-            Where-Object { $_.IPAddress -eq $ip }
-        if (-not $existing) {
-            New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $ip -PrefixLength $prefix -ErrorAction Stop | Out-Null
+    if ($Nic.ipv6) {
+        $ip6 = [string]$Nic.ip6
+        $prefix6 = [int]$Nic.prefix6
+        $gw6 = [string]$Nic.gw6
+        Write-Output "setup.ps1: Configuring IPv6 $ip6/$prefix6 GW=$gw6"
+        Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+            Where-Object { $_.PrefixOrigin -eq 'Manual' } |
+            ForEach-Object {
+                Remove-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        $existing6 = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -eq $ip6 }
+        if (-not $existing6) {
+            New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $ip6 -PrefixLength $prefix6 -AddressFamily IPv6 -ErrorAction Stop | Out-Null
         }
-        $route = Get-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-            Where-Object { $_.NextHop -eq $gateway } | Select-Object -First 1
-        if (-not $route) {
-            New-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -NextHop $gateway -ErrorAction Stop | Out-Null
+        if ($gw6) {
+            $route6 = Get-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '::/0' -ErrorAction SilentlyContinue |
+                Where-Object { $_.NextHop -eq $gw6 } | Select-Object -First 1
+            if (-not $route6) {
+                New-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '::/0' -NextHop $gw6 -AddressFamily IPv6 -ErrorAction SilentlyContinue | Out-Null
+            }
         }
-        $configured = $true
-        Write-Output "setup.ps1: Static addressing applied."
-    } catch {
-        Write-Output "setup.ps1: Static IP attempt $($i + 1) failed: $($_.Exception.Message)"
-        Start-Sleep -Seconds 5
     }
 }
-if (-not $configured) {
-    throw "Failed to apply static IP $ip/$prefix via gateway $gateway."
-}
-if ($dns.Count -gt 0) {
-    Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $dns
-} else {
-    Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses
-}
-{% endif %}
 
+$nicIndex = 0
+foreach ($nic in $nics) {
+    $nicIndex++
+    Write-Output "setup.ps1: Configuring NIC $nicIndex of $($nics.Count)."
+    $adapter = Get-GuestOsAdapterByMac -MacColon ([string]$nic.mac)
+    if (-not $adapter -and $nicIndex -gt 1) {
+        # For extra NICs without MAC match, pick unused physical adapters by ifIndex order.
+        $used = @()
+        # best-effort: take Nth physical adapter
+        $adapter = Get-NetAdapter -Physical | Sort-Object ifIndex | Select-Object -Skip ($nicIndex - 1) -First 1
+    }
+    Set-GuestOsNicConfig -Nic $nic -Adapter $adapter
+}
 Write-Output "setup.ps1: Network configuration complete."
 
 # --- Local accounts --------------------------------------------------------
@@ -519,6 +543,22 @@ if ($joined) {
     Invoke-GuestOsLogoff
 }
 {% else %}
+# Workgroup (non-domain) path.
+$workgroup = '{{ workgroup | default("WORKGROUP", true) }}'
+if ($workgroup) {
+    try {
+        $current = (Get-CimInstance Win32_ComputerSystem).Workgroup
+        if ($current -ne $workgroup) {
+            Write-Output "setup.ps1: Setting workgroup to $workgroup (was $current)."
+            Add-Computer -WorkGroupName $workgroup -Force -ErrorAction Stop
+        } else {
+            Write-Output "setup.ps1: Already in workgroup $workgroup."
+        }
+    } catch {
+        Write-Output "setup.ps1: Workgroup set warning: $($_.Exception.Message)"
+    }
+}
+
 # Mark complete before reboot so FirstLogonCommands re-entry is a no-op.
 Write-GuestOsSetupMarker -Status done -Detail 'ok'
 

@@ -33,6 +33,16 @@
 
     <div class="wizard-panel" data-step="0">
         <h2 class="step-title">Basic configuration</h2>
+        <div class="mb-3" id="spec_apply_group">
+            <label for="apply_spec" class="form-label">Apply specification (optional)</label>
+            <select id="apply_spec" class="form-select">
+                <option value="">— none —</option>
+                {% for s in specs %}
+                <option value="{{ s.id }}" data-payload='{{ s.payload() | tojson }}'>{{ s.name }}</option>
+                {% endfor %}
+            </select>
+            <div class="form-text">Fills non-secret defaults. Administrator password is always entered below.</div>
+        </div>
         <div class="mb-3" id="single-hostname-group">
             <label for="hostname" class="form-label">New Hostname</label>
             <input type="text" name="hostname" id="hostname" class="form-control" maxlength="15" data-required="true" data-validate="hostname">
@@ -99,7 +109,21 @@
         </div>
         <div class="mb-3">
             <label for="timezone" class="form-label">Time Zone</label>
-            <input type="text" name="timezone" id="timezone" class="form-control" value="Central European Standard Time" data-required="true">
+            <select name="timezone" id="timezone" class="form-select" data-required="true">
+                {% for tz in timezones %}
+                <option value="{{ tz }}" {% if tz == default_timezone %}selected{% endif %}>{{ tz }}</option>
+                {% endfor %}
+            </select>
+            <div class="invalid-feedback"></div>
+        </div>
+        <div class="mb-3">
+            <label for="locale" class="form-label">Locale / language</label>
+            <select name="locale" id="locale" class="form-select" data-required="true">
+                {% for loc in locales %}
+                <option value="{{ loc }}" {% if loc == default_locale %}selected{% endif %}>{{ loc }}</option>
+                {% endfor %}
+            </select>
+            <div class="form-text">Applied to InputLocale, SystemLocale, UILanguage, and UserLocale.</div>
             <div class="invalid-feedback"></div>
         </div>
     </div>
@@ -167,6 +191,34 @@
                    placeholder="Optional under DHCP; recommended when joining a domain">
             <div class="invalid-feedback"></div>
         </div>
+        <div class="form-check mb-3" id="enable_ipv6_group">
+            <input type="checkbox" class="form-check-input" id="enable_ipv6" name="enable_ipv6" value="true">
+            <label class="form-check-label" for="enable_ipv6">Enable IPv6</label>
+            <div class="form-text">Optional. When unchecked, only IPv4 is configured.</div>
+        </div>
+        <div id="ipv6_fields" hidden>
+            <div class="mb-3">
+                <label for="ipv6_address" class="form-label">IPv6 Address</label>
+                <input type="text" name="ipv6_address" id="ipv6_address" class="form-control" placeholder="2001:db8::10">
+                <div class="invalid-feedback"></div>
+            </div>
+            <div class="mb-3">
+                <label for="ipv6_prefix" class="form-label">IPv6 Prefix Length</label>
+                <input type="number" name="ipv6_prefix" id="ipv6_prefix" class="form-control" value="64" min="1" max="128">
+                <div class="invalid-feedback"></div>
+            </div>
+            <div class="mb-3">
+                <label for="ipv6_gateway" class="form-label">IPv6 Gateway (optional)</label>
+                <input type="text" name="ipv6_gateway" id="ipv6_gateway" class="form-control" placeholder="2001:db8::1">
+                <div class="invalid-feedback"></div>
+            </div>
+        </div>
+        <div id="extra_nics_section" class="mt-4">
+            <h3 class="h6">Additional NICs (single deploy only)</h3>
+            <p class="form-text">Windows 11 bulk stays single-NIC. Extra NICs are for Server / single customize.</p>
+            <div id="extra_nics_list"></div>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="add_nic_btn">Add NIC</button>
+        </div>
     </div>
 
     <div class="wizard-panel" data-step="2" hidden>
@@ -174,6 +226,13 @@
         <div class="form-check mb-3">
             <input type="checkbox" class="form-check-input" id="join_domain_checkbox">
             <label class="form-check-label" for="join_domain_checkbox">Join Domain</label>
+        </div>
+        <div id="workgroup_group" class="mb-3">
+            <label for="workgroup" class="form-label">Workgroup</label>
+            <input type="text" name="workgroup" id="workgroup" class="form-control" maxlength="15"
+                   value="{{ default_workgroup }}" data-validate="hostname">
+            <div class="form-text">Used when not joining a domain (NetBIOS-safe, 1–15 chars).</div>
+            <div class="invalid-feedback"></div>
         </div>
         <div id="domain_fields" hidden>
             <div class="form-check mb-3">
@@ -316,6 +375,7 @@
     var diskWarn = document.getElementById('disk_ceiling_warn');
     var provisionLimits = null;
     var wizardApi = null;
+    var extraNicsApi = null;
     var disksWizardPanel = document.getElementById('disks-wizard-panel');
     var disksWizardStep = document.getElementById('wizard-step-disks');
     var disksControls = document.getElementById('disks_controls');
@@ -639,12 +699,27 @@
             bulkFields.hidden = !isBulk;
             bulkFields.style.display = isBulk ? '' : 'none';
         }
+        if (extraNicsApi) extraNicsApi.setVisible(!isBulk);
+        var ipv6Group = document.getElementById('enable_ipv6_group');
+        var ipv6Fields = document.getElementById('ipv6_fields');
+        if (ipv6Group) {
+            ipv6Group.hidden = isBulk;
+            ipv6Group.style.display = isBulk ? 'none' : '';
+        }
+        if (isBulk) {
+            var ipv6Cb = document.getElementById('enable_ipv6');
+            if (ipv6Cb) ipv6Cb.checked = false;
+            if (ipv6Fields) ipv6Fields.hidden = true;
+        }
         updateBulkCsvValidation();
     }
 
     GuestOSForms.wireNetworkMode(form);
     GuestOSForms.wireDomainJoin(form);
     GuestOSForms.wireManageDisks(form);
+    GuestOSForms.wireIpv6(form);
+    GuestOSForms.wireApplySpec(form);
+    extraNicsApi = GuestOSForms.wireExtraNics(form);
     profileSelect.addEventListener('change', function () {
         GuestOSForms.applyDomainProfile(profileSelect, domainProfiles, dnsEl, vlanEl);
     });

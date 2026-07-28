@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Customization Specs{% endblock %}
+{% block content %}
+<h1>Customization Specs</h1>
+<p class="page-lead">
+  Named presets for Clone + Sysprep (timezone, locale, network defaults, domain profile).
+  Administrator password is <strong>never</strong> stored here — enter it at deploy time.
+</p>
+<p class="mb-3">
+  <a class="btn btn-primary" href="{{ url_for('specs_new') }}">New specification</a>
+</p>
+{% if specs %}
+<div class="table-responsive">
+<table class="table table-sm align-middle">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Description</th>
+      <th>Updated</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in specs %}
+    <tr>
+      <td><strong>{{ s.name }}</strong></td>
+      <td class="small text-muted">{{ s.description or '—' }}</td>
+      <td class="small text-nowrap">{{ s.updated_at or s.timestamp }}</td>
+      <td class="text-nowrap text-end">
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('specs_edit', spec_id=s.id) }}">Edit</a>
+        <form method="post" action="{{ url_for('specs_delete', spec_id=s.id) }}" class="d-inline"
+              onsubmit="return confirm('Delete spec {{ s.name }}?');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p class="text-muted">No specifications yet. Create one to pre-fill the Sysprep wizard.</p>
+{% endif %}
+{% endblock %}

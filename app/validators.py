@@ -78,11 +78,11 @@ def validate_mac(value):
     return v
 
 
-def validate_dns_servers(value):
-    """Parse a comma-separated string into a list of validated IPv4 strings.
+def validate_dns_servers(value, allow_ipv6=False):
+    """Parse a comma-separated string into a list of validated IP strings.
 
     Empty/None input yields an empty list. Each non-empty entry must be a valid
-    IPv4 address.
+    IPv4 address (and IPv6 when ``allow_ipv6`` is true).
     """
     if not value:
         return []
@@ -91,5 +91,55 @@ def validate_dns_servers(value):
         part = part.strip()
         if not part:
             continue
-        servers.append(validate_ipv4(part, field="DNS server"))
+        if allow_ipv6 and ':' in part:
+            servers.append(validate_ipv6(part, field="DNS server"))
+        else:
+            servers.append(validate_ipv4(part, field="DNS server"))
     return servers
+
+
+def validate_ipv6(value, field="IPv6 address"):
+    """Return the canonical string form of an IPv6 address or raise."""
+    try:
+        return str(ipaddress.IPv6Address(str(value).strip()))
+    except (ValueError, ipaddress.AddressValueError):
+        raise ValidationError(f"Invalid {field}: {value!r}")
+
+
+def validate_ipv6_prefix(value):
+    """Return an int IPv6 prefix length in the range 1-128 or raise."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ValidationError(f"Invalid IPv6 prefix (expected integer 1-128): {value!r}")
+    if not 1 <= n <= 128:
+        raise ValidationError(f"IPv6 prefix out of range 1-128: {n}")
+    return n
+
+
+def validate_timezone(value):
+    """Return a validated Windows timezone ID from the curated catalog."""
+    from app.windows_identity import WINDOWS_TIMEZONES
+    v = str(value or '').strip()
+    if v not in WINDOWS_TIMEZONES:
+        raise ValidationError(f"Unsupported timezone (pick a Windows Time Zone ID): {value!r}")
+    return v
+
+
+def validate_locale(value):
+    """Return a validated Windows culture/locale ID from the curated catalog."""
+    from app.windows_identity import WINDOWS_LOCALES
+    v = str(value or '').strip()
+    if v not in WINDOWS_LOCALES:
+        raise ValidationError(f"Unsupported locale: {value!r}")
+    return v
+
+
+def validate_workgroup(value):
+    """Return a NetBIOS-safe workgroup name (1-15 chars) or raise."""
+    label = str(value or '').strip()
+    if not HOSTNAME_RE.match(label):
+        raise ValidationError(
+            f"Invalid workgroup (1-15 chars, letters/digits/hyphen only): {value!r}"
+        )
+    return label

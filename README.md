@@ -1,6 +1,6 @@
 # Proxmox GuestOS Utility
 
-**Current release: [2.4.0](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
+**Current release: [2.5.0](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
 
 > **Not an official Proxmox product.** Lab-validated on Windows Server 2019 and Windows 11. Support is community / GitHub issues only — [open an issue](https://github.com/RobertLukan/proxmox-guestos-customization/issues).
 
@@ -38,9 +38,11 @@ GuestOS is **Sysprep-only** (WinRM removed in 2.0 — see [docs/MIGRATE_2.0.md](
 ## Features
 
 - Clone Windows templates and run **Clone + Sysprep (customize)** in one job.
-- Sysprep applies hostname + timezone, **static** or **DHCP** networking, optional AD join (credentials server-side).
-- **Bulk Win11 provisioning:** CSV rows (`hostname,ip/prefix[,vlan]`), shared gateway/DNS, batch monitor, idempotent API.
+- Sysprep applies hostname, **timezone**, **locale**, **static** or **DHCP** networking (optional **IPv6**), **workgroup** or AD join, optional multi-NIC on single deploys.
+- **Customization Specs** tab: named reusable presets (no admin password stored); apply in the wizard / via `spec_id`.
+- **Bulk Win11 provisioning:** CSV rows (`hostname,ip/prefix[,vlan]`), shared gateway/DNS, batch monitor, idempotent API (single NIC).
 - **Safeguards:** batch/day/inflight limits; Win11 vs Server cores/RAM/disk caps; storage warn@65% / block@80%; live CSV duplicate hostname/IP checks; clone VMID collision retries.
+- **PVE visibility:** `lifecycle-*` stage tags during deploy; failed clones renamed `failed-<host>` and tagged `failed-customization` (no auto-delete).
 - **Family-aware UI:** bulk mode for `windows11` only; Configure disks for Server templates only.
 - Background tasks with Celery + Redis (clone + verify queues); web UI + machine API for PDM.
 

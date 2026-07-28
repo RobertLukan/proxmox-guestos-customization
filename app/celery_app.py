@@ -7,10 +7,13 @@ from app.proxmox import (
     wait_for_guest_agent,
     run_shutdown_command_in_guest,
     get_primary_mac_address,
+    get_vm_nic_macs,
     use_pve_override,
     require_windows_guest,
     is_windows_server_2019_template,
     reconcile_vm_disks,
+    set_lifecycle_tag,
+    mark_vm_customization_failed,
 )
 from app.disks import prepare_disk_plan
 from app.remotes import attach_pve_override
@@ -63,6 +66,7 @@ __all__ = [
     '_write_sysprep_files',
     '_sysprep_wait_timings',
     'sysprep_verify_task',
+    '_fail_sysprep_task',
 ]
 
 
@@ -82,17 +86,17 @@ def _sysprep_wait_timings(data=None):
     data = data or {}
     if _as_bool(data.get('fast_waits')):
         return _BOOT_SETTLE_FAST, _AGENT_STABLE_FAST
-    boot = app.config.get('SYSPREP_BOOT_SETTLE_SECONDS', _BOOT_SETTLE_DEFAULT)
-    stable = app.config.get('SYSPREP_AGENT_STABLE_SECONDS', _AGENT_STABLE_DEFAULT)
+    boot = app.config.get('SYSPREP_BOOT_SETTLE_SECONDS')
+    agent = app.config.get('SYSPREP_AGENT_STABLE_SECONDS')
     try:
-        boot = max(0, int(boot))
+        boot_settle = int(boot) if boot is not None else _BOOT_SETTLE_DEFAULT
     except (TypeError, ValueError):
-        boot = _BOOT_SETTLE_DEFAULT
+        boot_settle = _BOOT_SETTLE_DEFAULT
     try:
-        stable = max(0, int(stable))
+        agent_stable = int(agent) if agent is not None else _AGENT_STABLE_DEFAULT
     except (TypeError, ValueError):
-        stable = _AGENT_STABLE_DEFAULT
-    return boot, stable
+        agent_stable = _AGENT_STABLE_DEFAULT
+    return max(0, boot_settle), max(0, agent_stable)
 
 
 def _task_cancelled(task_id):
@@ -100,57 +104,106 @@ def _task_cancelled(task_id):
     return bool(task and task.status == 'CANCELLED')
 
 
+def _fail_sysprep_task(task_id, message, vmid=None, hostname=None, error_code=None):
+    """Mark task FAILURE and, when a clone exists, rename/tag it for analysis."""
+    task = Task.query.get(task_id)
+    if not task:
+        return
+    if task.status == 'CANCELLED':
+        return
+    task.status = 'FAILURE'
+    task.message = message
+    if error_code:
+        task.error_code = error_code
+    if vmid is not None:
+        task.result_vmid = vmid
+    db.session.commit()
+    if vmid:
+        try:
+            ok, detail = mark_vm_customization_failed(vmid, hostname=hostname or task.hostname)
+            app.logger.info("Failed customization mark for VM %s: %s (%s)", vmid, ok, detail)
+        except Exception as e:
+            app.logger.warning("Could not mark failed VM %s: %s", vmid, e)
+
+
+def _clone_nics_arg(data):
+    """Return nics list for clone_vm (bridge/vlan only), or None for single-NIC path."""
+    nics = data.get('nics')
+    if not isinstance(nics, list) or len(nics) <= 1:
+        return None
+    out = []
+    for nic in nics:
+        out.append({
+            'bridge': nic.get('bridge') or data.get('bridge'),
+            'vlan': nic.get('vlan') if nic.get('vlan') is not None else data.get('vlan'),
+        })
+    return out
+
+
+def _attach_macs_to_nics(data, vmid):
+    """Fill primary_mac_address on each nic from the live VM config."""
+    macs = get_vm_nic_macs(vmid)
+    nics = data.get('nics') or []
+    for i, nic in enumerate(nics):
+        if i < len(macs) and macs[i]:
+            try:
+                nic['primary_mac_address'] = validate_mac(macs[i])
+            except ValidationError:
+                pass
+    if nics and nics[0].get('primary_mac_address'):
+        data['primary_mac_address'] = nics[0]['primary_mac_address']
+    elif not data.get('primary_mac_address'):
+        mac = get_primary_mac_address(vmid)
+        if mac:
+            data['primary_mac_address'] = validate_mac(mac)
+
+
 @celery.task(bind=True)
 def sysprep_workflow_task(self, task_id, data):
     with app.app_context():
+        new_vmid = None
+        hostname = (data or {}).get('hostname')
         try:
-            pve_override = attach_pve_override(data)
-        except ValueError as e:
-            task = Task.query.get(task_id)
-            if task:
-                task.status = 'FAILURE'
-                task.message = str(e)
-                db.session.commit()
-            return
-        with use_pve_override(pve_override):
             try:
-                if _task_cancelled(task_id):
-                    return
-                # 0. Validate user-supplied network + domain values before templating.
+                pve_override = attach_pve_override(data)
+            except ValueError as e:
+                _fail_sysprep_task(task_id, str(e), hostname=hostname, error_code='remote')
+                return
+
+            with use_pve_override(pve_override):
                 try:
                     require_windows_guest(data['template_vmid'])
                     _validate_sysprep_network(data)
                     _prepare_domain_join(data)
-                    if _as_bool(data.get('manage_disks')) and not is_windows_server_2019_template(
-                        data['template_vmid']
-                    ):
-                        raise ValidationError(
-                            'manage_disks is only supported for Windows Server 2019 '
-                            'templates (name/tag must include windowsserver2019, '
-                            'server2019, win2019, ws2019, or guestos-disk). Win11 and '
-                            'other guests keep a flat disk layout — omit manage_disks '
-                            'or retarget a Server 2019 template.'
-                        )
-                    prepare_disk_plan(data)
-                    from app.proxmox import classify_windows_guest_family
-                    from app.provision_limits import validate_resource_caps, check_storage_for_template
-                    family = classify_windows_guest_family(data['template_vmid'])
-                    validate_resource_caps(data, family)
-                    check_storage_for_template(data['template_vmid'])
+                    if _as_bool(data.get('manage_disks')):
+                        if not is_windows_server_2019_template(data['template_vmid']):
+                            raise ValidationError(
+                                'manage_disks requires a Windows Server 2019 template '
+                                '(name/tag: server2019, win2019, ws2019, or guestos-disk). Win11 and '
+                                'other guests keep a flat disk layout — omit manage_disks '
+                                'or retarget a Server 2019 template.'
+                            )
+                        prepare_disk_plan(data)
+                        from app.proxmox import classify_windows_guest_family
+                        from app.provision_limits import validate_resource_caps, check_storage_for_template
+                        family = classify_windows_guest_family(data['template_vmid'])
+                        validate_resource_caps(data, family)
+                        check_storage_for_template(data['template_vmid'])
+                    else:
+                        from app.proxmox import classify_windows_guest_family
+                        from app.provision_limits import validate_resource_caps, check_storage_for_template
+                        family = classify_windows_guest_family(data['template_vmid'])
+                        validate_resource_caps(data, family)
+                        check_storage_for_template(data['template_vmid'])
                 except ValidationError as e:
-                    task = Task.query.get(task_id)
-                    task.status = 'FAILURE'
-                    task.message = f"Invalid sysprep input: {e}"
-                    db.session.commit()
+                    _fail_sysprep_task(
+                        task_id, f"Invalid sysprep input: {e}", hostname=hostname, error_code='validation'
+                    )
                     return
                 except ValueError as e:
-                    task = Task.query.get(task_id)
-                    task.status = 'FAILURE'
-                    task.message = str(e)
-                    db.session.commit()
+                    _fail_sysprep_task(task_id, str(e), hostname=hostname, error_code='validation')
                     return
 
-                # 1. Clone the VM
                 if _task_cancelled(task_id):
                     return
                 update_task_progress(task_id, 10, "Cloning VM...")
@@ -160,7 +213,8 @@ def sysprep_workflow_task(self, task_id, data):
                     data['cores'],
                     data['ram'],
                     data['bridge'],
-                    data.get('vlan')  # Use .get() for the optional vlan
+                    data.get('vlan'),
+                    nics=_clone_nics_arg(data),
                 )
                 new_vmid = clone_result['vmid']
                 update_task_progress(
@@ -170,8 +224,8 @@ def sysprep_workflow_task(self, task_id, data):
                     result_vmid=new_vmid,
                 )
 
-                # 1b. Optional disk reconcile (attach / grow) before first boot.
                 if data.get('manage_disks'):
+                    set_lifecycle_tag(new_vmid, 'lifecycle-customizing')
                     update_task_progress(task_id, 30, "Reconciling disks on Proxmox...")
                     guest_plan = reconcile_vm_disks(new_vmid, data['disks'])
                     data['disk_guest_plan'] = guest_plan
@@ -182,24 +236,20 @@ def sysprep_workflow_task(self, task_id, data):
                     data['disk_guest_plan'] = []
                     data['disk_plan_b64'] = ''
 
-                # 2. Resolve the primary NIC MAC (for robust adapter selection) and
-                #    render the answer file + post-setup scripts.
                 if _task_cancelled(task_id):
                     return
+                set_lifecycle_tag(new_vmid, 'lifecycle-customizing')
                 update_task_progress(task_id, 35, "Generating sysprep files...")
-                mac = get_primary_mac_address(new_vmid)
-                if mac:
-                    data['primary_mac_address'] = validate_mac(mac)
+                _attach_macs_to_nics(data, new_vmid)
+                # Re-pack nics_b64 now that MACs are known.
+                _validate_sysprep_network(data)
                 unattended_xml, setup_ps1, setup_complete = _render_sysprep_files(data)
 
-                # 3. Power on the VM
                 if _task_cancelled(task_id):
                     return
+                set_lifecycle_tag(new_vmid, 'lifecycle-booting')
                 update_task_progress(task_id, 50, "Powering on VM...")
                 power_on_vm(new_vmid)
-                # Win11 (and some Server builds) reboot several times before the
-                # guest agent stays up; give the first boot cycle room to settle.
-                # Smoke/lab may pass fast_waits or set SYSPREP_* env overrides.
                 boot_settle, agent_stable = _sysprep_wait_timings(data)
                 if boot_settle:
                     update_task_progress(
@@ -209,23 +259,22 @@ def sysprep_workflow_task(self, task_id, data):
                     )
                     time.sleep(boot_settle)
 
-                # 4. Wait for a *stable* QEMU Guest Agent (not just the first ping).
                 if _task_cancelled(task_id):
                     return
                 update_task_progress(task_id, 60, "Waiting for QEMU Guest Agent to stabilize...")
                 wait_for_guest_agent(new_vmid, timeout=1200, stable_for=agent_stable)
                 update_task_progress(task_id, 70, "QEMU Guest Agent is ready.")
 
-                # 5. Write the answer file + post-setup scripts to the guest.
                 if _task_cancelled(task_id):
                     return
+                set_lifecycle_tag(new_vmid, 'lifecycle-customizing')
                 update_task_progress(task_id, 80, "Writing sysprep files to guest...")
                 _write_sysprep_files(new_vmid, unattended_xml, setup_ps1, setup_complete)
                 update_task_progress(task_id, 85, "Sysprep files written successfully.")
 
-                # 6. Run Sysprep
                 if _task_cancelled(task_id):
                     return
+                set_lifecycle_tag(new_vmid, 'lifecycle-sysprep')
                 update_task_progress(task_id, 88, "Running Sysprep...")
                 sysprep_command = (
                     r'cmd.exe /c "C:\Windows\System32\Sysprep\sysprep.exe '
@@ -234,21 +283,21 @@ def sysprep_workflow_task(self, task_id, data):
                 )
                 run_shutdown_command_in_guest(new_vmid, sysprep_command)
 
-                # 7. Verify: wait for shutdown or post-sysprep boot, then confirm
-                # the guest agent before reporting success.
                 if not _complete_sysprep_power_cycle(
                     task_id, new_vmid, progress_base=92, agent_stable_for=agent_stable
                 ):
-                    task = Task.query.get(task_id)
-                    task.status = 'FAILURE'
-                    task.message = (
-                        "Timed out waiting for the VM to shut down (or reboot) after Sysprep."
+                    _fail_sysprep_task(
+                        task_id,
+                        "Timed out waiting for the VM to shut down (or reboot) after Sysprep.",
+                        vmid=new_vmid,
+                        hostname=hostname,
+                        error_code='sysprep_timeout',
                     )
-                    db.session.commit()
                     return
 
                 if _task_cancelled(task_id):
                     return
+                set_lifecycle_tag(new_vmid, 'lifecycle-verifying')
                 update_task_progress(task_id, 95, "Clone and Sysprep phase complete; queued for verification...")
                 sysprep_verify_task.apply_async(
                     args=(task_id, new_vmid, data),
@@ -256,12 +305,15 @@ def sysprep_workflow_task(self, task_id, data):
                 )
                 return
 
-            except Exception as e:
-                app.logger.error(f"Task {task_id} failed: {e}", exc_info=True)
-                task = Task.query.get(task_id)
-                task.status = 'FAILURE'
-                task.message = f"An error occurred: {e}"
-                db.session.commit()
+        except Exception as e:
+            app.logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+            _fail_sysprep_task(
+                task_id,
+                f"An error occurred: {e}",
+                vmid=new_vmid,
+                hostname=hostname,
+                error_code='exception',
+            )
 
 
 @celery.task(bind=True)
@@ -269,13 +321,18 @@ def sysprep_verify_task(self, task_id, vmid, data):
     with app.app_context():
         if _task_cancelled(task_id):
             return
+        hostname = (data or {}).get('hostname')
         try:
+            set_lifecycle_tag(vmid, 'lifecycle-verifying')
             update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
+            expected_ip = None if data.get('use_dhcp') else data.get('ip_address')
+            expected_ipv6 = data.get('ipv6_address') if data.get('enable_ipv6') else None
             verify_summary, verify_ok = _verify_sysprep_result(
                 vmid,
                 data.get('hostname'),
-                expected_ip=None if data.get('use_dhcp') else data.get('ip_address'),
+                expected_ip=expected_ip,
                 expected_domain=data.get('domain_name') if data.get('join_domain') else None,
+                expected_ipv6=expected_ipv6,
                 on_progress=lambda msg: update_task_progress(task_id, 98, msg),
             )
             if data.get('manage_disks') and data.get('disk_guest_plan'):
@@ -293,30 +350,31 @@ def sysprep_verify_task(self, task_id, vmid, data):
             if task.status == 'CANCELLED':
                 return
             if verify_ok:
+                set_lifecycle_tag(vmid, 'lifecycle-ready')
                 task.status = 'SUCCESS'
                 task.progress = 100
                 task.message = (
                     f"Sysprep workflow for {data['hostname']} completed. "
                     f"Verify: {verify_summary}"
                 )
+                db.session.commit()
             else:
-                task.status = 'FAILURE'
-                task.progress = 100
-                task.message = (
-                    f"Sysprep finished but verification failed for {data['hostname']}: "
-                    f"{verify_summary}"
+                _fail_sysprep_task(
+                    task_id,
+                    f"Sysprep finished but verification failed for {data['hostname']}: {verify_summary}",
+                    vmid=vmid,
+                    hostname=hostname,
+                    error_code='verify',
                 )
-            db.session.commit()
         except Exception as e:
             app.logger.error(f"Verify task {task_id} failed: {e}", exc_info=True)
-            task = Task.query.get(task_id)
-            if not task:
-                return
-            if task.status == 'CANCELLED':
-                return
-            task.status = 'FAILURE'
-            task.message = f"An error occurred during verify phase: {e}"
-            db.session.commit()
+            _fail_sysprep_task(
+                task_id,
+                f"An error occurred during verify phase: {e}",
+                vmid=vmid,
+                hostname=hostname,
+                error_code='verify_exception',
+            )
 
 
 @celery.task(bind=True)
@@ -328,12 +386,11 @@ def sysprep_existing_vm_task(self, task_id, data):
     """
     with app.app_context():
         task = Task.query.get(task_id)
-        if not task:
-            return
-        task.status = 'FAILURE'
-        task.progress = 100
-        task.message = (
-            'In-place Sysprep is disabled. Use Clone + Sysprep from a Windows template.'
-        )
-        task.updated_at = _utcnow()
-        db.session.commit()
+        if task:
+            task.status = 'FAILURE'
+            task.message = (
+                'In-place Sysprep of existing VMs is disabled. '
+                'Clone from a Windows template instead.'
+            )
+            task.error_code = 'inplace_disabled'
+            db.session.commit()

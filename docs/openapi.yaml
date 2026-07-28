@@ -272,9 +272,36 @@ components:
           type: string
         dns_servers:
           type: string
-          description: Comma-separated IPv4 list
+          description: Comma-separated IPv4/IPv6 DNS list
         timezone:
           type: string
+          description: Windows Time Zone ID (curated list in UI)
+        locale:
+          type: string
+          description: Windows culture ID (e.g. en-US, de-DE)
+        workgroup:
+          type: string
+          description: Workgroup when join_domain is false (default WORKGROUP)
+        enable_ipv6:
+          type: boolean
+          default: false
+          description: Opt-in IPv6 on the primary NIC (or nics[].enable_ipv6)
+        ipv6_address:
+          type: string
+        ipv6_prefix:
+          type: integer
+        ipv6_gateway:
+          type: string
+        spec_id:
+          type: integer
+          description: Apply a saved Customization Spec (non-secret fields); admin password still required
+        spec_name:
+          type: string
+        nics:
+          type: array
+          description: Optional multi-NIC layout (single customize only; not for bulk)
+          items:
+            type: object
         administrator_password:
           type: string
         join_domain:

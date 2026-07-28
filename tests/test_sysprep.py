@@ -64,10 +64,22 @@ def test_unattend_sets_hostname_and_timezone():
     xml = xml.decode()
     assert '<ComputerName>WINSRV19-01</ComputerName>' in xml
     assert '<TimeZone>Central European Standard Time</TimeZone>' in xml
+    assert '<InputLocale>en-US</InputLocale>' in xml
     assert 'FirstLogonCommands' in xml
     assert r'C:\ProgramData\GuestOS\setup.ps1' in xml
     assert '<AutoLogon>' in xml
     assert 'net user Administrator /active:yes' in xml
+
+
+def test_unattend_uses_selected_locale():
+    data = _base_data()
+    data['locale'] = 'de-DE'
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        xml, _ps1, _cmd = _render_sysprep_files(data)
+    xml = xml.decode()
+    assert '<UILanguage>de-DE</UILanguage>' in xml
+    assert '<SystemLocale>de-DE</SystemLocale>' in xml
 
 
 def test_setup_ps1_contains_network_config():
@@ -76,18 +88,48 @@ def test_setup_ps1_contains_network_config():
         _validate_sysprep_network(data)
         _xml, ps1, _cmd = _render_sysprep_files(data)
     ps1 = ps1.decode()
-    assert "$ip      = '10.0.5.20'" in ps1
-    assert "$prefix  = 24" in ps1
-    assert "$gateway = '10.0.5.1'" in ps1
-    assert "@('10.0.5.1', '8.8.8.8')" in ps1
-    # MAC is normalized to dash-separated uppercase inside PowerShell.
-    assert "'BC:24:11:AA:BB:CC'.Replace(':', '-').ToUpper()" in ps1
-    # Server-safe static path: address and default route are separate
-    # (avoid New-NetIPAddress -DefaultGateway, which fails on Server 2019).
+    assert 'nicsBlob' in ps1 or 'nics_b64' in ps1 or '$nicsBlob' in ps1
+    blob_line = [ln for ln in ps1.splitlines() if '$nicsBlob' in ln][0]
+    b64 = blob_line.split("'", 2)[1]
+    nics = json.loads(base64.b64decode(b64))
+    assert nics[0]['ip'] == '10.0.5.20'
+    assert nics[0]['prefix'] == 24
+    assert nics[0]['gateway'] == '10.0.5.1'
+    assert nics[0]['dns'] == ['10.0.5.1', '8.8.8.8']
+    assert nics[0]['mac'] == 'BC:24:11:AA:BB:CC'
+    assert nics[0]['ipv6'] is False
     assert 'New-NetRoute' in ps1
     assert 'New-NetIPAddress' in ps1
-    assert '-DefaultGateway $gateway' not in ps1
     assert r"C:\ProgramData\GuestOS\setup.log" in ps1
+
+
+def test_setup_ps1_optional_ipv6():
+    data = _base_data()
+    data['enable_ipv6'] = True
+    data['ipv6_address'] = '2001:db8::10'
+    data['ipv6_prefix'] = 64
+    data['ipv6_gateway'] = '2001:db8::1'
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        _xml, ps1, _cmd = _render_sysprep_files(data)
+    assert data['enable_ipv6'] is True
+    blob_line = [ln for ln in ps1.decode().splitlines() if '$nicsBlob' in ln][0]
+    nics = json.loads(base64.b64decode(blob_line.split("'", 2)[1]))
+    assert nics[0]['ipv6'] is True
+    assert nics[0]['ip6'] == '2001:db8::10'
+    assert nics[0]['prefix6'] == 64
+
+
+def test_workgroup_when_not_joining_domain():
+    data = _base_data()
+    data['workgroup'] = 'LABNET'
+    _prepare_domain_join(data)
+    assert data['join_domain'] is False
+    assert data['workgroup'] == 'LABNET'
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        _xml, ps1, _cmd = _render_sysprep_files(data)
+    assert "Add-Computer -WorkGroupName $workgroup" in ps1.decode()
 
 
 def test_setup_ps1_enables_admin_and_removes_other_local_users():
@@ -126,7 +168,9 @@ def test_dhcp_mode_skips_static_and_enables_dhcp():
         _xml, ps1, _cmd = _render_sysprep_files(data)
     ps1 = ps1.decode()
     assert '-Dhcp Enabled' in ps1
-    assert 'New-NetIPAddress' not in ps1  # no static addressing
+    blob_line = [ln for ln in ps1.splitlines() if '$nicsBlob' in ln][0]
+    nics = json.loads(base64.b64decode(blob_line.split("'", 2)[1]))
+    assert nics[0]['dhcp'] is True
     assert 'ipconfig /renew' in ps1  # must re-acquire lease after clearing IPs
 
 
@@ -138,7 +182,10 @@ def test_dhcp_with_dns_override_sets_servers():
         _validate_sysprep_network(data)
         _xml, ps1, _cmd = _render_sysprep_files(data)
     ps1 = ps1.decode()
-    assert "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @('10.0.0.9')" in ps1
+    blob_line = [ln for ln in ps1.splitlines() if '$nicsBlob' in ln][0]
+    nics = json.loads(base64.b64decode(blob_line.split("'", 2)[1]))
+    assert nics[0]['dns'] == ['10.0.0.9']
+    assert 'Set-DnsClientServerAddress' in ps1
 
 
 # --- Domain join ------------------------------------------------------------

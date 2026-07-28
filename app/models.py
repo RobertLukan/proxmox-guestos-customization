@@ -104,6 +104,47 @@ class Task(db.Model):
         db.session.commit()
 
 
+class CustomizationSpec(db.Model):
+    """Named reusable customization presets (non-secret fields only)."""
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(128), nullable=False, unique=True, index=True)
+    description = db.Column(db.String(512), default='')
+    # JSON object of wizard/API defaults — never store administrator_password.
+    payload_json = db.Column(db.Text, nullable=False, default='{}')
+    timestamp = db.Column(db.DateTime(timezone=True), index=True, default=_utcnow)
+    updated_at = db.Column(db.DateTime(timezone=True), index=True, default=_utcnow, onupdate=_utcnow)
+
+    def payload(self):
+        import json
+        try:
+            data = json.loads(self.payload_json or '{}')
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def set_payload(self, data):
+        import json
+        from app.windows_identity import SPEC_ALLOWED_KEYS, SPEC_SECRET_KEYS
+        clean = {}
+        for key, value in (data or {}).items():
+            if key in SPEC_SECRET_KEYS:
+                continue
+            if key not in SPEC_ALLOWED_KEYS:
+                continue
+            clean[key] = value
+        self.payload_json = json.dumps(clean, separators=(',', ':'), sort_keys=True)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description or '',
+            'payload': self.payload(),
+            'timestamp': _timestamp_iso(self.timestamp),
+            'updated_at': _timestamp_iso(self.updated_at or self.timestamp),
+        }
+
+
 class BatchRequest(db.Model):
     """Batch submission ledger for idempotency and operator status views."""
     id = db.Column(db.String(36), primary_key=True)

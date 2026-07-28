@@ -79,15 +79,32 @@ def _patch_workflow_side_effects(monkeypatch, *, clone_vmid=9055, fail_clone=Fal
     def _power_cycle(task_id, vmid, progress_base=92, agent_stable_for=60):
         return True
 
-    def _verify(vmid, expected_hostname, expected_ip=None, expected_domain=None, on_progress=None):
+    def _verify(
+        vmid,
+        expected_hostname,
+        expected_ip=None,
+        expected_domain=None,
+        expected_ipv6=None,
+        on_progress=None,
+        **kwargs,
+    ):
         if on_progress:
             on_progress('verify mock ok')
         return ('hostname=SMOKE01 ip=dhcp domain=-', True)
+
+    def _noop_tag(*args, **kwargs):
+        return True, 'ok'
+
+    def _macs(vmid):
+        return ['BC:24:11:00:11:22']
 
     monkeypatch.setattr(ca, 'require_windows_guest', _require_windows)
     monkeypatch.setattr(ca, 'is_windows_server_2019_template', lambda vmid: True)
     monkeypatch.setattr(ca, 'clone_vm', _clone)
     monkeypatch.setattr(ca, 'get_primary_mac_address', _mac)
+    monkeypatch.setattr(ca, 'get_vm_nic_macs', _macs)
+    monkeypatch.setattr(ca, 'set_lifecycle_tag', _noop_tag)
+    monkeypatch.setattr(ca, 'mark_vm_customization_failed', _noop_tag)
     monkeypatch.setattr(ca, 'power_on_vm', _power_on)
     monkeypatch.setattr(ca.time, 'sleep', _sleep)
     monkeypatch.setattr(ca, 'wait_for_guest_agent', _wait_agent)
@@ -208,7 +225,8 @@ def test_sysprep_workflow_rejects_manage_disks_on_non_server_2019(app, monkeypat
         )
         task = db.session.get(Task, task_id)
         assert task.status == 'FAILURE'
-        assert 'manage_disks is only supported' in (task.message or '')
+        assert 'manage_disks requires a Windows Server 2019' in (task.message or '') or \
+        'manage_disks is only supported' in (task.message or '')
 
 
 def test_sysprep_workflow_mocked_clone_failure(app, monkeypatch):

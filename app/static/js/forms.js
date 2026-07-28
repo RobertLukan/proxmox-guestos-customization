@@ -72,6 +72,7 @@
   function wireDomainJoin(form) {
     var joinCb = form.querySelector('#join_domain_checkbox');
     var domainFields = form.querySelector('#domain_fields');
+    var workgroupGroup = form.querySelector('#workgroup_group');
     var useProfileCb = form.querySelector('#use_domain_profile_credentials');
     var credFields = form.querySelector('#domain_credentials_fields');
     var profileSelect = form.querySelector('#domain_profile');
@@ -91,6 +92,7 @@
     function applyJoin() {
       var joining = joinCb && joinCb.checked;
       setSectionVisible(domainFields, joining);
+      setSectionVisible(workgroupGroup, !joining);
       applyCreds();
     }
 
@@ -98,6 +100,169 @@
     if (useProfileCb) useProfileCb.addEventListener('change', applyCreds);
     applyJoin();
     return { applyJoin: applyJoin, applyCreds: applyCreds };
+  }
+
+  function wireIpv6(form) {
+    var cb = form.querySelector('#enable_ipv6');
+    var box = form.querySelector('#ipv6_fields');
+    function apply() {
+      setSectionVisible(box, !!(cb && cb.checked));
+    }
+    if (cb) cb.addEventListener('change', apply);
+    apply();
+    return apply;
+  }
+
+  function wireExtraNics(form) {
+    var list = form.querySelector('#extra_nics_list');
+    var addBtn = form.querySelector('#add_nic_btn');
+    var section = form.querySelector('#extra_nics_section');
+    var bridges = [];
+    var bridgeSelect = form.querySelector('#bridge');
+    if (bridgeSelect) {
+      bridges = Array.prototype.map.call(bridgeSelect.options, function (o) { return o.value; });
+    }
+    var idx = 0;
+    function addNic(preset) {
+      if (!list) return;
+      preset = preset || {};
+      idx += 1;
+      var wrap = document.createElement('div');
+      wrap.className = 'border rounded p-3 mb-3 extra-nic';
+      var bridgeOpts = bridges.map(function (b) {
+        var sel = (preset.bridge || (bridgeSelect && bridgeSelect.value) || '') === b ? ' selected' : '';
+        return '<option value="' + b + '"' + sel + '>' + b + '</option>';
+      }).join('');
+      wrap.innerHTML =
+        '<div class="d-flex justify-content-between align-items-center mb-2">' +
+        '<strong>Additional NIC</strong>' +
+        '<button type="button" class="btn btn-sm btn-outline-danger remove-nic">Remove</button></div>' +
+        '<div class="row">' +
+        '<div class="col-md-4 mb-2"><label class="form-label">Bridge</label>' +
+        '<select class="form-select nic-bridge">' + bridgeOpts + '</select></div>' +
+        '<div class="col-md-4 mb-2"><label class="form-label">VLAN</label>' +
+        '<input type="number" class="form-control nic-vlan" min="1" max="4094" value="' + (preset.vlan || '') + '"></div>' +
+        '<div class="col-md-4 mb-2"><label class="form-label">Mode</label>' +
+        '<select class="form-select nic-mode"><option value="static">Static</option><option value="dhcp">DHCP</option></select></div>' +
+        '</div>' +
+        '<div class="nic-static row">' +
+        '<div class="col-md-4 mb-2"><label class="form-label">IP</label><input class="form-control nic-ip" value="' + (preset.ip_address || '') + '"></div>' +
+        '<div class="col-md-4 mb-2"><label class="form-label">Prefix</label><input class="form-control nic-prefix" value="' + (preset.netmask_cidr || '24') + '"></div>' +
+        '<div class="col-md-4 mb-2"><label class="form-label">Gateway</label><input class="form-control nic-gw" value="' + (preset.gateway || '') + '"></div>' +
+        '</div>' +
+        '<div class="mb-2"><label class="form-label">DNS</label><input class="form-control nic-dns" value="' + (preset.dns_servers || '') + '"></div>' +
+        '<div class="form-check mb-2"><input type="checkbox" class="form-check-input nic-ipv6">' +
+        '<label class="form-check-label">Enable IPv6</label></div>' +
+        '<div class="nic-ipv6-fields row" hidden>' +
+        '<div class="col-md-4 mb-2"><label class="form-label">IPv6</label><input class="form-control nic-ip6" value="' + (preset.ipv6_address || '') + '"></div>' +
+        '<div class="col-md-4 mb-2"><label class="form-label">Prefix</label><input class="form-control nic-prefix6" value="' + (preset.ipv6_prefix || '64') + '"></div>' +
+        '<div class="col-md-4 mb-2"><label class="form-label">GW</label><input class="form-control nic-gw6" value="' + (preset.ipv6_gateway || '') + '"></div>' +
+        '</div>';
+      list.appendChild(wrap);
+      var mode = wrap.querySelector('.nic-mode');
+      if (preset.network_mode === 'dhcp') mode.value = 'dhcp';
+      var ipv6Cb = wrap.querySelector('.nic-ipv6');
+      if (preset.enable_ipv6) ipv6Cb.checked = true;
+      function syncMode() {
+        wrap.querySelector('.nic-static').hidden = mode.value === 'dhcp';
+      }
+      function syncIpv6() {
+        wrap.querySelector('.nic-ipv6-fields').hidden = !ipv6Cb.checked;
+      }
+      mode.addEventListener('change', syncMode);
+      ipv6Cb.addEventListener('change', syncIpv6);
+      wrap.querySelector('.remove-nic').addEventListener('click', function () { wrap.remove(); });
+      syncMode();
+      syncIpv6();
+    }
+    if (addBtn) addBtn.addEventListener('click', function () { addNic(); });
+    function setVisible(show) {
+      setSectionVisible(section, show);
+    }
+    return { addNic: addNic, setVisible: setVisible };
+  }
+
+  function collectExtraNics(form) {
+    var cards = form.querySelectorAll('.extra-nic');
+    var nics = [];
+    cards.forEach(function (wrap) {
+      var mode = (wrap.querySelector('.nic-mode') || {}).value || 'static';
+      var nic = {
+        bridge: (wrap.querySelector('.nic-bridge') || {}).value || '',
+        vlan: (wrap.querySelector('.nic-vlan') || {}).value || '',
+        network_mode: mode,
+        dns_servers: (wrap.querySelector('.nic-dns') || {}).value || '',
+        enable_ipv6: !!(wrap.querySelector('.nic-ipv6') || {}).checked,
+      };
+      if (mode === 'static') {
+        nic.ip_address = (wrap.querySelector('.nic-ip') || {}).value || '';
+        nic.netmask_cidr = (wrap.querySelector('.nic-prefix') || {}).value || '';
+        nic.gateway = (wrap.querySelector('.nic-gw') || {}).value || '';
+      }
+      if (nic.enable_ipv6) {
+        nic.ipv6_address = (wrap.querySelector('.nic-ip6') || {}).value || '';
+        nic.ipv6_prefix = (wrap.querySelector('.nic-prefix6') || {}).value || '64';
+        nic.ipv6_gateway = (wrap.querySelector('.nic-gw6') || {}).value || '';
+      }
+      nics.push(nic);
+    });
+    return nics;
+  }
+
+  function applySpecPayload(form, payload) {
+    if (!payload || typeof payload !== 'object') return;
+    function setVal(sel, val) {
+      var el = form.querySelector(sel);
+      if (!el || val === undefined || val === null || val === '') return;
+      if (el.type === 'checkbox') {
+        el.checked = !!val && val !== 'false' && val !== '0';
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return;
+      }
+      el.value = val;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    setVal('#timezone', payload.timezone);
+    setVal('#locale', payload.locale);
+    setVal('#workgroup', payload.workgroup);
+    setVal('#cores', payload.cores);
+    setVal('#ram', payload.ram);
+    setVal('#bridge', payload.bridge);
+    setVal('#vlan', payload.vlan);
+    setVal('#network_mode', payload.network_mode);
+    setVal('#ip_address', payload.ip_address);
+    setVal('#netmask_cidr', payload.netmask_cidr);
+    setVal('#gateway', payload.gateway);
+    setVal('#dns_servers', payload.dns_servers);
+    if (payload.enable_ipv6 !== undefined) setVal('#enable_ipv6', payload.enable_ipv6);
+    setVal('#ipv6_address', payload.ipv6_address);
+    setVal('#ipv6_prefix', payload.ipv6_prefix);
+    setVal('#ipv6_gateway', payload.ipv6_gateway);
+    setVal('#domain_profile', payload.domain_profile);
+    setVal('#domain_ou', payload.domain_ou);
+    setVal('#domain_name', payload.domain_name);
+    var joinCb = form.querySelector('#join_domain_checkbox');
+    if (joinCb && payload.join_domain !== undefined) {
+      joinCb.checked = !!payload.join_domain;
+      joinCb.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+
+  function wireApplySpec(form) {
+    var sel = form.querySelector('#apply_spec');
+    if (!sel) return;
+    sel.addEventListener('change', function () {
+      var opt = sel.options[sel.selectedIndex];
+      if (!opt || !opt.value) return;
+      var raw = opt.getAttribute('data-payload');
+      if (!raw) return;
+      try {
+        applySpecPayload(form, JSON.parse(raw));
+      } catch (e) {
+        console.warn('Failed to apply spec payload', e);
+      }
+    });
   }
 
   function wireManageDisks(form) {
@@ -127,10 +292,42 @@
     var useProfileCreds = !!(form.querySelector('#use_domain_profile_credentials') || {}).checked;
     data.join_domain = joinDomain;
     data.use_domain_profile_credentials = useProfileCreds;
+    data.enable_ipv6 = !!(form.querySelector('#enable_ipv6') || {}).checked;
+    if (!data.enable_ipv6) {
+      data.ipv6_address = '';
+      data.ipv6_prefix = '';
+      data.ipv6_gateway = '';
+    }
     if (!joinDomain || useProfileCreds) {
       data.domain_name = '';
       data.domain_username = '';
       data.domain_password = '';
+    }
+    if (joinDomain) {
+      data.workgroup = '';
+    }
+
+    var applySpec = form.querySelector('#apply_spec');
+    if (applySpec && applySpec.value) {
+      data.spec_id = parseInt(applySpec.value, 10);
+    }
+
+    var extra = collectExtraNics(form);
+    if (extra.length) {
+      var primary = {
+        bridge: data.bridge,
+        vlan: data.vlan,
+        network_mode: data.network_mode || 'static',
+        ip_address: data.ip_address,
+        netmask_cidr: data.netmask_cidr,
+        gateway: data.gateway,
+        dns_servers: data.dns_servers,
+        enable_ipv6: data.enable_ipv6,
+        ipv6_address: data.ipv6_address,
+        ipv6_prefix: data.ipv6_prefix,
+        ipv6_gateway: data.ipv6_gateway,
+      };
+      data.nics = [primary].concat(extra);
     }
 
     var disksPanel = form.querySelector('#disks-wizard-panel');
@@ -464,6 +661,20 @@
     }
     var join = form.querySelector('#join_domain_checkbox');
     if (join) add('Join domain', join.checked ? 'Yes' : 'No');
+    if (join && !join.checked) {
+      add('Workgroup', (form.querySelector('#workgroup') || {}).value);
+    }
+    add('Timezone', (form.querySelector('#timezone') || {}).value);
+    add('Locale', (form.querySelector('#locale') || {}).value);
+    var ipv6 = form.querySelector('#enable_ipv6');
+    if (ipv6) {
+      add('IPv6', ipv6.checked ? 'Enabled' : 'Off');
+      if (ipv6.checked) {
+        add('IPv6 address', (form.querySelector('#ipv6_address') || {}).value);
+      }
+    }
+    var extras = form.querySelectorAll('.extra-nic');
+    if (extras.length) add('Additional NICs', String(extras.length));
     var manageDisks = form.querySelector('#manage_disks_checkbox');
     if (manageDisks) {
       add('Configure disks', manageDisks.checked ? 'Yes' : 'No');
@@ -520,6 +731,10 @@
     wireNetworkMode: wireNetworkMode,
     wireDomainJoin: wireDomainJoin,
     wireManageDisks: wireManageDisks,
+    wireIpv6: wireIpv6,
+    wireExtraNics: wireExtraNics,
+    wireApplySpec: wireApplySpec,
+    applySpecPayload: applySpecPayload,
     collectSysprepPayload: collectSysprepPayload,
     collectBulkPayload: collectBulkPayload,
     parseBulkRows: parseBulkRows,

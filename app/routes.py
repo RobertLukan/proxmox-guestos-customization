@@ -11,7 +11,15 @@ from app.proxmox import (
     classify_windows_guest_family,
 )
 from app.celery_app import sysprep_workflow_task
-from app.models import Task, User, BatchRequest
+from app.models import Task, User, BatchRequest, CustomizationSpec
+from app.specs import resolve_spec_from_request, sanitize_spec_payload
+from app.windows_identity import (
+    WINDOWS_TIMEZONES,
+    WINDOWS_LOCALES,
+    DEFAULT_TIMEZONE,
+    DEFAULT_LOCALE,
+    DEFAULT_WORKGROUP,
+)
 from app.api_auth import login_or_api_token_required, with_session_csrf
 from app.remotes import resolve_pve_remote
 from app.launch_token import verify_launch_token
@@ -534,12 +542,19 @@ def sysprep_form():
         return rejected
     remote_id = (request.values.get('remote_id') or request.args.get('remote_id') or '').strip()
     bridges = get_network_bridges()
+    specs = CustomizationSpec.query.order_by(CustomizationSpec.name.asc()).all()
     return render_template(
         'sysprep_form.html',
         template_vmid=template_vmid,
         bridges=bridges,
         domain_profiles=sanitized_domain_profiles(),
         remote_id=remote_id,
+        timezones=WINDOWS_TIMEZONES,
+        locales=WINDOWS_LOCALES,
+        default_timezone=DEFAULT_TIMEZONE,
+        default_locale=DEFAULT_LOCALE,
+        default_workgroup=DEFAULT_WORKGROUP,
+        specs=specs,
     )
 
 @app.route('/start_sysprep_workflow', methods=['POST'])
@@ -548,6 +563,10 @@ def sysprep_form():
 @with_session_csrf
 def start_sysprep_workflow():
     data = request.json or {}
+    ok, err = resolve_spec_from_request(data)
+    if not ok:
+        msg, fields = err
+        return _json_field_error(msg, **fields)
     ok, err = resolve_domain_join_from_request(data)
     if not ok:
         return err
@@ -625,10 +644,21 @@ def start_sysprep_workflow():
 @with_session_csrf
 def start_sysprep_bulk_workflow():
     payload = request.json or {}
-    shared = payload.get('shared') or {}
+    shared = dict(payload.get('shared') or {})
     items = payload.get('items') or []
     if not isinstance(items, list) or not items:
         return _json_field_error('items is required and must be a non-empty array.', items='Required.')
+    # Apply Customization Spec to shared defaults (request values still win).
+    ok, err = resolve_spec_from_request(shared)
+    if not ok:
+        msg, fields = err
+        return _json_field_error(msg, **fields)
+    # Bulk is Win11 single-NIC only — reject multi-NIC layouts.
+    if isinstance(shared.get('nics'), list) and len(shared.get('nics')) > 1:
+        return _json_field_error(
+            'Bulk provisioning supports a single NIC only (Windows 11).',
+            nics='Multi-NIC is not available for bulk.',
+        )
     max_items = app.config.get('BULK_MAX_ITEMS', 10)
     if len(items) > max_items:
         return _json_field_error(
@@ -879,6 +909,184 @@ def api_cancel_batch(batch_id):
         'batch_id': batch_id,
         'cancelled_items': len(cancellable),
     }), 200
+
+@app.route('/specs')
+@login_required
+def specs_page():
+    specs = CustomizationSpec.query.order_by(CustomizationSpec.name.asc()).all()
+    return render_template('specs.html', specs=specs)
+
+
+@app.route('/specs/new', methods=['GET', 'POST'])
+@login_required
+def specs_new():
+    if request.method == 'GET':
+        return render_template(
+            'spec_form.html',
+            spec=None,
+            timezones=WINDOWS_TIMEZONES,
+            locales=WINDOWS_LOCALES,
+            default_timezone=DEFAULT_TIMEZONE,
+            default_locale=DEFAULT_LOCALE,
+            default_workgroup=DEFAULT_WORKGROUP,
+            domain_profiles=sanitized_domain_profiles(),
+        )
+    name = (request.form.get('name') or '').strip()
+    description = (request.form.get('description') or '').strip()
+    if not name:
+        flash('Name is required.')
+        return redirect(url_for('specs_new'))
+    if CustomizationSpec.query.filter_by(name=name).first():
+        flash(f'A spec named "{name}" already exists.')
+        return redirect(url_for('specs_new'))
+    spec = CustomizationSpec(name=name, description=description)
+    spec.set_payload(_spec_payload_from_form(request.form))
+    db.session.add(spec)
+    db.session.commit()
+    flash(f'Spec "{name}" created.')
+    return redirect(url_for('specs_page'))
+
+
+@app.route('/specs/<int:spec_id>/edit', methods=['GET', 'POST'])
+@login_required
+def specs_edit(spec_id):
+    spec = CustomizationSpec.query.get_or_404(spec_id)
+    if request.method == 'GET':
+        return render_template(
+            'spec_form.html',
+            spec=spec,
+            timezones=WINDOWS_TIMEZONES,
+            locales=WINDOWS_LOCALES,
+            default_timezone=DEFAULT_TIMEZONE,
+            default_locale=DEFAULT_LOCALE,
+            default_workgroup=DEFAULT_WORKGROUP,
+            domain_profiles=sanitized_domain_profiles(),
+        )
+    name = (request.form.get('name') or '').strip()
+    if not name:
+        flash('Name is required.')
+        return redirect(url_for('specs_edit', spec_id=spec.id))
+    clash = CustomizationSpec.query.filter(
+        CustomizationSpec.name == name,
+        CustomizationSpec.id != spec.id,
+    ).first()
+    if clash:
+        flash(f'A spec named "{name}" already exists.')
+        return redirect(url_for('specs_edit', spec_id=spec.id))
+    spec.name = name
+    spec.description = (request.form.get('description') or '').strip()
+    spec.set_payload(_spec_payload_from_form(request.form))
+    db.session.commit()
+    flash(f'Spec "{name}" updated.')
+    return redirect(url_for('specs_page'))
+
+
+@app.route('/specs/<int:spec_id>/delete', methods=['POST'])
+@login_required
+def specs_delete(spec_id):
+    spec = CustomizationSpec.query.get_or_404(spec_id)
+    name = spec.name
+    db.session.delete(spec)
+    db.session.commit()
+    flash(f'Spec "{name}" deleted.')
+    return redirect(url_for('specs_page'))
+
+
+@app.route('/api/specs', methods=['GET', 'POST', 'OPTIONS'])
+@csrf.exempt
+@login_or_api_token_required
+@with_session_csrf
+def api_specs():
+    if request.method == 'OPTIONS':
+        return '', 204
+    if request.method == 'GET':
+        specs = CustomizationSpec.query.order_by(CustomizationSpec.name.asc()).all()
+        return jsonify({'specs': [s.to_dict() for s in specs]})
+    body = request.json or {}
+    name = (body.get('name') or '').strip()
+    if not name:
+        return _json_field_error('name is required.', name='Required.')
+    if CustomizationSpec.query.filter_by(name=name).first():
+        return _json_field_error(f'Spec "{name}" already exists.', name='Duplicate.')
+    spec = CustomizationSpec(name=name, description=(body.get('description') or '').strip())
+    spec.set_payload(sanitize_spec_payload(body.get('payload') or body))
+    db.session.add(spec)
+    db.session.commit()
+    return jsonify(spec.to_dict()), 201
+
+
+@app.route('/api/specs/<int:spec_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
+@csrf.exempt
+@login_or_api_token_required
+@with_session_csrf
+def api_spec_detail(spec_id):
+    if request.method == 'OPTIONS':
+        return '', 204
+    spec = CustomizationSpec.query.get(spec_id)
+    if not spec:
+        return jsonify({'error': 'Not found.'}), 404
+    if request.method == 'GET':
+        return jsonify(spec.to_dict())
+    if request.method == 'DELETE':
+        db.session.delete(spec)
+        db.session.commit()
+        return jsonify({'ok': True})
+    body = request.json or {}
+    if 'name' in body:
+        name = (body.get('name') or '').strip()
+        if not name:
+            return _json_field_error('name is required.', name='Required.')
+        clash = CustomizationSpec.query.filter(
+            CustomizationSpec.name == name,
+            CustomizationSpec.id != spec.id,
+        ).first()
+        if clash:
+            return _json_field_error(f'Spec "{name}" already exists.', name='Duplicate.')
+        spec.name = name
+    if 'description' in body:
+        spec.description = (body.get('description') or '').strip()
+    if 'payload' in body:
+        spec.set_payload(sanitize_spec_payload(body.get('payload')))
+    db.session.commit()
+    return jsonify(spec.to_dict())
+
+
+def _spec_payload_from_form(form):
+    """Build a non-secret spec payload from the Specs HTML form."""
+    payload = {
+        'timezone': form.get('timezone') or DEFAULT_TIMEZONE,
+        'locale': form.get('locale') or DEFAULT_LOCALE,
+        'workgroup': form.get('workgroup') or DEFAULT_WORKGROUP,
+        'network_mode': form.get('network_mode') or 'static',
+        'bridge': form.get('bridge') or '',
+        'vlan': form.get('vlan') or '',
+        'ip_address': form.get('ip_address') or '',
+        'netmask_cidr': form.get('netmask_cidr') or '',
+        'gateway': form.get('gateway') or '',
+        'dns_servers': form.get('dns_servers') or '',
+        'enable_ipv6': form.get('enable_ipv6') in ('on', 'true', '1'),
+        'ipv6_address': form.get('ipv6_address') or '',
+        'ipv6_prefix': form.get('ipv6_prefix') or '',
+        'ipv6_gateway': form.get('ipv6_gateway') or '',
+        'join_domain': form.get('join_domain') in ('on', 'true', '1'),
+        'domain_profile': form.get('domain_profile') or '',
+        'domain_ou': form.get('domain_ou') or '',
+        'domain_name': form.get('domain_name') or '',
+    }
+    cores = form.get('cores')
+    ram = form.get('ram')
+    if cores:
+        try:
+            payload['cores'] = int(cores)
+        except ValueError:
+            pass
+    if ram:
+        try:
+            payload['ram'] = int(ram)
+        except ValueError:
+            pass
+    return sanitize_spec_payload(payload)
+
 
 @app.route('/clone_form')
 @login_required

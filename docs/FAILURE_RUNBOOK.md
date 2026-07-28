@@ -45,9 +45,31 @@ The guest may be usable. Inspect markers, hostname, IP, and disks, then either:
 - Fix manually and keep the VM, or
 - Delete the clone and re-run Customize with corrected payload (static IP, domain, disks).
 
-## Orphaned clones
+## Orphaned / failed clones
 
-Failed jobs leave the clone on the Proxmox remote. Note `result_vmid` from the task ledger (`GET /api/tasks/<id>` or PDM GuestOS tab) and remove it in PVE when appropriate.
+Failed jobs **do not** auto-delete the clone. GuestOS:
+
+1. Marks the task `FAILURE` (see `message` / `error_code` / `result_vmid`).
+2. Renames the Proxmox VM to `failed-<hostname>` (truncated if needed).
+3. Sets tags **`failed-customization`** and **`lifecycle-failed`**.
+
+Find them in PVE by tag `failed-customization` or name prefix `failed-`. Inspect, then delete manually when done.
+
+### Stage tags (lifecycle-*)
+
+While a customize runs, GuestOS replaces a single `lifecycle-*` tag so operators can see progress in PVE:
+
+| Stage | Tag |
+|-------|-----|
+| Clone / configure | `lifecycle-cloning` |
+| Boot / guest agent | `lifecycle-booting` |
+| Write unattend / setup | `lifecycle-customizing` |
+| Sysprep | `lifecycle-sysprep` |
+| Verify | `lifecycle-verifying` |
+| Success | `lifecycle-ready` |
+| Failure | `lifecycle-failed` (+ `failed-customization`) |
+
+Non-lifecycle tags (e.g. `uuid:…`, family tags) are preserved.
 
 ## Silent disk skip (removed)
 

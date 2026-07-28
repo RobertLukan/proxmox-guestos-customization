@@ -165,20 +165,21 @@ def _guest_setup_marker(vmid):
 
 
 def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
-                           expected_domain=None, timeout=None, on_progress=None):
+                           expected_domain=None, expected_ipv6=None,
+                           timeout=None, on_progress=None):
     """Best-effort post-sysprep verification via the QEMU guest agent.
 
     Returns ``(summary, ok)``. ``ok`` is False when setup.ps1 never completed
     (``setup.done`` missing / ``setup.failed`` present), a required static IP
     never appears, the hostname does not match, or an expected domain join is
-    not observed.
+    not observed. When ``expected_ipv6`` is set, that address must also appear.
     """
     # Always wait for FirstLogon setup.ps1 — specialize hostname alone is not enough.
     # Domain join triggers an extra reboot after Add-Computer — allow more time.
     if timeout is None:
         if expected_domain:
             timeout = 1200
-        elif expected_ip:
+        elif expected_ip or expected_ipv6:
             timeout = 900
         else:
             # DHCP: still wait for setup.done (not just a short lease peek).
@@ -222,6 +223,7 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
         app.logger.warning(f"Could not read hostname for VM {vmid}: {e}")
 
     found_ip = None
+    found_ipv6 = None
     domain_name = None
     part_of_domain = None
     # After setup.done, network/domain should settle quickly; keep a short poll.
@@ -238,11 +240,30 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
                 if addr.get('ip-address-type') == 'ipv4'
                 and not str(addr.get('ip-address', '')).startswith(('127.', '169.254.'))
             ]
+            ips6 = [
+                addr.get('ip-address')
+                for iface in info.get('result', [])
+                for addr in iface.get('ip-addresses', [])
+                if addr.get('ip-address-type') == 'ipv6'
+                and not str(addr.get('ip-address', '')).lower().startswith(('fe80:', '::1'))
+            ]
             if expected_ip:
                 if expected_ip in ips:
                     found_ip = expected_ip
             elif ips:
                 found_ip = ips[0]
+
+            if expected_ipv6:
+                # Compare canonical forms loosely (case / compressed).
+                exp6 = str(expected_ipv6).lower()
+                for candidate in ips6:
+                    if str(candidate).lower() == exp6 or str(candidate).lower().startswith(exp6.split('%')[0]):
+                        found_ipv6 = candidate
+                        break
+                    # Also accept if expanded forms match via string containment of compressed
+                    if exp6 in str(candidate).lower():
+                        found_ipv6 = candidate
+                        break
 
             domain_ready = True
             if expected_domain:
@@ -256,8 +277,9 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
                 )
 
             ip_ready = (found_ip is not None) if expected_ip else bool(found_ip)
-            if expected_ip or expected_domain:
-                if ip_ready and domain_ready:
+            ipv6_ready = (found_ipv6 is not None) if expected_ipv6 else True
+            if expected_ip or expected_domain or expected_ipv6:
+                if ip_ready and domain_ready and ipv6_ready:
                     break
             elif found_ip:
                 break
@@ -301,6 +323,14 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
             # After setup.done, missing DHCP lease is a real failure.
             ip_ok = False
 
+    ipv6_ok = True
+    if expected_ipv6:
+        if found_ipv6:
+            parts.append(f"IPv6 {expected_ipv6} present")
+        else:
+            parts.append(f"IPv6 not assigned (expected {expected_ipv6} not visible)")
+            ipv6_ok = False
+
     domain_ok = True
     if expected_domain:
         if part_of_domain and _domains_match(domain_name, expected_domain):
@@ -323,7 +353,7 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
             )
             domain_ok = False
 
-    ok = hostname_ok and ip_ok and domain_ok
+    ok = hostname_ok and ip_ok and ipv6_ok and domain_ok
     return "; ".join(parts), ok
 
 
