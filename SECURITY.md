@@ -55,7 +55,17 @@ Releases may attach checksums and an SBOM. These checks reduce risk; they do
 
 - Deploy behind TLS (`BEHIND_REVERSE_PROXY=True`); see [docs/TLS_PRODUCTION.md](docs/TLS_PRODUCTION.md).
 - Set a strong `SECRET_KEY`; never commit `.env`.
-- Use a dedicated PVE API user with only the rights GuestOS needs.
+- Use a dedicated PVE API user with only the rights GuestOS needs — see
+  [docs/INSTALL.md](docs/INSTALL.md) (**Proxmox privileges**).
 - Keep `GUESTOS_API_TOKEN` / `GUESTOS_LAUNCH_SECRET` off shared clients and out of
   UI wasm / screenshots.
 - Review templates and network before bulk Win11 provisioning.
+
+## Proxmox privileges (summary)
+
+GuestOS needs a Proxmox principal that can **clone a Windows template, fully
+configure and power the new VM, and use the QEMU guest agent** (file write +
+command exec). Prefer a dedicated role on a pool (or `/` in lab), not
+`root@pam`. Operators using the UI/PDM do not need those PVE rights.
+
+Full privilege list and layout: [docs/INSTALL.md — Proxmox privileges](docs/INSTALL.md#proxmox-privileges).

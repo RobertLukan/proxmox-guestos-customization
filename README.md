@@ -178,6 +178,7 @@ These checks reduce risk; they do not replace your own review or lab testing.
 Operator notes:
 
 - Run behind TLS (`BEHIND_REVERSE_PROXY=True`). Production: [docs/TLS_PRODUCTION.md](docs/TLS_PRODUCTION.md).
+- Proxmox API privileges (clone / config / power / guest agent): [docs/INSTALL.md](docs/INSTALL.md#proxmox-privileges).
 - Keep `GUESTOS_LAUNCH_SECRET` / `GUESTOS_API_TOKEN` on the GuestOS host and in PDM `guestos.cfg` only (not in UI wasm).
 - Do not re-enable in-place Sysprep on arbitrary VMs.
 - There is **no** superadmin bypass for provisioning caps — size exceptions in Proxmox VE.

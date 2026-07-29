@@ -35,7 +35,7 @@ In production:
 | Who | Needs |
 |-----|--------|
 | **Deployer** (once / after upgrades) | Root or sudo on the GuestOS VM; on PDM host only if installing the fork packages + writing `guestos.cfg` |
-| **GuestOS runtime** | Proxmox API user (clone, config, start/stop, guest agent) — **not** Proxmox root on every node unless you choose that |
+| **GuestOS runtime** | Proxmox API user (clone, config, start/stop, guest agent) — **not** Proxmox root on every node unless you choose that. Details: [Proxmox privileges](#proxmox-privileges) |
 | **PDM service** | Read `guestos.cfg` (`www-data`); outbound HTTPS to GuestOS |
 | **Day-to-day operators** | PDM login **or** GuestOS UI login — **no** SSH, **no** API tokens, **no** Proxmox passwords |
 
@@ -80,10 +80,68 @@ python3 -c 'import secrets; print(secrets.token_hex(32))'  # GUESTOS_LAUNCH_SECR
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'  # GUESTOS_API_TOKEN
 ```
 
-Create a dedicated Proxmox API **user** with rights to clone templates,
-configure NICs, start/stop VMs, and use the guest agent. GuestOS authenticates
-to PVE with `PROXMOX_USER` + `PROXMOX_PASSWORD` (see `.env.example`). Prefer a
-least-privilege user over embedding `root@pam`.
+GuestOS authenticates to PVE with `PROXMOX_USER` + `PROXMOX_PASSWORD` (see
+`.env.example`). Prefer a dedicated least-privilege user over `root@pam`.
+See **Proxmox privileges** below.
+
+### Proxmox privileges
+
+GuestOS is an automation sidecar. Privilege planning has three layers:
+
+| Layer | Who | Needs |
+|-------|-----|--------|
+| **GuestOS Linux host** | Deployer / runtime | Docker Compose; outbound reachability to Proxmox API `:8006` (and AD DNS if joining domains). No day-to-day SSH into every PVE node. |
+| **Proxmox API user** | Stored only in GuestOS `.env` / `PVE_REMOTES_JSON` | Rights to clone templates, configure and power the **new** VM, and drive the QEMU guest agent (see below). |
+| **Operators** | Browser / PDM | GuestOS UI login or PDM login only — **no** PVE password, **no** API tokens. |
+
+Optional **AD join** credentials (`DOMAIN_PROFILES_JSON`) are separate from PVE
+ACLs: that account only needs rights to join computers to the domain (and OU if
+you set `domain_ou`).
+
+#### What the API user does
+
+| Area | GuestOS actions |
+|------|-----------------|
+| Inventory / read | List VMs/templates, read QEMU config, list node bridges, storage used% |
+| Allocate / clone | Cluster `nextid`, clone template → new VM |
+| Configure clone | Cores/RAM, NICs/VLAN/bridge, tags, rename (`failed-…`), optional disk attach/resize |
+| Power | Start / stop |
+| Guest agent | File write (unattend / `setup.ps1`), guest command exec, fsinfo / network checks |
+| Optional cleanup | Delete VM (lab smoke / `--cleanup` only — not used for normal failed jobs) |
+
+#### Recommended privileges (PVE 8.x-style names)
+
+Create a role (e.g. `GuestOS`) and assign it to `guestos@pve` on a **limited
+path**: a pool that holds your Windows golden templates and where clones land
+(tighter), or `/` for a simple lab.
+
+On that path, typically include:
+
+- `VM.Audit` / `VM.Monitor` — read config and status  
+- `VM.Clone` — clone from template  
+- `VM.Allocate` — create (and delete) VMs  
+- `VM.Config.Options`, `VM.Config.CPU`, `VM.Config.Memory`, `VM.Config.Network`,
+  `VM.Config.Disk` — name, tags, hardware, NICs, disks  
+- `VM.PowerMgmt` — start / stop  
+- **Guest agent** (required for Sysprep customize):  
+  `VM.GuestAgent.Audit`, `VM.GuestAgent.FileRead`, `VM.GuestAgent.FileWrite`,
+  plus the privilege your PVE build exposes for **guest command execution**
+  (without exec/file-write, jobs fail after clone)  
+- `Datastore.Audit` — storage % safeguards  
+- `Datastore.AllocateSpace` — if you use Configure disks (`manage_disks` on
+  Server templates)  
+- Enough node/network visibility to list bridges (often `Sys.Audit` on the node,
+  or equivalent SDN/bridge ACL if you use those)
+
+Exact labels can vary slightly by Proxmox version; map them in
+**Datacenter → Permissions → Roles**. If clone works but Sysprep never starts,
+the usual gap is **guest agent file-write / exec**.
+
+#### What you do *not* need
+
+- Full Datacenter Administrator / `root@pam` for normal operation  
+- Host SSH to hypervisors for day-to-day customize jobs  
+- Giving operators the Proxmox API password (keep it on the GuestOS host only)
 
 ---
 
@@ -265,7 +323,7 @@ Do **not** expose Redis or `:5001` on a public interface.
 
 - [ ] Trusted TLS on GuestOS; `PROXMOX_VERIFY_SSL=true` (and remotes)
 - [ ] Default GuestOS UI password changed
-- [ ] Dedicated Proxmox API principal (least privilege)
+- [ ] Dedicated Proxmox API principal (least privilege) — see [Proxmox privileges](#proxmox-privileges)
 - [ ] `GUESTOS_API_TOKEN` / `GUESTOS_LAUNCH_SECRET` only on GuestOS + PDM cfg
 - [ ] PDM packages held; `verify-tls: true`
 - [ ] Real `DOMAIN_PROFILES_JSON` if joining AD
