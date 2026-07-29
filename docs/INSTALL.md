@@ -8,7 +8,7 @@ self-signed shortcuts live in [PDM_INTEGRATION.md](PDM_INTEGRATION.md)
 
 | Piece | Role | How you install it |
 |-------|------|--------------------|
-| **GuestOS** | Sidecar that clones Windows templates and runs Sysprep customize | Docker Compose on a Linux host that can reach Proxmox APIs |
+| **GuestOS** | Sidecar that clones Windows templates and runs Sysprep customize | Docker Compose (or Podman Compose) on a Linux host that can reach Proxmox APIs |
 | **PDM GuestOS fork** *(optional)* | Thin PDM UI + server proxy: **Customize** button + **GuestOS** task tab | Debian `.deb` packages built from the fork, installed on the PDM host |
 
 You can run **GuestOS alone** (browser UI + machine API). PDM is optional glue
@@ -49,10 +49,70 @@ shipped in the PDM UI wasm and are never needed by end users.
 ### Hosts
 
 - **GuestOS host:** Linux with Docker Engine + Compose v2 (amd64 recommended for
-  Proxmox utility VMs). Open **TCP 443** to operators and to the PDM host.
+  Proxmox utility VMs), **or** Podman with a Compose-compatible CLI
+  (`podman compose` / equivalent). Open **TCP 443** to operators and to the PDM host.
 - **Proxmox:** API reachable from the GuestOS **worker** (usually `:8006`).
 - **PDM host** *(optional):* existing Proxmox Datacenter Manager install where
   you will replace upstream packages with the GuestOS fork builds.
+
+### Packages / tools (GuestOS host)
+
+Install these **before** `git clone` / Compose. The quick-start assumes they
+are already on `PATH`:
+
+| Tool | Why |
+|------|-----|
+| **`git`** | Clone the repository (or skip if you unpack a release tarball instead) |
+| **`curl`** | Health / version checks after bring-up (`/api/health`, `/api/version`) |
+| **Docker Engine + Compose v2** *or* **Podman** + a **Compose v2-compatible** provider | Run `web` / `worker` / `redis` / `caddy` |
+| **`python3`** *(optional on host)* | Generating secrets below; not required inside Compose containers |
+
+**Compose must be v2** (the `docker compose` / `podman compose` plugin style).
+GuestOS’s `docker-compose.yml` uses Compose Spec features such as
+`depends_on: … condition: service_healthy`. Do **not** use the old Python
+package **`docker-compose` 1.x** (`docker-compose==1.29.x`): on Python 3.12+ it
+fails with `ModuleNotFoundError: No module named 'distutils'`, and it is not a
+supported deploy path for this project.
+
+Example on Debian/Ubuntu-style hosts (adjust for your distro):
+
+```bash
+sudo apt update
+sudo apt install -y git curl ca-certificates
+
+# Option A — Docker Engine + Compose v2 plugin
+# sudo apt install -y docker.io docker-compose-v2
+# Confirm: docker compose version   # should print "Docker Compose version v2.…"
+
+# Option B — Podman (do NOT rely on the broken Compose v1 shim alone)
+# sudo apt install -y podman podman-docker docker-compose-v2
+#   # or: sudo apt install -y podman podman-compose
+# Prefer:  podman compose version   # or: podman-compose --version
+# Avoid:   a `docker compose` that shells out to /usr/bin/docker-compose 1.29.x
+```
+
+Confirm before continuing:
+
+```bash
+git --version
+curl --version | head -1
+docker compose version 2>/dev/null || podman compose version 2>/dev/null || podman-compose --version
+```
+
+If `docker compose` prints *“Executing external compose provider …
+/usr/bin/docker-compose”* and then crashes on `distutils`, you still have
+**Compose v1**. Fix by installing **`docker-compose-v2`** or **`podman-compose`**,
+then either:
+
+```bash
+# Prefer calling Podman directly
+podman compose up -d --build
+# or
+podman-compose up -d --build
+```
+
+or ensure `docker compose version` reports **v2.x** (not `docker-compose` 1.29).
+Optional: `touch /etc/containers/nodocker` to silence the podman-docker banner.
 
 ### Windows golden image
 
@@ -197,10 +257,19 @@ at `127.0.0.1:5001`). See [TLS_PRODUCTION.md](TLS_PRODUCTION.md).
 
 ### 2.4 Start Compose
 
+Compose **v2** required (see [Packages / tools](#packages--tools-guestos-host)):
+
 ```bash
 docker compose up -d --build
+# Podman (if docker compose still points at Compose v1):
+# podman compose up -d --build
+#   or: podman-compose up -d --build
+
 curl -fsS "https://${GUESTOS_TLS_HOST}/api/health"
 curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
+# Lab self-signed (gen-selfsigned.sh): skip TLS verify with -k / --insecure
+# curl -fsSk "https://${GUESTOS_TLS_HOST}/api/health"
+# curl -fsSk "https://${GUESTOS_TLS_HOST}/api/version"
 ```
 
 Services: **Caddy** (`:443`), **web** (loopback `:5001`), **worker**, **Redis**.
@@ -321,6 +390,7 @@ Do **not** expose Redis or `:5001` on a public interface.
 
 ## 6. Production checklist (short)
 
+- [ ] GuestOS host has `git`, `curl`, and Docker/Podman + Compose
 - [ ] Trusted TLS on GuestOS; `PROXMOX_VERIFY_SSL=true` (and remotes)
 - [ ] Default GuestOS UI password changed
 - [ ] Dedicated Proxmox API principal (least privilege) — see [Proxmox privileges](#proxmox-privileges)

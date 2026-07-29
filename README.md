@@ -62,9 +62,10 @@ From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launc
 
 ## Prerequisites (short)
 
+- GuestOS host packages: **`git`**, **`curl`**, and **Docker Engine + Compose v2** (or **Podman** with Compose **v2** / `podman-compose` — not the old Python `docker-compose` 1.x).
 - Proxmox VE API reachable from the GuestOS **worker** (clone, config, start/stop, guest agent).
 - Windows **template** with working QEMU Guest Agent — details: [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md).
-- Linux host with Docker Engine + Compose v2 (recommended), or Python 3.12+ for local/venv.
+- For local/venv instead of Compose: Python 3.12+ (plus Redis for Celery).
 
 ## Installation
 
@@ -91,12 +92,14 @@ cp .env.example .env
 # Optional: GUESTOS_API_TOKEN / GUESTOS_LAUNCH_SECRET (PDM), DOMAIN_PROFILES_JSON, etc.
 chmod +x deploy/caddy/gen-selfsigned.sh
 ./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"   # lab self-signed; use real certs in prod
-docker compose up -d --build
+docker compose up -d --build   # need Compose v2; on Podman prefer: podman compose up -d --build
 curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
+# Lab self-signed cert: add -k (or --insecure), e.g. curl -fsSk "https://${GUESTOS_TLS_HOST}/api/version"
 ```
 
 - **HTTPS:** `https://<GUESTOS_TLS_HOST>/` (Caddy `:443`)
 - **HTTP loopback debug:** `http://127.0.0.1:5001` on the GuestOS host only
+- **Podman note:** `podman-docker` alone is not enough if `docker compose` still invokes Python **`docker-compose` 1.29** (fails on Python 3.12 with `No module named 'distutils'`). Install `docker-compose-v2` or `podman-compose` and confirm `docker compose version` / `podman compose version` shows **v2**. Details: [docs/INSTALL.md](docs/INSTALL.md#packages--tools-guestos-host).
 
 Default UI password: `changeme` — change it immediately via **Change Password**.
 
@@ -110,9 +113,9 @@ cp .env.example .env   # set SECRET_KEY + PROXMOX_*; see Configuration below
 python3 init_db.py
 ```
 
-### Offline / Compose V1
+### Offline / platform notes
 
-See `docker-compose.offline.yml`. Prefer `--platform linux/amd64` for Proxmox utility VMs. If only `docker-compose` (V1) exists: `docker-compose up -d`.
+See `docker-compose.offline.yml`. Prefer `--platform linux/amd64` for Proxmox utility VMs. **Compose v1 (`docker-compose` 1.x) is not supported** for this stack.
 
 ## Configuration
 
@@ -187,6 +190,7 @@ Smoke helpers (after `.env` is set):
 ```bash
 venv/bin/python scripts/smoke_check.py
 python3 scripts/pdm_api_smoke.py --base-url "https://${GUESTOS_TLS_HOST}" --token "$GUESTOS_API_TOKEN"
+# Lab self-signed: add --insecure to pdm_api_smoke.py
 ```
 
 ## Development / Testing
