@@ -218,9 +218,10 @@ git clone https://github.com/RobertLukan/proxmox-guestos-customization.git \
 cd /opt/proxmox-guestos-customization
 ```
 
-(Air-gapped: copy a release tarball **plus** pre-pulled images via `docker save` /
-`docker load` — see README **Platform notes**. Use the same
-`docker-compose.yml` + `docker-compose.ghcr.yml` path with `--no-build`.)
+(Air-gapped: copy a release tarball **plus** pre-pulled **`linux/amd64`** images via
+`docker pull --platform linux/amd64` → `docker save` / `docker load` — see README
+**Platform notes**. Use `docker-compose.yml` + `docker-compose.ghcr.yml` with
+`--no-build` and `DOCKER_DEFAULT_PLATFORM=linux/amd64`.)
 
 ### 2.2 Configure `.env`
 

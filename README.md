@@ -136,25 +136,33 @@ python3 init_db.py
 
 ### Platform notes
 
-Prefer **`linux/amd64`** for Proxmox utility VMs. **Compose v1 (`docker-compose` 1.x) is not supported.**
+GuestOS container images are published for **`linux/amd64`** only (typical Proxmox
+utility VM). **Compose v1 (`docker-compose` 1.x) is not supported.**
 
-**Air-gapped hosts** (no registry access): on a connected machine pull and save the images, copy the archive across, then load and start with the normal GHCR overlay (`--no-build`). You still need the repo (or release tarball) for `docker-compose*.yml`, `.env`, and Caddy certs — not a separate compose file.
+**Air-gapped hosts** (no registry access): on a connected machine pull **amd64**
+images and save them, copy the archive across, then load and start with the
+normal GHCR overlay (`--no-build`). You still need the repo (or release tarball)
+for `docker-compose*.yml`, `.env`, and Caddy certs — not a separate compose file.
+Always pin `--platform linux/amd64` when pulling so a non-amd64 build host does
+not save the wrong architecture.
 
 ```bash
-# Connected machine
+# Connected machine (force amd64 even on Apple Silicon / ARM builders)
+PLATFORM=linux/amd64
 VER=2.5.1
-docker pull "ghcr.io/robertlukan/proxmox-guestos-customization:${VER}"
-docker pull redis:7-alpine
-docker pull caddy:2.8-alpine
+docker pull --platform "$PLATFORM" "ghcr.io/robertlukan/proxmox-guestos-customization:${VER}"
+docker pull --platform "$PLATFORM" redis:7-alpine
+docker pull --platform "$PLATFORM" caddy:2.8-alpine
 docker save \
   "ghcr.io/robertlukan/proxmox-guestos-customization:${VER}" \
   redis:7-alpine \
   caddy:2.8-alpine \
-  | gzip > "guestos-${VER}-images.tar.gz"
+  | gzip > "guestos-${VER}-amd64-images.tar.gz"
 
-# Air-gapped machine (after unpacking the release / git tree and configuring .env)
-gunzip -c "guestos-${VER}-images.tar.gz" | docker load
+# Air-gapped amd64 machine (after unpacking the release / git tree and configuring .env)
+gunzip -c "guestos-${VER}-amd64-images.tar.gz" | docker load
 export GUESTOS_VERSION="${VER}"
+export DOCKER_DEFAULT_PLATFORM=linux/amd64
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 ```
 
