@@ -86,8 +86,9 @@ From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launc
 git clone https://github.com/RobertLukan/proxmox-guestos-customization/
 cd proxmox-guestos-customization
 cp .env.example .env
-# Edit .env: SECRET_KEY, PROXMOX_*, PRIMARY_BRIDGE, BEHIND_REVERSE_PROXY=True,
-# GUESTOS_TLS_HOST=<your-dns-or-ip>, optional GUESTOS_API_TOKEN / GUESTOS_LAUNCH_SECRET
+# Required: SECRET_KEY, PROXMOX_HOST/USER/PASSWORD.
+# Compose HTTPS: GUESTOS_TLS_HOST, BEHIND_REVERSE_PROXY=True; set PRIMARY_BRIDGE to your PVE bridge.
+# Optional: GUESTOS_API_TOKEN / GUESTOS_LAUNCH_SECRET (PDM), DOMAIN_PROFILES_JSON, etc.
 chmod +x deploy/caddy/gen-selfsigned.sh
 ./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"   # lab self-signed; use real certs in prod
 docker compose up -d --build
@@ -105,7 +106,7 @@ Default UI password: `changeme` — change it immediately via **Change Password*
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # SECRET_KEY is required
+cp .env.example .env   # set SECRET_KEY + PROXMOX_*; see Configuration below
 python3 init_db.py
 ```
 
@@ -115,24 +116,65 @@ See `docker-compose.offline.yml`. Prefer `--platform linux/amd64` for Proxmox ut
 
 ## Configuration
 
-See [`.env.example`](.env.example). Key variables:
+Full list and comments: [`.env.example`](.env.example). Summary by necessity:
 
-| Variable | Purpose |
-|----------|---------|
-| `PROXMOX_HOST` / `USER` / `PASSWORD` | Proxmox API (user + password; dedicated least-privilege user preferred) |
-| `PROXMOX_VERIFY_SSL` | TLS verify for Proxmox API (use `True` in production) |
-| `GUESTOS_API_TOKEN` / `API_TOKENS` | Machine API auth for PDM / integrators |
-| `PVE_REMOTES_JSON` | Optional named remotes (`remote_id` in sysprep JSON) |
-| `GUESTOS_LAUNCH_SECRET` | HMAC secret for PDM `/launch` (must match PDM `guestos.cfg`) |
-| `GUESTOS_TLS_HOST` | Hostname/IP for Caddy TLS |
-| `PRIMARY_BRIDGE` | Bridge for the cloned VM NIC |
-| `SECRET_KEY` | **Required** — sessions + CSRF |
-| `BEHIND_REVERSE_PROXY` | ProxyFix + Secure cookies (set `True` with Compose Caddy) |
-| `DOMAIN_PROFILES_JSON` | Named AD/network profiles |
-| `BULK_MAX_ITEMS` / `PROVISION_MAX_PER_DAY` | Batch size (default 10) and daily task quota (20) |
-| `BULK_MAX_CONCURRENT_GLOBAL` | Inflight clone/sysprep tasks (default 10) |
-| `WIN11_*` / `SERVER_*` | Cores / RAM / disk ceilings per template family |
-| `STORAGE_WARN_PCT` / `STORAGE_BLOCK_PCT` | Storage used% warn (65) / block (80) |
+### Required (app will not work usefully without these)
+
+| Variable | Notes |
+|----------|--------|
+| `SECRET_KEY` | **Hard required** — app refuses to start without it (sessions + CSRF). Generate: `python -c 'import secrets; print(secrets.token_hex())'` |
+| `PROXMOX_HOST` | PVE API hostname or IP (no default) |
+| `PROXMOX_USER` | PVE API user, e.g. `guestos@pve` (dedicated least-privilege user preferred) |
+| `PROXMOX_PASSWORD` | Password for that user (GuestOS uses user+password, not PVE API tokens) |
+| `PRIMARY_BRIDGE` | Bridge for cloned VM NICs. Defaults to `vmbr0` if unset — set explicitly to match your cluster |
+
+### Required for Docker Compose HTTPS (recommended deploy)
+
+| Variable | Notes |
+|----------|--------|
+| `GUESTOS_TLS_HOST` | Public DNS or IP operators use in the browser; used by Caddy / cert SAN |
+| `BEHIND_REVERSE_PROXY` | Set `True` with Compose Caddy (or any TLS reverse proxy) — Secure cookies + ProxyFix |
+
+### Strongly recommended in production
+
+| Variable | Default | Notes |
+|----------|---------|--------|
+| `PROXMOX_VERIFY_SSL` | `False` | Set `True` when PVE has a trusted cert (or trust your CA in the containers) |
+| `REDIS_PASSWORD` | unset | Protects Redis; Compose rewrites Celery URLs when set |
+
+### Optional — PDM / machine API
+
+| Variable | Notes |
+|----------|--------|
+| `GUESTOS_API_TOKEN` / `API_TOKENS` | Bearer / `X-Api-Token` for sysprep start/poll without a browser session |
+| `GUESTOS_LAUNCH_SECRET` | HMAC secret for PDM one-click `/launch` (must match PDM `guestos.cfg`) |
+| `GUESTOS_LAUNCH_TTL` | Launch token lifetime seconds (default `300`) |
+| `GUESTOS_CORS_ORIGINS` | Empty disables CORS (preferred). Comma-separated origins, or `*` for lab-only direct browser calls |
+| `PVE_REMOTES_JSON` | Named remotes for multi-cluster; omit `remote_id` in requests to use default `PROXMOX_*` |
+
+### Optional — AD, paths, runtime plumbing
+
+| Variable | Default | Notes |
+|----------|---------|--------|
+| `DOMAIN_PROFILES_JSON` | `{}` | Named AD / DNS / VLAN profiles for domain join |
+| `GUESTOS_PATH_PREFIX` | empty | Subpath mount (e.g. `/guestos`); leave empty at site root |
+| `DATABASE_URL` | `sqlite:///site.db` | SQLAlchemy URL |
+| `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | local Redis | Compose overrides to the `redis` service |
+| `PORT` | `5001` | Web listen port (Compose maps loopback `5001`) |
+
+### Optional — limits and Sysprep timing
+
+| Variable | Default | Notes |
+|----------|---------|--------|
+| `BULK_MAX_ITEMS` | `10` | Max hosts per bulk request |
+| `BULK_MAX_INFLIGHT_BATCHES` | `10` | Max concurrent bulk batches |
+| `BULK_MAX_CONCURRENT_PER_REMOTE` / `BULK_MAX_CONCURRENT_GLOBAL` | `10` / `10` | Inflight clone/sysprep caps |
+| `PROVISION_MAX_PER_DAY` | `20` | Daily task quota |
+| `WIN11_*` / `SERVER_*` | see `.env.example` | Cores / RAM / disk ceilings per template family |
+| `STORAGE_WARN_PCT` / `STORAGE_BLOCK_PCT` | `65` / `80` | Storage used% warn / block |
+| `SYSPREP_BOOT_SETTLE_SECONDS` / `SYSPREP_AGENT_STABLE_SECONDS` | `180` / `60` | Lab may lower; leave unset in production |
+
+Proxmox privilege checklist: [docs/INSTALL.md](docs/INSTALL.md#proxmox-privileges).
 
 ## Usage
 
