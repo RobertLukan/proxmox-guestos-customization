@@ -520,7 +520,7 @@ def api_provision_limits():
                     provision_limits_snapshot(family=family, template_vmid=template_vmid)
                 )
     except Exception as e:
-        logging.warning('provision_limits: %s', public_error_text(e, fallback='query failed'))
+        logging.warning('provision_limits failed (%s)', type(e).__name__)
         snap = provision_limits_snapshot(family='win11', template_vmid=None)
         snap['warning'] = 'Could not query provisioning limits; showing defaults.'
         return jsonify(snap)

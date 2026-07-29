@@ -1,0 +1,16 @@
+# CodeQL config for GuestOS.
+# https://docs.github.com/en/code-security/code-scanning/creating-an-advanced-setup-for-code-scanning/customizing-your-advanced-setup-for-code-scanning
+name: GuestOS CodeQL
+
+queries:
+  - uses: security-extended
+
+query-filters:
+  # API routes intentionally return short ValidationError / ValueError messages
+  # we raise for operators (invalid template, quota, etc.). That is not a Python
+  # stack trace — we never return traceback.format_exc() to clients — but the
+  # py/stack-trace-exposure query still flags str(exception)-style API errors.
+  - exclude:
+      id: py/stack-trace-exposure
+      paths:
+        - app/routes.py

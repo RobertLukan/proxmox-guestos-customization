@@ -152,9 +152,9 @@ def _template_name_tags(vmid, node=None, proxmox=None):
                 cfg = proxmox.nodes(node).qemu(vmid).config.get() or {}
             except Exception as e:
                 logging.warning(
-                    "Could not read template metadata for VM %s: %s",
-                    vmid,
-                    sanitize_log_fragment(e),
+                    "Could not read template metadata for VM %s (%s)",
+                    sanitize_log_fragment(vmid, max_len=32),
+                    type(e).__name__,
                 )
                 cfg = {}
             name = name or cfg.get('name')
@@ -245,9 +245,9 @@ def get_vm_ostype(vmid, node=None, proxmox=None):
         cfg = proxmox.nodes(node).qemu(vmid).config.get()
     except Exception as e:
         logging.warning(
-            "Could not read ostype for VM %s: %s",
-            vmid,
-            sanitize_log_fragment(e),
+            "Could not read ostype for VM %s (%s)",
+            sanitize_log_fragment(vmid, max_len=32),
+            type(e).__name__,
         )
         return None
     return cfg.get('ostype')
