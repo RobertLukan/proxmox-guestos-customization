@@ -28,7 +28,7 @@ services:
       - guestos
 
   web:
-    # Explicit image name so offline `docker load` + `up --no-build` works.
+    # Local build tags this name; GHCR overlay overrides it (see docker-compose.ghcr.yml).
     image: proxmox-guestos-customization-web:latest
     build: .
     # Initialize the database (idempotent) then start the web server.

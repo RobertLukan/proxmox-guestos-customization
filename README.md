@@ -102,7 +102,7 @@ curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
 
 Image: `ghcr.io/robertlukan/proxmox-guestos-customization` ([package](https://github.com/RobertLukan/proxmox-guestos-customization/pkgs/container/proxmox-guestos-customization)). Always use `--no-build` with the GHCR overlay.
 
-**Option B — build from source** (dev / offline / before an image exists for a commit):
+**Option B — build from source** (dev, or when you want a local image for an unreleased commit):
 
 ```bash
 git clone https://github.com/RobertLukan/proxmox-guestos-customization/
@@ -134,9 +134,29 @@ cp .env.example .env   # set SECRET_KEY + PROXMOX_*; see Configuration below
 python3 init_db.py
 ```
 
-### Offline / platform notes
+### Platform notes
 
-See `docker-compose.offline.yml`. Prefer `--platform linux/amd64` for Proxmox utility VMs. **Compose v1 (`docker-compose` 1.x) is not supported** for this stack.
+Prefer **`linux/amd64`** for Proxmox utility VMs. **Compose v1 (`docker-compose` 1.x) is not supported.**
+
+**Air-gapped hosts** (no registry access): on a connected machine pull and save the images, copy the archive across, then load and start with the normal GHCR overlay (`--no-build`). You still need the repo (or release tarball) for `docker-compose*.yml`, `.env`, and Caddy certs — not a separate compose file.
+
+```bash
+# Connected machine
+VER=2.5.1
+docker pull "ghcr.io/robertlukan/proxmox-guestos-customization:${VER}"
+docker pull redis:7-alpine
+docker pull caddy:2.8-alpine
+docker save \
+  "ghcr.io/robertlukan/proxmox-guestos-customization:${VER}" \
+  redis:7-alpine \
+  caddy:2.8-alpine \
+  | gzip > "guestos-${VER}-images.tar.gz"
+
+# Air-gapped machine (after unpacking the release / git tree and configuring .env)
+gunzip -c "guestos-${VER}-images.tar.gz" | docker load
+export GUESTOS_VERSION="${VER}"
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
+```
 
 ## Configuration
 

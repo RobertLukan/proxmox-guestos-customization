@@ -218,8 +218,9 @@ git clone https://github.com/RobertLukan/proxmox-guestos-customization.git \
 cd /opt/proxmox-guestos-customization
 ```
 
-(Air-gapped: copy a release tarball or pre-built amd64 images; see
-`docker-compose.offline.yml`.)
+(Air-gapped: copy a release tarball **plus** pre-pulled images via `docker save` /
+`docker load` — see README **Platform notes**. Use the same
+`docker-compose.yml` + `docker-compose.ghcr.yml` path with `--no-build`.)
 
 ### 2.2 Configure `.env`
 
