@@ -1,0 +1,27 @@
+# Pull pre-built GuestOS images from GHCR (no local Dockerfile build).
+#
+# Prerequisites: Compose v2, .env configured, TLS certs as usual.
+# Package (public): ghcr.io/robertlukan/proxmox-guestos-customization
+#
+#   export GUESTOS_VERSION=2.5.1          # or v2.5.1 — both tags are published
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
+#
+# Podman:
+#   podman compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+#   podman compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
+#
+# Always pass --no-build so Compose does not rebuild from the local Dockerfile.
+
+services:
+  web:
+    image: ghcr.io/robertlukan/proxmox-guestos-customization:${GUESTOS_VERSION:-latest}
+    pull_policy: always
+
+  worker:
+    image: ghcr.io/robertlukan/proxmox-guestos-customization:${GUESTOS_VERSION:-latest}
+    pull_policy: always
+
+  verify-worker:
+    image: ghcr.io/robertlukan/proxmox-guestos-customization:${GUESTOS_VERSION:-latest}
+    pull_policy: always

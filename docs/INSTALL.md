@@ -257,14 +257,34 @@ at `127.0.0.1:5001`). See [TLS_PRODUCTION.md](TLS_PRODUCTION.md).
 
 ### 2.4 Start Compose
 
-Compose **v2** required (see [Packages / tools](#packages--tools-guestos-host)):
+Compose **v2** required (see [Packages / tools](#packages--tools-guestos-host)).
+
+**Preferred — pull from GHCR** (image published on each `v*` release):
+
+```bash
+export GUESTOS_VERSION=2.5.1   # pin; both 2.5.1 and v2.5.1 tags exist on GHCR
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
+# Podman: podman compose -f docker-compose.yml -f docker-compose.ghcr.yml …
+```
+
+Image: `ghcr.io/robertlukan/proxmox-guestos-customization` —
+[package page](https://github.com/RobertLukan/proxmox-guestos-customization/pkgs/container/proxmox-guestos-customization).
+If pulls fail with 403/404 on a public repo, open the package → **Package settings** →
+set visibility to **Public** (needed once after the first publish).
+
+**Alternative — build locally:**
 
 ```bash
 docker compose up -d --build
 # Podman (if docker compose still points at Compose v1):
 # podman compose up -d --build
 #   or: podman-compose up -d --build
+```
 
+Then verify:
+
+```bash
 curl -fsS "https://${GUESTOS_TLS_HOST}/api/health"
 curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
 # Lab self-signed (gen-selfsigned.sh): skip TLS verify with -k / --insecure
@@ -380,7 +400,7 @@ Do **not** expose Redis or `:5001` on a public interface.
 
 | Task | How |
 |------|-----|
-| Upgrade GuestOS | `git pull` (or new release tarball) → `docker compose up -d --build` |
+| Upgrade GuestOS | Prefer `export GUESTOS_VERSION=…` → `docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull && … up -d --no-build`. Or `git pull` → `docker compose up -d --build`. |
 | Upgrade PDM fork | Rebuild `.deb`s → install → keep `apt-mark hold` |
 | Rotate secrets | Change `.env` + matching `guestos.cfg` → restart Compose + PDM service |
 | After major workflow changes | Run lab/prod smoke once (API script and/or one PDM Customize) — not a daily cron |
@@ -390,7 +410,8 @@ Do **not** expose Redis or `:5001` on a public interface.
 
 ## 6. Production checklist (short)
 
-- [ ] GuestOS host has `git`, `curl`, and Docker/Podman + Compose
+- [ ] GuestOS host has `git`, `curl`, and Docker/Podman + Compose v2
+- [ ] (If using GHCR pull) package visibility is Public; `GUESTOS_VERSION` pinned
 - [ ] Trusted TLS on GuestOS; `PROXMOX_VERIFY_SSL=true` (and remotes)
 - [ ] Default GuestOS UI password changed
 - [ ] Dedicated Proxmox API principal (least privilege) — see [Proxmox privileges](#proxmox-privileges)

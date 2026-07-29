@@ -1,18 +1,26 @@
 name: Release artifacts
 
-# Create a GitHub Release when a version tag is pushed (e.g. v2.5.0).
-# Attaches SHA256 checksums for the source archive and an SBOM of runtime deps.
+# On version tags (e.g. v2.5.1): GitHub Release (tarball + SBOM) and publish
+# the app image to GHCR for pull-based Compose deploys.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing git tag to build/push image for (e.g. v2.5.1). Leave empty to use VERSION file only for image publish.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   release:
     name: Checksums + SBOM
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,9 +48,109 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          body: |
+            ## Container image (GHCR)
+
+            Pre-built amd64 image (same image for `web`, `worker`, and `verify-worker`):
+
+            ```text
+            ghcr.io/robertlukan/proxmox-guestos-customization:<version>
+            ```
+
+            Example for this tag (strip or keep the leading `v` — both are published):
+
+            ```bash
+            export GUESTOS_VERSION=${{ github.ref_name }}
+            docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
+            ```
+
+            Package page: https://github.com/${{ github.repository }}/pkgs/container/proxmox-guestos-customization
+
+            First-time note: if the package is private, set it to **Public** under
+            Package settings (GitHub → Packages).
           files: |
             ${{ env.ARCHIVE }}
             SHA256SUMS
             sbom.cdx.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  image:
+    name: Publish GHCR image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve checkout ref
+        id: meta
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            REF="${{ inputs.tag }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            REF="${GITHUB_REF_NAME}"
+          else
+            REF=""
+          fi
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.ref || github.ref }}
+
+      - name: Image tags from VERSION / git tag
+        id: tags
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [ -z "${VERSION}" ]; then
+            echo "VERSION file is empty" >&2
+            exit 1
+          fi
+          # Prefer git tag when releasing; strip leading v for the bare version tag.
+          RAW_REF="${{ steps.meta.outputs.ref }}"
+          if [ -n "${RAW_REF}" ]; then
+            TAG_NAME="${RAW_REF}"
+          else
+            TAG_NAME="v${VERSION}"
+          fi
+          VERSION_NOPREFIX="${TAG_NAME#v}"
+          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          REPO_LC="$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${OWNER_LC}/${REPO_LC}"
+          {
+            echo "version=${VERSION_NOPREFIX}"
+            echo "tag_name=${TAG_NAME}"
+            echo "image=${IMAGE}"
+            echo "tags<<EOF"
+            echo "${IMAGE}:${VERSION_NOPREFIX}"
+            echo "${IMAGE}:${TAG_NAME}"
+            echo "${IMAGE}:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing ${IMAGE} tags: ${VERSION_NOPREFIX}, ${TAG_NAME}, latest"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=proxmox-guestos-customization
+            org.opencontainers.image.description=Proxmox GuestOS Sysprep customization sidecar
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.tags.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

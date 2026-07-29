@@ -83,6 +83,27 @@ From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launc
 
 ### Docker Compose (recommended)
 
+**Option A — pull pre-built image from GHCR** (no local build; needs a published release image):
+
+```bash
+git clone https://github.com/RobertLukan/proxmox-guestos-customization/
+cd proxmox-guestos-customization
+cp .env.example .env
+# Required: SECRET_KEY, PROXMOX_HOST/USER/PASSWORD.
+# Compose HTTPS: GUESTOS_TLS_HOST, BEHIND_REVERSE_PROXY=True; set PRIMARY_BRIDGE to your PVE bridge.
+chmod +x deploy/caddy/gen-selfsigned.sh
+./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"   # lab self-signed; use real certs in prod
+export GUESTOS_VERSION=2.5.1   # pin a release; or omit for :latest
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
+curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
+# Lab self-signed cert: add -k (or --insecure), e.g. curl -fsSk "https://${GUESTOS_TLS_HOST}/api/version"
+```
+
+Image: `ghcr.io/robertlukan/proxmox-guestos-customization` ([package](https://github.com/RobertLukan/proxmox-guestos-customization/pkgs/container/proxmox-guestos-customization)). Always use `--no-build` with the GHCR overlay.
+
+**Option B — build from source** (dev / offline / before an image exists for a commit):
+
 ```bash
 git clone https://github.com/RobertLukan/proxmox-guestos-customization/
 cd proxmox-guestos-customization
