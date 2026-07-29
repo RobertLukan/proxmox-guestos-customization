@@ -9,6 +9,8 @@ import logging
 import contextvars
 from contextlib import contextmanager
 
+from app.util import sanitize_log_fragment
+
 # Optional per-task Proxmox connection (set from data['_pve'] in Celery sysprep).
 _pve_override = contextvars.ContextVar('pve_override', default=None)
 
@@ -149,7 +151,11 @@ def _template_name_tags(vmid, node=None, proxmox=None):
             try:
                 cfg = proxmox.nodes(node).qemu(vmid).config.get() or {}
             except Exception as e:
-                logging.warning(f"Could not read template metadata for VM {vmid}: {e}")
+                logging.warning(
+                    "Could not read template metadata for VM %s: %s",
+                    vmid,
+                    sanitize_log_fragment(e),
+                )
                 cfg = {}
             name = name or cfg.get('name')
             tags = tags if tags not in (None, '') else cfg.get('tags')
@@ -238,7 +244,11 @@ def get_vm_ostype(vmid, node=None, proxmox=None):
     try:
         cfg = proxmox.nodes(node).qemu(vmid).config.get()
     except Exception as e:
-        logging.warning(f"Could not read ostype for VM {vmid}: {e}")
+        logging.warning(
+            "Could not read ostype for VM %s: %s",
+            vmid,
+            sanitize_log_fragment(e),
+        )
         return None
     return cfg.get('ostype')
 

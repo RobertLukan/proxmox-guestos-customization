@@ -32,6 +32,7 @@ from app.provision_limits import (
 )
 from app.bulk_validate import validate_bulk_items
 from app.validators import ValidationError
+from app.util import public_error_text
 from flask_login import login_user, logout_user, login_required, current_user
 import uuid
 import logging
@@ -157,7 +158,7 @@ def _admit_resource_and_quota(payload, template_vmid, extra_items=1):
         check_daily_quota(extra_items=extra_items)
         _level, storage = check_storage_for_template(template_vmid)
     except ValidationError as e:
-        return False, _json_field_error(str(e)), None, None
+        return False, _json_field_error(public_error_text(e)), None, None
     warnings = []
     if storage and storage.get('level') == 'warn' and storage.get('message'):
         warnings.append(storage['message'])
@@ -323,7 +324,7 @@ def _reject_non_sysprep_template(template_vmid):
     try:
         require_sysprep_template(template_vmid)
     except ValueError as e:
-        flash(str(e))
+        flash(public_error_text(e))
         return redirect(url_for('index'))
     return None
 
@@ -354,7 +355,8 @@ def api_health():
         db.session.execute(db.text('SELECT 1'))
         checks['database'] = 'ok'
     except Exception as e:  # noqa: BLE001
-        checks['database'] = f'error: {e}'
+        logging.warning('health database check failed: %s', public_error_text(e, fallback='unavailable'))
+        checks['database'] = 'error'
         status = 'degraded'
     # Redis (Celery broker) — skip in unit tests so CI does not require Redis.
     broker = (app.config.get('CELERY_BROKER_URL') or '').strip()
@@ -369,7 +371,8 @@ def api_health():
             client.ping()
             checks['redis'] = 'ok'
         except Exception as e:  # noqa: BLE001
-            checks['redis'] = f'error: {e}'
+            logging.warning('health redis check failed: %s', public_error_text(e, fallback='unavailable'))
+            checks['redis'] = 'error'
             status = 'degraded'
     else:
         checks['redis'] = 'skipped'
@@ -517,9 +520,9 @@ def api_provision_limits():
                     provision_limits_snapshot(family=family, template_vmid=template_vmid)
                 )
     except Exception as e:
-        logging.warning('provision_limits: %s', e)
+        logging.warning('provision_limits: %s', public_error_text(e, fallback='query failed'))
         snap = provision_limits_snapshot(family='win11', template_vmid=None)
-        snap['warning'] = str(e)
+        snap['warning'] = 'Could not query provisioning limits; showing defaults.'
         return jsonify(snap)
     return jsonify(provision_limits_snapshot(family='win11', template_vmid=None))
 
@@ -583,12 +586,13 @@ def start_sysprep_workflow():
     try:
         pve_override = attach_pve_override(data)
     except ValueError as e:
-        return _json_field_error(str(e), remote_id=str(e))
+        msg = public_error_text(e, fallback='Invalid remote.')
+        return _json_field_error(msg, remote_id=msg)
     with use_pve_override(pve_override):
         try:
             require_sysprep_template(template_vmid)
         except ValueError as e:
-            return jsonify({'error': str(e)}), 400
+            return jsonify({'error': public_error_text(e, fallback='Invalid template.')}), 400
         ok_admit, admit_result, _family, _caps = _admit_resource_and_quota(
             data, template_vmid, extra_items=1
         )
@@ -670,7 +674,8 @@ def start_sysprep_bulk_workflow():
     try:
         validate_bulk_items(items, network_mode=network_mode)
     except ValidationError as e:
-        return _json_field_error(str(e), items=str(e))
+        msg = public_error_text(e, fallback='Invalid bulk items.')
+        return _json_field_error(msg, items=msg)
 
     request_id = (
         request.headers.get('Idempotency-Key')
@@ -703,14 +708,15 @@ def start_sysprep_bulk_workflow():
     try:
         pve_override_shared = attach_pve_override(dict(shared))
     except ValueError as e:
-        return _json_field_error(str(e), remote_id=str(e))
+        msg = public_error_text(e, fallback='Invalid remote.')
+        return _json_field_error(msg, remote_id=msg)
     warnings = []
     with use_pve_override(pve_override_shared):
         if template_vmid:
             try:
                 require_sysprep_template(template_vmid)
             except ValueError as e:
-                return jsonify({'error': str(e)}), 400
+                return jsonify({'error': public_error_text(e, fallback='Invalid template.')}), 400
             family = classify_windows_guest_family(template_vmid)
             if family != 'win11':
                 return _json_field_error(
@@ -1133,5 +1139,5 @@ def start_sysprep_existing_vm_task():
     try:
         require_sysprep_existing_target(vmid or '?')
     except ValueError as e:
-        return jsonify({'error': str(e)}), 403
+        return jsonify({'error': public_error_text(e, fallback='In-place Sysprep is disabled.')}), 403
     return jsonify({'error': 'In-place Sysprep is disabled.'}), 403
