@@ -1,0 +1,118 @@
+name: Security
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '23 5 * * 1'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  python-sast-and-deps:
+    name: Bandit + pip-audit + gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install app + audit tools
+        run: |
+          pip install -r requirements.txt
+          pip install 'pip-audit==2.9.0' 'bandit[toml]==1.8.3'
+
+      - name: Bandit (Python SAST)
+        run: |
+          bandit -r app -c .bandit -ll -ii -f json -o bandit-report.json
+          bandit -r app -c .bandit -ll -ii
+
+      - name: Upload Bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+          if-no-files-found: ignore
+
+      - name: pip-audit (dependency CVEs)
+        run: pip-audit -r requirements.txt --progress-spinner off
+
+      - name: gitleaks (secrets)
+        run: |
+          VER=8.24.2
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks detect --source . --verbose --redact --no-banner
+
+  trivy-fs:
+    name: Trivy filesystem
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy (fs)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          format: sarif
+          output: trivy-fs.sarif
+          cache-dir: ${{ github.workspace }}/.cache/trivy
+
+      - name: Upload Trivy FS SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  trivy-image:
+    name: Trivy container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: guestos-security:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy (image)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: guestos-security:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          # Image base OS CVEs change often; publish SARIF, don't hard-fail CI.
+          exit-code: '0'
+          format: sarif
+          output: trivy-image.sarif
+          cache-dir: ${{ github.workspace }}/.cache/trivy
+
+      - name: Upload Trivy image SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image

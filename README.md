@@ -1,5 +1,9 @@
 # Proxmox GuestOS Utility
 
+[![Tests](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/tests.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/tests.yml)
+[![Security](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/security.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/security.yml)
+[![CodeQL](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/codeql.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/codeql.yml)
+
 **Current release: [2.5.0](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
 
 > **Not an official Proxmox product.** Lab-validated on Windows Server 2019 and Windows 11. Support is community / GitHub issues only — [open an issue](https://github.com/RobertLukan/proxmox-guestos-customization/issues).
@@ -152,12 +156,32 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-## Security notes
+## Trust & security
+
+**Not an official Proxmox product.** This is a community project. AI tools may
+assist with drafting; changes are reviewed, tested, and released by the
+maintainer. Treat GuestOS like any automation that holds infrastructure
+credentials: isolate the host, use least-privilege PVE access, and rotate
+secrets.
+
+Assurance signals (public repo):
+
+- [SECURITY.md](SECURITY.md) — how to report issues and a short threat model
+- CI: unit/API tests, **CodeQL**, **Bandit**, **pip-audit**, **gitleaks**, **Trivy**
+  (see `.github/workflows/`)
+- Dependabot for Python and GitHub Actions
+- Version tags `v*` publish a GitHub Release with **SHA256SUMS** and a CycloneDX
+  **SBOM** of runtime dependencies
+
+These checks reduce risk; they do not replace your own review or lab testing.
+
+Operator notes:
 
 - Run behind TLS (`BEHIND_REVERSE_PROXY=True`). Production: [docs/TLS_PRODUCTION.md](docs/TLS_PRODUCTION.md).
 - Keep `GUESTOS_LAUNCH_SECRET` / `GUESTOS_API_TOKEN` on the GuestOS host and in PDM `guestos.cfg` only (not in UI wasm).
 - Do not re-enable in-place Sysprep on arbitrary VMs.
 - There is **no** superadmin bypass for provisioning caps — size exceptions in Proxmox VE.
+- Change the default UI password (`changeme`) immediately after first login.
 
 ## License
 

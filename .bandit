@@ -1,0 +1,8 @@
+# Bandit config for GuestOS application code.
+# CLI also uses: -r app -x tests,venv -ll -ii
+exclude_dirs:
+  - tests
+  - venv
+  - .venv
+  - .venv-ci
+  - dist
