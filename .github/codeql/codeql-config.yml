@@ -6,11 +6,10 @@ queries:
   - uses: security-extended
 
 query-filters:
-  # API routes intentionally return short ValidationError / ValueError messages
-  # we raise for operators (invalid template, quota, etc.). That is not a Python
-  # stack trace — we never return traceback.format_exc() to clients — but the
-  # py/stack-trace-exposure query still flags str(exception)-style API errors.
+  # Operators get short ValidationError / ValueError messages we raise ourselves
+  # (invalid template, quota, etc.). That is not a Python stack trace — we never
+  # return traceback.format_exc() to clients — but py/stack-trace-exposure still
+  # flags exception→JSON responses. Exclude the query (path filters under
+  # query-filters are not applied to results the way we need).
   - exclude:
       id: py/stack-trace-exposure
-      paths:
-        - app/routes.py
