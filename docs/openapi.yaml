@@ -1,10 +1,11 @@
 openapi: 3.0.3
 info:
   title: GuestOS machine API
-  version: 2.3.0
+  version: 2.5.1
   description: |
     Sysprep customize sidecar for Proxmox (template → clone → Sysprep → verify).
     Authenticate with `Authorization: Bearer <token>` or `X-Api-Token`.
+    App version is 2.5.1+; `min_pdm_guestos` remains 2.3.0 for PDM fork compatibility.
 servers:
   - url: https://guestos.example.com
 paths:
@@ -29,10 +30,12 @@ paths:
                 properties:
                   version:
                     type: string
-                    example: '2.3.0'
+                    example: '2.5.1'
+                    description: GuestOS application version (VERSION file)
                   min_pdm_guestos:
                     type: string
                     example: '2.3.0'
+                    description: Minimum GuestOS version the PDM fork expects
   /api/tasks:
     get:
       summary: List customization tasks
@@ -81,6 +84,111 @@ paths:
       responses:
         '200':
           description: Paginated task list
+  /api/tasks/{task_id}:
+    get:
+      summary: Get one customization task
+      security:
+        - bearerAuth: []
+        - apiToken: []
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Task payload
+        '404':
+          description: Not found
+  /api/specs:
+    get:
+      summary: List Customization Specs (non-secret presets)
+      security:
+        - bearerAuth: []
+        - apiToken: []
+      responses:
+        '200':
+          description: Spec list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  specs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CustomizationSpec'
+    post:
+      summary: Create a Customization Spec
+      security:
+        - bearerAuth: []
+        - apiToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomizationSpecWrite'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomizationSpec'
+        '400':
+          description: Validation error
+  /api/specs/{spec_id}:
+    parameters:
+      - in: path
+        name: spec_id
+        required: true
+        schema:
+          type: integer
+    get:
+      summary: Get one Customization Spec
+      security:
+        - bearerAuth: []
+        - apiToken: []
+      responses:
+        '200':
+          description: Spec payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomizationSpec'
+        '404':
+          description: Not found
+    put:
+      summary: Update a Customization Spec
+      security:
+        - bearerAuth: []
+        - apiToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomizationSpecWrite'
+      responses:
+        '200':
+          description: Updated
+        '400':
+          description: Validation error
+        '404':
+          description: Not found
+    delete:
+      summary: Delete a Customization Spec
+      security:
+        - bearerAuth: []
+        - apiToken: []
+      responses:
+        '200':
+          description: Deleted
+        '404':
+          description: Not found
   /api/batches:
     get:
       summary: List bulk provisioning batches
@@ -236,6 +344,36 @@ components:
       in: header
       name: X-Api-Token
   schemas:
+    CustomizationSpec:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+        payload:
+          type: object
+          description: Non-secret wizard defaults (never includes administrator_password)
+        timestamp:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CustomizationSpecWrite:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        payload:
+          type: object
+          description: Non-secret fields only; secrets are stripped server-side
     SysprepStart:
       type: object
       required:
@@ -359,7 +497,10 @@ components:
         items:
           type: array
           minItems: 1
-          maxItems: 200
+          maxItems: 10
+          description: >
+            Default ceiling is BULK_MAX_ITEMS (10). Raise via env if you intentionally
+            allow larger batches; admission still enforces the configured limit.
           items:
             type: object
             properties:

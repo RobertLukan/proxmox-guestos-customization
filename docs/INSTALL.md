@@ -237,7 +237,7 @@ Minimum production-oriented settings:
 | `SECRET_KEY` | Required; random |
 | `PROXMOX_HOST` / `USER` / `PASSWORD` | Real cluster API (user + password) |
 | `PROXMOX_VERIFY_SSL` | **`True`** with a trusted PVE cert (or install your CA into the containers) |
-| `PRIMARY_BRIDGE` | Bridge clones should land on (e.g. `vmbr0`) |
+| `PRIMARY_BRIDGE` | Bridge clones should land on (defaults to `vmbr0` if unset) |
 | `BEHIND_REVERSE_PROXY` | **`True`** (Compose Caddy, or your own TLS proxy) |
 | `GUESTOS_TLS_HOST` | Public DNS name operators type in the browser |
 | `GUESTOS_API_TOKEN` | Long random; shared only with PDM `guestos.cfg` |
@@ -245,9 +245,6 @@ Minimum production-oriented settings:
 | `GUESTOS_CORS_ORIGINS` | Empty (default) disables CORS; set PDM origin(s) or `*` only for lab direct browser calls |
 | `DOMAIN_PROFILES_JSON` | Real AD profiles if you join domains (no placeholders) |
 | `PVE_REMOTES_JSON` | Optional named remotes for multi-cluster / PDM `remote_id` |
-
-Remove any leftover 1.x keys from `.env` if upgrading (`WINRM_*`, `TEMP_BRIDGE`,
-`GUESTOS_ENABLE_WINRM`) — see [MIGRATE_2.0.md](MIGRATE_2.0.md).
 
 ### 2.3 TLS certificates
 
@@ -294,8 +291,14 @@ curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
 # curl -fsSk "https://${GUESTOS_TLS_HOST}/api/version"
 ```
 
-Services: **Caddy** (`:443`), **web** (loopback `:5001`), **worker**, **Redis**.
-SQLite persists in the `app-instance` volume.
+Services: **Caddy** (`:443`), **web** (loopback `:5001`), **worker** (clone
+queue), **verify-worker** (verify queue), **Redis**. SQLite persists in the
+`app-instance` volume.
+
+Optional after first login: create **Customization Specs** (UI **Specs** or
+`/api/specs`) for reusable non-secret defaults; apply via `spec_id` on single
+or bulk start. See [BULK_PROVISIONING.md](BULK_PROVISIONING.md) and
+[openapi.yaml](openapi.yaml).
 
 ### 2.5 First login (standalone UI)
 

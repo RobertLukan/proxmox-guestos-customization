@@ -20,7 +20,8 @@ See request/response schema examples in [`openapi.yaml`](openapi.yaml).
 In **New VM with Sysprep** on a **Windows 11** template (`windows11` tag), choose
 **Bulk desktops (batch)**:
 
-1. Fill shared settings (template, resources, network defaults, optional domain).
+1. Fill shared settings (template, resources, network defaults, optional domain,
+   optional **Customization Spec** / `spec_id`).
 2. On Basics, paste CSV lines (static: `hostname,ip/prefix[,vlan]`; DHCP: `hostname[,vlan]`).
    The form shows how many rows you can still add from remaining batch/daily capacity,
    and rejects duplicate hostnames/IPs plus unusable addresses (loopback, link-local,

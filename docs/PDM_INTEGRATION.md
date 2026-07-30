@@ -4,8 +4,8 @@
 optional PDM fork packages, privileges, firewall). This page is the API and
 lab-integration reference.
 
-**Upgrading from 1.x:** see [`MIGRATE_2.0.md`](MIGRATE_2.0.md) — GuestOS 2.0 removed
-the legacy WinRM reconfigure path.
+**Upgrading GuestOS:** stay on the current **2.x** release line (`VERSION` /
+GitHub Releases / GHCR tags). There is no supported 1.x upgrade path.
 
 GuestOS is one app. **Sysprep customize** (template → clone → guest agent) is the
 only supported customization path for PDM and standalone use.
@@ -27,11 +27,15 @@ GUESTOS_LAUNCH_SECRET=must-match-pdm-guestos-cfg
 # PVE_REMOTES_JSON={"lab":{"host":"pve.example","user":"api@pve","password":"...","verify_ssl":false}}
 ```
 
-4. Generate lab certs and rebuild:
+4. Generate lab certs and start (prefer GHCR pull; build is fine for lab forks):
 
 ```bash
 ./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"
-docker compose up -d --build
+export GUESTOS_VERSION=2.5.1   # pin a release
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
+# Dev / unreleased tree instead:
+# docker compose up -d --build
 ```
 
 ## Endpoints for PDM
@@ -42,7 +46,12 @@ docker compose up -d --build
 | GET | `/api/version` | none |
 | GET | `/launch` | HMAC query (`exp`, `jti`, `sig`, `template_vmid`, `remote_id`) → session |
 | POST | `/start_sysprep_workflow` | Bearer / `X-Api-Token` **or** session+CSRF |
+| POST | `/start_sysprep_bulk_workflow` | Bearer / token **or** session+CSRF |
 | GET | `/task_status/<task_id>` | Bearer / token **or** session |
+| GET | `/api/tasks` / `/api/tasks/<id>` | Bearer / token **or** session |
+| GET/POST | `/api/specs` | Bearer / token **or** session+CSRF |
+| GET/PUT/DELETE | `/api/specs/<id>` | Bearer / token **or** session+CSRF |
+| GET | `/api/provision_limits` | Bearer / token **or** session |
 
 `POST /start_sysprep_existing_vm_task` returns **403** (disabled — protects production VMs).
 
@@ -166,7 +175,7 @@ docker exec -e PYTHONUNBUFFERED=1 proxmox-guestos-customization-web-1 \
 - Exit `0` = SUCCESS, `2` = FAILURE/timeout, `3` = cleanup failed.
 - If `bridge` is omitted in the API body, GuestOS defaults to `PRIMARY_BRIDGE` (else `vmbr0`).
 
-## Phase 4 — Thin PDM UI fork
+## Optional PDM UI fork
 
 | Item | Value |
 |------|--------|

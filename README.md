@@ -8,7 +8,7 @@
 
 > **Not an official Proxmox product.** Lab-validated on Windows Server 2019 and Windows 11. Support is community / GitHub issues only — [open an issue](https://github.com/RobertLukan/proxmox-guestos-customization/issues).
 
-GuestOS is **Sysprep-only** (WinRM removed in 2.0 — see [docs/MIGRATE_2.0.md](docs/MIGRATE_2.0.md)). In-place Sysprep of existing/production VMs is **disabled**.
+GuestOS is **Sysprep-only** (template → clone → guest agent). In-place Sysprep of existing/production VMs is **disabled**.
 
 | Path | Status | How it works |
 |------|--------|----------------|
@@ -79,7 +79,6 @@ From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launc
 | [docs/PDM_INTEGRATION.md](docs/PDM_INTEGRATION.md) | Machine API + PDM + lab notes |
 | [docs/openapi.yaml](docs/openapi.yaml) | Start / bulk / limits API schema |
 | [docs/FAILURE_RUNBOOK.md](docs/FAILURE_RUNBOOK.md) | Failure triage + limit saturation |
-| [docs/MIGRATE_2.0.md](docs/MIGRATE_2.0.md) | 1.x → 2.0 (WinRM removed) |
 
 ### Docker Compose (recommended)
 
@@ -178,7 +177,12 @@ Full list and comments: [`.env.example`](.env.example). Summary by necessity:
 | `PROXMOX_HOST` | PVE API hostname or IP (no default) |
 | `PROXMOX_USER` | PVE API user, e.g. `guestos@pve` (dedicated least-privilege user preferred) |
 | `PROXMOX_PASSWORD` | Password for that user (GuestOS uses user+password, not PVE API tokens) |
-| `PRIMARY_BRIDGE` | Bridge for cloned VM NICs. Defaults to `vmbr0` if unset — set explicitly to match your cluster |
+
+### Strongly recommended for real clones
+
+| Variable | Default | Notes |
+|----------|---------|--------|
+| `PRIMARY_BRIDGE` | `vmbr0` | Bridge for cloned VM NICs — set explicitly to match your cluster |
 
 ### Required for Docker Compose HTTPS (recommended deploy)
 

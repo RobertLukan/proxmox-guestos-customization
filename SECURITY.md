@@ -47,6 +47,7 @@ On every push/PR (see `.github/workflows/`):
 - **pip-audit** (dependency CVEs)
 - **gitleaks** (secret scanning)
 - **Trivy** (filesystem + container image)
+- **Dependabot** (GitHub Actions + pip updates)
 
 Releases may attach checksums and an SBOM. These checks reduce risk; they do
 **not** prove the software is free of bugs or misuse.
