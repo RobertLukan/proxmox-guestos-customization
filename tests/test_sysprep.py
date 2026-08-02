@@ -66,12 +66,29 @@ def test_unattend_sets_hostname_and_timezone():
     assert '<TimeZone>Central European Standard Time</TimeZone>' in xml
     assert '<InputLocale>en-US</InputLocale>' in xml
     assert 'FirstLogonCommands' in xml
-    assert r'C:\ProgramData\GuestOS\setup.ps1' in xml
+    assert 'GuestOS-FirstLogon.cmd' in xml
+    assert 'GUESTOS_SETUP_B64' not in xml  # must NOT embed huge blob in unattend (hangs Sysprep)
+
     assert '<AutoLogon>' in xml
     assert 'net user Administrator /active:yes' in xml
     assert 'Microsoft-Windows-Setup' not in xml
     assert '<WillShowUI>' not in xml
     assert '<ProductKey>' not in xml
+    assert 'SetupDisplayedProductKey' not in xml  # VL / non-eval path
+
+
+def test_unattend_evaluation_skips_product_key_and_marks_oobe():
+    data = _base_data()
+    data['windows_evaluation'] = True
+    data['product_key'] = 'N69G4-B89J2-4G8F4-WWYCC-J464C'  # must be ignored for Eval
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        xml, _ps1, _cmd = _render_sysprep_files(data)
+    xml = xml.decode()
+    assert '<ProductKey>' not in xml
+    assert 'SetupDisplayedProductKey' in xml
+    assert 'skip OOBE product-key UI on Evaluation' in xml
+    assert 'GuestOS-FirstLogon.cmd' in xml
 
 
 def test_unattend_includes_product_key_when_set():
@@ -80,6 +97,7 @@ def test_unattend_includes_product_key_when_set():
     key = _SERVER_GVLK[(2022, 'standard')]
     data = _base_data()
     data['product_key'] = key
+    data['windows_evaluation'] = False
     with flask_app.app_context():
         _validate_sysprep_network(data)
         xml, _ps1, _cmd = _render_sysprep_files(data)
@@ -112,6 +130,30 @@ def test_ensure_server_product_key_injects_gvlk(monkeypatch):
     with flask_app.app_context():
         _ensure_server_product_key(data, 999)
     assert data['product_key'] == _SERVER_GVLK[(2022, 'standard')]
+    assert data['windows_evaluation'] is False
+
+
+def test_ensure_server_product_key_skips_eval_gvlk(monkeypatch):
+    from app.sysprep_render import _ensure_server_product_key
+
+    monkeypatch.setattr('app.proxmox.is_windows_server_template', lambda *a, **k: True)
+    monkeypatch.setattr(
+        'app.sysprep_render._read_guest_windows_edition',
+        lambda vmid: (
+            'ServerStandardEval',
+            'Microsoft Windows Server 2019 Standard Evaluation',
+            17763,
+        ),
+    )
+    monkeypatch.setattr(
+        'app.sysprep_render._guess_server_year_from_template',
+        lambda vmid: 2019,
+    )
+    data = {'template_vmid': 120, 'product_key': ''}
+    with flask_app.app_context():
+        _ensure_server_product_key(data, 999)
+    assert data['product_key'] == ''
+    assert data['windows_evaluation'] is True
 
 
 def test_ensure_server_product_key_skips_non_server(monkeypatch):
@@ -121,26 +163,26 @@ def test_ensure_server_product_key_skips_non_server(monkeypatch):
     data = {'template_vmid': 100, 'product_key': ''}
     with flask_app.app_context():
         _ensure_server_product_key(data, 999)
-    assert data['product_key'] == ''
+    assert data.get('product_key', '') == ''
+    assert data['windows_evaluation'] is False
 
 
 def test_ensure_server_product_key_keeps_override(monkeypatch):
     from app.sysprep_render import _ensure_server_product_key
     from app.windows_product_keys import _SERVER_GVLK
 
-    called = {'read': 0}
     key = _SERVER_GVLK[(2022, 'datacenter')]
 
-    def _read(_vmid):
-        called['read'] += 1
-        return ('ServerDatacenter', 'x', 20348)
-
-    monkeypatch.setattr('app.sysprep_render._read_guest_windows_edition', _read)
+    monkeypatch.setattr('app.proxmox.is_windows_server_template', lambda *a, **k: True)
+    monkeypatch.setattr(
+        'app.sysprep_render._read_guest_windows_edition',
+        lambda vmid: ('ServerDatacenter', 'x', 20348),
+    )
     data = {'template_vmid': 130, 'product_key': key}
     with flask_app.app_context():
         _ensure_server_product_key(data, 999)
-    assert called['read'] == 0
     assert data['product_key'] == key
+    assert data['windows_evaluation'] is False
 
 
 def test_unattend_uses_selected_locale():
@@ -225,6 +267,46 @@ def test_setup_complete_defers_to_firstlogon():
     assert 'deferring GuestOS setup.ps1 to FirstLogonCommands' in cmd
     assert 'powershell.exe' not in cmd
     assert r'C:\ProgramData\GuestOS\setup.ps1' not in cmd
+
+
+def test_static_allows_empty_gateway():
+    """Secondary / multi-homed NICs often omit a default gateway on purpose."""
+    data = _base_data()
+    data['gateway'] = ''
+    _validate_sysprep_network(data)
+    assert data['gateway'] == ''
+    assert data['nics'][0]['gateway'] == ''
+
+
+def test_multi_nic_second_without_gateway():
+    data = _base_data()
+    data['nics'] = [
+        {
+            'network_mode': 'static',
+            'ip_address': '10.0.5.20',
+            'netmask_cidr': '24',
+            'gateway': '10.0.5.1',
+            'dns_servers': '10.0.5.1',
+            'bridge': 'vmbr0',
+        },
+        {
+            'network_mode': 'static',
+            'ip_address': '10.0.9.20',
+            'netmask_cidr': '24',
+            'gateway': '',
+            'dns_servers': '',
+            'bridge': 'vmbr1',
+        },
+    ]
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        _xml, ps1, _cmd = _render_sysprep_files(data)
+    assert data['nics'][0]['gateway'] == '10.0.5.1'
+    assert data['nics'][1]['gateway'] == ''
+    blob_line = [ln for ln in ps1.decode().splitlines() if '$nicsBlob' in ln][0]
+    nics = json.loads(base64.b64decode(blob_line.split("'", 2)[1]))
+    assert nics[1]['gateway'] == ''
+    assert 'if ($gateway)' in ps1.decode()
 
 
 # --- DHCP mode --------------------------------------------------------------

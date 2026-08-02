@@ -1,4 +1,5 @@
-# Post-Sysprep configuration applied by SetupComplete.cmd.
+# Post-Sysprep configuration applied by FirstLogonCommands.
+# Primary on-disk copy: C:\Windows\System32\Sysprep\GuestOS-setup.ps1
 #
 # NOTE: this file is NOT autoescaped by Jinja (it is not HTML/XML). Every value
 # interpolated below is validated server-side before rendering:
@@ -382,7 +383,7 @@ function Set-GuestOsNicConfig {
         $prefix = [int]$Nic.prefix
         $gateway = [string]$Nic.gateway
         $dns = @($Nic.dns)
-        Write-Output "setup.ps1: Static IP=$ip/$prefix GW=$gateway DNS=$($dns -join ',')"
+        Write-Output "setup.ps1: Static IP=$ip/$prefix GW=$(if ($gateway) { $gateway } else { '(none)' }) DNS=$($dns -join ',')"
         Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Disabled -ErrorAction SilentlyContinue
         $configured = $false
         for ($i = 0; $i -lt 5 -and -not $configured; $i++) {
@@ -392,10 +393,14 @@ function Set-GuestOsNicConfig {
                 if (-not $existing) {
                     New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $ip -PrefixLength $prefix -ErrorAction Stop | Out-Null
                 }
-                $route = Get-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-                    Where-Object { $_.NextHop -eq $gateway } | Select-Object -First 1
-                if (-not $route) {
-                    New-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -NextHop $gateway -ErrorAction Stop | Out-Null
+                # Only set a default route when a gateway was provided. Extra NICs
+                # commonly omit GW so Windows does not get competing defaults.
+                if ($gateway) {
+                    $route = Get-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                        Where-Object { $_.NextHop -eq $gateway } | Select-Object -First 1
+                    if (-not $route) {
+                        New-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -NextHop $gateway -ErrorAction Stop | Out-Null
+                    }
                 }
                 $configured = $true
                 Write-Output "setup.ps1: Static addressing applied."
@@ -405,7 +410,10 @@ function Set-GuestOsNicConfig {
             }
         }
         if (-not $configured) {
-            throw "Failed to apply static IP $ip/$prefix via gateway $gateway."
+            if ($gateway) {
+                throw "Failed to apply static IP $ip/$prefix via gateway $gateway."
+            }
+            throw "Failed to apply static IP $ip/$prefix."
         }
         if ($dns.Count -gt 0) {
             Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses $dns

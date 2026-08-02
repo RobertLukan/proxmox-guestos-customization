@@ -89,7 +89,10 @@ def create_app():
 
     @app.context_processor
     def inject_app_version():
-        return {'app_version': app.config.get('APP_VERSION', '0.0.0')}
+        return {
+            'app_version': app.config.get('APP_VERSION', '0.0.0'),
+            'app_build_time': app.config.get('APP_BUILD_TIME') or '',
+        }
 
     return app
 

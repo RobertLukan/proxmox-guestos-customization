@@ -14,6 +14,14 @@ except OSError:
     _file_version = '0.0.0'
 APP_VERSION = os.environ.get('APP_VERSION', _file_version) or _file_version
 
+# Image/build timestamp (Docker writes BUILD_TIMESTAMP; overridable via APP_BUILD_TIME).
+_BUILD_TS_FILE = Path(__file__).resolve().parent / 'BUILD_TIMESTAMP'
+try:
+    _file_build_time = _BUILD_TS_FILE.read_text(encoding='utf-8').strip()
+except OSError:
+    _file_build_time = ''
+APP_BUILD_TIME = (os.environ.get('APP_BUILD_TIME') or _file_build_time or '').strip()
+
 # Machine API tokens for PDM / integrators (Bearer or X-Api-Token).
 # Prefer GUESTOS_API_TOKEN for a single token; API_TOKENS may be a comma list
 # or a JSON array of strings.

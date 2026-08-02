@@ -2,9 +2,13 @@
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
     <!--
       specialize: hostname/timezone + enable built-in Administrator (needed for AutoLogon).
-      Network config lives in setup.ps1 under C:\ProgramData\GuestOS\ (survives
-      Sysprep /generalize; C:\Windows\Setup\Scripts is often cleaned). Invoked by
-      FirstLogonCommands (reliable on Server 2019) and optionally SetupComplete.cmd.
+      setup.ps1 is delivered via HKLM\SOFTWARE\GuestOS SetupPs1B64 (survives specialize
+      cleanup that deletes loose files under Sysprep/ProgramData). FirstLogon extracts it.
+
+      Evaluation vs volume-license is one template with Jinja branches — not separate files:
+      - VL Server: optional Shell-Setup ProductKey (GVLK) so OOBE skips Enter product key
+      - Evaluation: never inject a VL GVLK; mark product-key OOBE as already shown so
+        InstallPid does not fail with 0xC004F015 and block FirstLogonCommands
     -->
     <settings pass="specialize">
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -12,8 +16,9 @@
             {% if timezone %}<TimeZone>{{ timezone }}</TimeZone>{% endif %}
             {# Optional ProductKey (operator or Server GVLK). Do NOT use
                Microsoft-Windows-Setup UserData/WillShowUI here — empty Key in
-               specialize fails with "could not apply unattend settings". #}
-            {% if product_key %}<ProductKey>{{ product_key }}</ProductKey>{% endif %}
+               specialize fails with "could not apply unattend settings".
+               Evaluation guests must omit this (see windows_evaluation branch). #}
+            {% if product_key and not windows_evaluation %}<ProductKey>{{ product_key }}</ProductKey>{% endif %}
         </component>
         <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <RunSynchronous>
@@ -22,6 +27,13 @@
                     <Description>Enable built-in Administrator for GuestOS AutoLogon</Description>
                     <Path>cmd.exe /c net user Administrator /active:yes</Path>
                 </RunSynchronousCommand>
+                {% if windows_evaluation %}
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>2</Order>
+                    <Description>GuestOS: skip OOBE product-key UI on Evaluation SKUs</Description>
+                    <Path>cmd.exe /c reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE" /v SetupDisplayedProductKey /t REG_DWORD /d 1 /f &amp; reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE" /v UnattendCreatedUser /t REG_DWORD /d 1 /f</Path>
+                </RunSynchronousCommand>
+                {% endif %}
             </RunSynchronous>
         </component>
     </settings>
@@ -61,7 +73,9 @@
                 <SynchronousCommand wcm:action="add">
                     <Order>1</Order>
                     <Description>GuestOS post-sysprep network and accounts</Description>
-                    <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\GuestOS\setup.ps1</CommandLine>
+                    <!-- Short launcher only — long -Command lines are fragile on Server 2019.
+                         GuestOS-FirstLogon.cmd is written by GuestOS before Sysprep. -->
+                    <CommandLine>cmd.exe /c C:\Windows\System32\GuestOS-FirstLogon.cmd</CommandLine>
                 </SynchronousCommand>
             </FirstLogonCommands>
         </component>

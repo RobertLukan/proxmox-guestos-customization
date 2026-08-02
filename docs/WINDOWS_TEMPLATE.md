@@ -69,14 +69,19 @@ pagefile/data (or reuses existing non-boot bus disks with matching serials).
 ## What GuestOS does on the clone
 
 1. Clone the template and power on; wait for a stable guest agent.
-2. For Windows Server templates, detect edition and inject a Microsoft GVLK into
-   unattend specialize `ProductKey` when the request omits `product_key`, so OOBE
-   does not stop on Enter product key. (Unattend cannot click **Do this later**;
-   empty Setup `ProductKey`/`WillShowUI` in specialize fails.) Pass `product_key`
-   to use your own key instead.
-3. Write `unattended.xml` and `C:\ProgramData\GuestOS\setup.ps1` (and related
-   scripts) via the guest agent. Large `setup.ps1` (disk plans) is written in
-   chunks to stay under QEMU guest-agent command-line limits.
+2. For Windows Server **volume-license** templates, detect edition and inject a
+   Microsoft GVLK into unattend specialize `ProductKey` when the request omits
+   `product_key`, so OOBE does not stop on Enter product key. (Unattend cannot
+   click **Do this later**; empty Setup `ProductKey`/`WillShowUI` in specialize
+   fails.) Pass `product_key` to use your own key instead.
+   **Evaluation** images never get a VL GVLK — that combination fails OOBE
+   `InstallPid` (`0xC004F015`) and blocks FirstLogon (regression found when
+   Server 2022 GVLK auto-inject was added; fixed in 2.6.3 — see
+   [FAILURE_RUNBOOK.md](FAILURE_RUNBOOK.md#evaluation-vs-gvlk-server-2019-regression)).
+3. Write `unattended.xml` and persist `setup.ps1` as
+   `HKLM\SOFTWARE\GuestOS\SetupPs1B64` (specialize deletes loose Sysprep/ProgramData
+   copies; embedding in unattend hung Sysprep). FirstLogon extracts and runs it.
+   Large staging writes use chunked guest-agent transfers.
 4. Run Sysprep generalize/OOBE; on first logon, `setup.ps1` applies network /
    cleanup / optional domain join / disk letters.
 5. Verify durable setup markers and expected hostname/IP before marking SUCCESS.

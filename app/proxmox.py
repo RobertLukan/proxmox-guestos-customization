@@ -1019,16 +1019,25 @@ def delete_vm(vmid, purge=True, timeout=120):
             time.sleep(2)
         raise Exception(f"Timed out waiting for delete of VM {vmid}.")
 
-def wait_for_guest_agent(vmid, timeout=1200, stable_for=45):
-    """Wait until the QEMU Guest Agent is responsive *and stays up*.
+def wait_for_guest_agent(
+    vmid,
+    timeout=1200,
+    stable_for=45,
+    on_progress=None,
+    drop_reset=20,
+    poll=5,
+):
+    """Wait until the QEMU Guest Agent is responsive enough to use.
 
-    Windows 11 (and sometimes Server) can briefly start the guest agent, then
-    reboot again during specialize/OOBE. Returning on the first successful poll
-    races those reboots and causes later file writes to fail with
-    "QEMU guest agent is not running".
+    Windows often flaps the agent during specialize/OOBE (brief timeouts while
+    the service stays "running"). Requiring one unbroken ``stable_for`` window
+    made post-Sysprep waits look stuck: every blip restarted a 60s timer.
 
-    ``stable_for`` is the number of consecutive seconds the agent must keep
-    answering before we treat it as ready.
+    Instead we **accumulate** successful poll time and only reset that progress
+    after the agent stays down for ``drop_reset`` seconds (a real reboot / long
+    outage). Short blips pause accumulation but do not wipe it.
+
+    ``on_progress`` is an optional ``callable(str)`` for UI task messages.
     """
     proxmox = get_proxmox_api()
     node = _get_vm_node(vmid)
@@ -1036,34 +1045,66 @@ def wait_for_guest_agent(vmid, timeout=1200, stable_for=45):
         raise Exception(f"VM {vmid} not found.")
 
     deadline = time.time() + timeout
-    ok_since = None
-    poll = 5
+    ok_accum = 0.0
+    last_ok_at = None
+    down_since = None
+    last_progress = None
+    drop_reset = max(poll, int(drop_reset))
+
+    def _progress(msg):
+        nonlocal last_progress
+        if on_progress and msg != last_progress:
+            last_progress = msg
+            on_progress(msg)
+
     while time.time() < deadline:
         try:
-            if proxmox.nodes(node).qemu(vmid).agent.get('get-fsinfo') is not None:
-                now = time.time()
-                if ok_since is None:
-                    ok_since = now
-                    logging.info(
-                        f"Guest agent responded on VM {vmid}; "
-                        f"waiting {stable_for}s for stability..."
-                    )
-                elif now - ok_since >= stable_for:
-                    logging.info(f"Guest agent on VM {vmid} stable for {stable_for}s.")
-                    return
-            else:
-                ok_since = None
+            up = _guest_agent_is_up(proxmox, node, vmid)
         except Exception as e:
-            if ok_since is not None:
+            up = False
+            if ok_accum > 0 or last_ok_at is not None:
                 logging.info(
-                    f"Guest agent on VM {vmid} dropped during stability wait "
-                    f"(will keep waiting): {e}"
+                    f"Guest agent on VM {vmid} blip during stability wait "
+                    f"(held {ok_accum:.0f}/{stable_for}s): {e}"
                 )
-            ok_since = None
+
+        now = time.time()
+        if up:
+            down_since = None
+            if last_ok_at is not None:
+                ok_accum += now - last_ok_at
+            last_ok_at = now
+            if ok_accum >= stable_for:
+                logging.info(
+                    f"Guest agent on VM {vmid} accumulated {ok_accum:.0f}s uptime "
+                    f"(need {stable_for}s)."
+                )
+                _progress(f"Guest agent stable ({int(ok_accum)}s).")
+                return
+            _progress(
+                f"Waiting for guest agent stability "
+                f"({int(ok_accum)}/{stable_for}s held)..."
+            )
+        else:
+            last_ok_at = None
+            if down_since is None:
+                down_since = now
+            down_for = now - down_since
+            if down_for >= drop_reset and ok_accum:
+                logging.info(
+                    f"Guest agent on VM {vmid} down {down_for:.0f}s — "
+                    f"resetting stability progress (was {ok_accum:.0f}s)."
+                )
+                ok_accum = 0.0
+            _progress(
+                f"Guest agent unavailable "
+                f"(down {int(down_for)}s; held {int(ok_accum)}/{stable_for}s)..."
+            )
         time.sleep(poll)
+
     raise Exception(
         f"Timed out waiting for a stable QEMU Guest Agent on VM {vmid} "
-        f"(timeout={timeout}s, stable_for={stable_for}s)."
+        f"(timeout={timeout}s, stable_for={stable_for}s, held={ok_accum:.0f}s)."
     )
 
 
@@ -1078,17 +1119,96 @@ def _is_transient_agent_error(exc):
     )
 
 
-def write_file_to_guest(vmid, content, file_path):
-    """Writes a file to the guest OS via QEMU Guest Agent.
+def _guest_agent_is_up(proxmox, node, vmid):
+    """Cheap reachability check (prefer ping over get-fsinfo)."""
+    agent = proxmox.nodes(node).qemu(vmid).agent
+    try:
+        agent.ping.post()
+        return True
+    except Exception:
+        pass
+    try:
+        return agent.get('get-fsinfo') is not None
+    except Exception:
+        return False
 
-    Small files are written in one ``agent.exec`` call. Larger payloads are
-    staged as base64 chunks then decoded — a single embedded WriteAllBytes
-    command fails with qemu-ga ``Invalid argument`` once the command line is
-    too long (seen with disk-customize ``setup.ps1`` ~35 KiB base64).
-    """
-    raw = content if isinstance(content, (bytes, bytearray)) else bytes(content)
+
+# PVE ``agent/file-write`` content maxLength is ~60 KiB; stay under with margin.
+_FILE_WRITE_MAX = 45 * 1024
+
+
+def _ensure_guest_parent_dir(vmid, file_path):
+    """Create the parent directory for ``file_path`` inside the guest."""
+    run_command_in_guest(
+        vmid,
+        "powershell -NoProfile -Command \""
+        f"New-Item -ItemType Directory -Force -Path (Split-Path -Path '{file_path}' -Parent) "
+        f"| Out-Null\"",
+    )
+
+
+def _agent_file_write_once(vmid, raw, file_path):
+    """Single attempt at native QGA file-write (no guest-exec payload)."""
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not node:
+        raise Exception(f"VM {vmid} not found.")
     content_b64 = base64.b64encode(raw).decode('ascii')
-    # Keep the full PowerShell -Command well under typical guest-agent limits.
+    endpoint = proxmox.nodes(node).qemu(vmid).agent('file-write')
+    try:
+        # encode=0: content is already base64 (required for arbitrary binary).
+        endpoint.post(file=file_path, content=content_b64, encode=0)
+        return
+    except Exception as e:
+        msg = str(e).lower()
+        # PVE before encode= support, or ACL/param rejection — try auto-encode.
+        if _is_transient_agent_error(e):
+            raise
+        if 'encode' not in msg and '400' not in msg and 'parameter' not in msg:
+            raise
+        logging.info(
+            "VM %s: agent file-write encode=0 unsupported (%s); retrying with auto-encode",
+            vmid,
+            e,
+        )
+    # latin-1 round-trip preserves all byte values as code points for encode=1.
+    endpoint.post(file=file_path, content=raw.decode('latin-1'))
+
+
+def _agent_file_write(vmid, raw, file_path, retries=8, retry_delay=15):
+    """Write via ``agent/file-write`` with transient-agent retries."""
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            _agent_file_write_once(vmid, raw, file_path)
+            return
+        except Exception as e:
+            last_err = e
+            if not _is_transient_agent_error(e):
+                raise
+            logging.warning(
+                f"Guest agent file-write failed on VM {vmid} "
+                f"(attempt {attempt}/{retries}): {e}"
+            )
+            if attempt == retries:
+                break
+            try:
+                wait_for_guest_agent(
+                    vmid,
+                    timeout=max(90, retry_delay * 3),
+                    stable_for=8,
+                    poll=8,
+                    drop_reset=24,
+                )
+            except Exception as wait_err:
+                logging.warning(f"Re-wait for guest agent on VM {vmid}: {wait_err}")
+                time.sleep(retry_delay)
+    raise last_err
+
+
+def _write_file_to_guest_via_exec(vmid, raw, file_path):
+    """Fallback: write via PowerShell guest-exec (inline or chunked base64)."""
+    content_b64 = base64.b64encode(raw).decode('ascii')
     max_inline_b64 = 8000
 
     if len(content_b64) <= max_inline_b64:
@@ -1127,6 +1247,59 @@ def write_file_to_guest(vmid, content, file_path):
     )
 
 
+def write_file_to_guest(vmid, content, file_path):
+    """Write a file into the guest via QEMU Guest Agent.
+
+    Prefers native Proxmox ``agent/file-write`` (one QGA file transfer) over
+    embedding base64 in ``guest-exec`` PowerShell — large ``setup.ps1`` payloads
+    previously needed many Add-Content execs and overloaded the agent so the
+    follow-up ReadAllBytes could not find the staged file.
+    """
+    raw = content if isinstance(content, (bytes, bytearray)) else bytes(content)
+    _ensure_guest_parent_dir(vmid, file_path)
+
+    try:
+        if len(raw) <= _FILE_WRITE_MAX:
+            _agent_file_write(vmid, raw, file_path)
+            return
+
+        # Oversized: write binary parts via file-write, then one small join exec.
+        part_paths = []
+        try:
+            for i in range(0, len(raw), _FILE_WRITE_MAX):
+                part = f'{file_path}.guestos.part{i // _FILE_WRITE_MAX}'
+                part_paths.append(part)
+                _agent_file_write(vmid, raw[i:i + _FILE_WRITE_MAX], part)
+            joined = ','.join(f"'{p}'" for p in part_paths)
+            run_command_in_guest(
+                vmid,
+                "powershell -NoProfile -Command \""
+                "$ErrorActionPreference='Stop'; "
+                f"$parts=@({joined}); "
+                "$out=@(); foreach($p in $parts){ $out += [IO.File]::ReadAllBytes($p) }; "
+                f"[IO.File]::WriteAllBytes('{file_path}', [byte[]]$out); "
+                "foreach($p in $parts){ Remove-Item -LiteralPath $p -Force "
+                "-ErrorAction SilentlyContinue }\""
+            )
+            return
+        except Exception as e:
+            logging.warning(
+                "VM %s: chunked agent file-write failed (%s); falling back to exec",
+                vmid,
+                e,
+            )
+    except Exception as e:
+        if _is_transient_agent_error(e):
+            raise
+        logging.warning(
+            "VM %s: agent file-write unavailable (%s); falling back to exec",
+            vmid,
+            e,
+        )
+
+    _write_file_to_guest_via_exec(vmid, raw, file_path)
+
+
 def run_command_in_guest(vmid, command, retries=8, retry_delay=15):
     """Run a command in the guest via QEMU Guest Agent, with retries.
 
@@ -1150,7 +1323,14 @@ def run_command_in_guest(vmid, command, retries=8, retry_delay=15):
             if attempt == retries:
                 break
             try:
-                wait_for_guest_agent(vmid, timeout=max(120, retry_delay * 4), stable_for=20)
+                # Keep re-waits light: ping + longer poll, short stability window.
+                wait_for_guest_agent(
+                    vmid,
+                    timeout=max(90, retry_delay * 3),
+                    stable_for=8,
+                    poll=8,
+                    drop_reset=24,
+                )
             except Exception as wait_err:
                 logging.warning(f"Re-wait for guest agent on VM {vmid}: {wait_err}")
                 time.sleep(retry_delay)

@@ -118,17 +118,25 @@ def _complete_sysprep_power_cycle(task_id, vmid, progress_base=88, agent_stable_
     if outcome == 'stopped':
         update_task_progress(
             task_id,
-            min(progress_base + 7, 96),
-            "VM shut down. Powering back on to verify...",
+            min(progress_base + 4, 94),
+            "VM shut down. Powering back on...",
         )
         power_on_vm(vmid)
     else:
         update_task_progress(
             task_id,
-            min(progress_base + 7, 96),
+            min(progress_base + 4, 94),
             "VM already running after Sysprep; waiting for guest agent...",
         )
 
-    wait_for_guest_agent(vmid, timeout=1800, stable_for=agent_stable_for)
+    def _agent_progress(msg):
+        update_task_progress(task_id, min(progress_base + 7, 96), msg)
+
+    wait_for_guest_agent(
+        vmid,
+        timeout=1800,
+        stable_for=agent_stable_for,
+        on_progress=_agent_progress,
+    )
     return True
 

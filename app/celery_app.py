@@ -265,7 +265,12 @@ def sysprep_workflow_task(self, task_id, data):
                 if _task_cancelled(task_id):
                     return
                 update_task_progress(task_id, 60, "Waiting for QEMU Guest Agent to stabilize...")
-                wait_for_guest_agent(new_vmid, timeout=1200, stable_for=agent_stable)
+                wait_for_guest_agent(
+                    new_vmid,
+                    timeout=1200,
+                    stable_for=agent_stable,
+                    on_progress=lambda msg: update_task_progress(task_id, 60, msg),
+                )
                 update_task_progress(task_id, 70, "QEMU Guest Agent is ready.")
 
                 if _task_cancelled(task_id):

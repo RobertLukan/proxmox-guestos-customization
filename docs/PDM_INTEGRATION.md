@@ -125,6 +125,14 @@ python3 scripts/pdm_api_smoke.py --base-url "$GUESTOS_URL" --token "$GUESTOS_API
 
 (Use `-k` / configure trust for a lab self-signed cert.)
 
+Full-feature lab smoke (AD join + pagefile/data disks; Server template only):
+
+```bash
+python3 scripts/lab_full_feature_smoke.py \
+  --base-url "$GUESTOS_URL" --token "$GUESTOS_API_TOKEN" --insecure \
+  --template-vmid 130 --poll
+```
+
 Example start (**template** clone + Sysprep — lab only):
 
 ```bash

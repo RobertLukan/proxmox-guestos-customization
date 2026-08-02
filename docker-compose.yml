@@ -1,3 +1,9 @@
+x-app-build: &app-build
+  context: .
+  args:
+    # Pass BUILD_TIMESTAMP=... to force a fresh stamp on rebuild even if layers cache.
+    BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-}
+
 services:
   redis:
     image: redis:7-alpine
@@ -30,7 +36,7 @@ services:
   web:
     # Local build tags this name; GHCR overlay overrides it (see docker-compose.ghcr.yml).
     image: proxmox-guestos-customization-web:latest
-    build: .
+    build: *app-build
     # Initialize the database (idempotent) then start the web server.
     command: >
       sh -c " . /app/deploy/compose-redis-env.sh
@@ -66,7 +72,7 @@ services:
 
   worker:
     image: proxmox-guestos-customization-worker:latest
-    build: .
+    build: *app-build
     command: >
       sh -c " . /app/deploy/compose-redis-env.sh
       && celery -A app.celery worker --loglevel=info -Q clone_queue --hostname=clone@%h --concurrency=${CLONE_WORKER_CONCURRENCY:-4} --prefetch-multiplier=${CLONE_PREFETCH_MULTIPLIER:-1}"
@@ -88,7 +94,7 @@ services:
 
   verify-worker:
     image: proxmox-guestos-customization-worker:latest
-    build: .
+    build: *app-build
     command: >
       sh -c " . /app/deploy/compose-redis-env.sh
       && celery -A app.celery worker --loglevel=info -Q verify_queue --hostname=verify@%h --concurrency=${VERIFY_WORKER_CONCURRENCY:-2} --prefetch-multiplier=${VERIFY_PREFETCH_MULTIPLIER:-1}"

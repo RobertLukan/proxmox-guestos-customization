@@ -180,8 +180,8 @@
                 <div class="invalid-feedback"></div>
             </div>
             <div class="mb-3" id="gateway_group">
-                <label for="gateway" class="form-label">Default Gateway</label>
-                <input type="text" name="gateway" id="gateway" class="form-control" data-required="true" data-validate="ipv4">
+                <label for="gateway" class="form-label">Default Gateway (optional)</label>
+                <input type="text" name="gateway" id="gateway" class="form-control" data-validate="ipv4" placeholder="Leave empty for no default route">
                 <div class="invalid-feedback"></div>
             </div>
         </div>
@@ -683,7 +683,8 @@
             } else if (networkModeSelect && networkModeSelect.value === 'static') {
                 ipAddressInput.setAttribute('data-required', 'true');
                 netmaskInput.setAttribute('data-required', 'true');
-                gatewayInput.setAttribute('data-required', 'true');
+                // Gateway optional: secondary / multi-homed NICs often omit it.
+                gatewayInput.removeAttribute('data-required');
             }
         }
         if (isBulk) {

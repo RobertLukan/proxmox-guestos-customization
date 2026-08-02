@@ -380,6 +380,7 @@ def api_health():
     return jsonify({
         'status': status,
         'version': app.config.get('APP_VERSION', '0.0.0'),
+        'build_time': app.config.get('APP_BUILD_TIME') or None,
         'checks': checks,
     }), code
 
@@ -388,6 +389,7 @@ def api_health():
 def api_version():
     return jsonify({
         'version': app.config.get('APP_VERSION', '0.0.0'),
+        'build_time': app.config.get('APP_BUILD_TIME') or None,
         'min_pdm_guestos': '2.3.0',
     })
 
@@ -473,6 +475,7 @@ def api_metrics():
         by_remote[remote_id or 'default'] = int(count)
     return jsonify({
         'app_version': app.config.get('APP_VERSION', '0.0.0'),
+        'build_time': app.config.get('APP_BUILD_TIME') or None,
         'tasks': {
             'inflight': sum(by_status.get(s, 0) for s in inflight_statuses),
             'by_status': by_status,

@@ -13,6 +13,8 @@ def test_api_health_and_version(client):
     assert 'version' in ver
     assert ver['version'] == client.application.config['APP_VERSION']
     assert ver.get('min_pdm_guestos') == '2.3.0'
+    assert 'build_time' in ver
+    assert ver['build_time'] == (client.application.config.get('APP_BUILD_TIME') or None)
 
 
 def test_sysprep_start_requires_auth(client):

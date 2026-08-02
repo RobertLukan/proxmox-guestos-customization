@@ -17,7 +17,7 @@
                 Proxmox GuestOS
             </a>
             <div class="d-flex gap-2 align-items-center ms-auto">
-                <span class="app-version" title="Application version">v{{ app_version }}</span>
+                <span class="app-version" title="Application version{% if app_build_time %} · image built {{ app_build_time }}{% endif %}">v{{ app_version }}{% if app_build_time %} · {{ app_build_time }}{% endif %}</span>
                 {% if current_user.is_authenticated %}
                 <a class="btn btn-sm btn-link text-decoration-none" href="{{ url_for('jobs_page') }}">Jobs</a>
                 <a class="btn btn-sm btn-link text-decoration-none" href="{{ url_for('specs_page') }}">Specs</a>

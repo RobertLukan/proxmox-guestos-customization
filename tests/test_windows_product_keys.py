@@ -35,10 +35,29 @@ def test_server_2022_standard_from_edition_id():
 def test_server_2022_datacenter_from_caption():
     key = resolve_server_product_key(
         edition_id='',
-        caption='Windows Server 2022 Datacenter Evaluation',
+        caption='Windows Server 2022 Datacenter',
         build=20348,
     )
     assert key == _K22_DC
+
+
+def test_evaluation_skus_skip_gvlk():
+    assert (
+        resolve_server_product_key(
+            edition_id='ServerStandardEval',
+            caption='Microsoft Windows Server 2019 Standard Evaluation',
+            build=17763,
+        )
+        == ''
+    )
+    assert (
+        resolve_server_product_key(
+            edition_id='',
+            caption='Windows Server 2022 Datacenter Evaluation',
+            build=20348,
+        )
+        == ''
+    )
 
 
 def test_server_2025_from_build():

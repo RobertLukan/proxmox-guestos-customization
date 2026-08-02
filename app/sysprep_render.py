@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 
 from flask import render_template
 
-from app.proxmox import write_file_to_guest
+from app.proxmox import run_command_in_guest, write_file_to_guest
 from app.util import as_bool as _as_bool
 from app.validators import (
     ValidationError,
@@ -63,7 +64,10 @@ def _validate_one_nic(nic, index=0):
     if not use_dhcp:
         nic['ip_address'] = validate_ipv4(nic.get('ip_address'), field=f'NIC{index} IP address')
         nic['netmask_cidr'] = validate_netmask(nic.get('netmask_cidr'))
-        nic['gateway'] = validate_ipv4(nic.get('gateway'), field=f'NIC{index} gateway')
+        # Gateway is optional: secondary NICs often have no default route
+        # (two default gateways is usually wrong).
+        gw = (nic.get('gateway') or '').strip()
+        nic['gateway'] = validate_ipv4(gw, field=f'NIC{index} gateway') if gw else ''
     else:
         nic['ip_address'] = ''
         nic['netmask_cidr'] = None
@@ -231,13 +235,17 @@ def _ensure_server_product_key(data, vmid):
     Explicit ``product_key`` wins. Otherwise inject the matching Microsoft GVLK
     so OOBE does not stop on Enter product key. (Unattend cannot click
     "Do this later"; empty Setup ProductKey/WillShowUI in specialize fails.)
+
+    Evaluation SKUs are left without a key — volume GVLKs are invalid there and
+    break OOBE product-key install (blocking FirstLogonCommands). Sets
+    ``windows_evaluation`` so unattend can take the Eval OOBE-skip branch.
     """
     from flask import current_app
 
     from app.proxmox import is_windows_server_template
+    from app.windows_product_keys import is_evaluation_edition
 
-    if (data.get('product_key') or '').strip():
-        return
+    data['windows_evaluation'] = False
 
     template_vmid = data.get('template_vmid') or vmid
     if not is_windows_server_template(template_vmid):
@@ -251,6 +259,11 @@ def _ensure_server_product_key(data, vmid):
             "Could not read Windows edition from VM %s: %s", vmid, e
         )
 
+    data['windows_evaluation'] = is_evaluation_edition(edition_id, caption)
+
+    if (data.get('product_key') or '').strip():
+        return
+
     default_year = _guess_server_year_from_template(template_vmid) or 2022
     try:
         key = resolve_server_product_key(
@@ -262,7 +275,9 @@ def _ensure_server_product_key(data, vmid):
     except ValueError:
         key = ''
 
-    if not key:
+    # Only fall back to a generic Standard GVLK when the guest is a real VL SKU
+    # whose edition string we failed to parse — never for Evaluation.
+    if not key and not data['windows_evaluation']:
         key = resolve_server_product_key(
             edition_id='ServerStandard',
             caption=f'Windows Server {default_year}',
@@ -278,6 +293,14 @@ def _ensure_server_product_key(data, vmid):
             caption or '?',
             build or '?',
         )
+    elif data['windows_evaluation']:
+        current_app.logger.info(
+            "Skipping GVLK for Evaluation guest VM %s (edition=%r caption=%r); "
+            "unattend will skip OOBE product-key UI.",
+            vmid,
+            edition_id or '?',
+            caption or '?',
+        )
 
 
 def _render_sysprep_files(data):
@@ -286,6 +309,8 @@ def _render_sysprep_files(data):
     Returns a tuple of (unattended_xml_bytes, setup_ps1_bytes,
     setup_complete_cmd_bytes).
     """
+    # Template defaults — ``_ensure_server_product_key`` sets this for live jobs.
+    data.setdefault('windows_evaluation', False)
     unattended_xml = render_template('sysprep/unattended.xml', **data).encode('utf-8')
     # UTF-8 BOM so Windows PowerShell 5.1 (-File) does not misread the script as
     # the system ANSI code page (which corrupts non-ASCII and breaks parsing).
@@ -294,14 +319,77 @@ def _render_sysprep_files(data):
     return unattended_xml, setup_ps1, setup_complete
 
 
-def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
-    """Write the answer file and post-setup scripts into the guest.
+# Survives specialize better than Temp/GuestOS; FirstLogonCommands only invokes this.
+_FIRSTLOGON_CMD = (
+    '@echo off\r\n'
+    'rem GuestOS: extract setup.ps1 from HKLM and run it (FirstLogonCommands).\r\n'
+    'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+    "\"$ErrorActionPreference='Stop'; "
+    "$b=(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\GuestOS' -Name SetupPs1B64 -ErrorAction Stop).SetupPs1B64; "
+    "$out=$env:TEMP+'\\GuestOS-setup.ps1'; "
+    '[IO.File]::WriteAllBytes($out,[Convert]::FromBase64String($b)); '
+    '& $out"\r\n'
+)
 
-    ``setup.ps1`` is stored under ``C:\\ProgramData\\GuestOS\\`` because Sysprep
-    ``/generalize`` often removes ``C:\\Windows\\Setup\\Scripts`` (observed on
-    Windows Server 2019). Unattend FirstLogonCommands invokes the ProgramData
-    copy; SetupComplete.cmd is still written as a best-effort secondary path.
+
+def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
+    """Write the answer file and persist setup.ps1 for FirstLogon.
+
+    Loose files under ``System32\\Sysprep`` / ``ProgramData\\GuestOS`` are often
+    deleted by specialize cleanup (while ``unattended.xml`` itself survives).
+    Embedding a large base64 blob *inside* the answer file also hung Sysprep in
+    lab, so the durable copy is stored in ``HKLM\\SOFTWARE\\GuestOS\\SetupPs1B64``
+    (written in-guest from a staged file to avoid guest-agent cmdline limits).
     """
     write_file_to_guest(vmid, unattended_xml, r'C:\Windows\System32\Sysprep\unattended.xml')
-    write_file_to_guest(vmid, setup_ps1, r'C:\ProgramData\GuestOS\setup.ps1')
-    write_file_to_guest(vmid, setup_complete, r'C:\Windows\Setup\Scripts\SetupComplete.cmd')
+    # Short FirstLogon target — avoids a huge powershell -Command in unattend.
+    write_file_to_guest(
+        vmid,
+        _FIRSTLOGON_CMD.encode('ascii'),
+        r'C:\Windows\System32\GuestOS-FirstLogon.cmd',
+    )
+    staged = r'C:\Windows\Temp\GuestOS-setup.staged.ps1'
+    last_err = None
+    for attempt in range(1, 4):
+        write_file_to_guest(vmid, setup_ps1, staged)
+        try:
+            run_command_in_guest(
+                vmid,
+                "powershell -NoProfile -Command \""
+                "$ErrorActionPreference='Stop'; "
+                f"$staged='{staged}'; "
+                "if (-not (Test-Path -LiteralPath $staged)) { "
+                "throw \"GuestOS staged setup.ps1 missing: $staged\" }; "
+                "$bytes=[IO.File]::ReadAllBytes($staged); "
+                "$b64=[Convert]::ToBase64String($bytes); "
+                "New-Item -Path 'HKLM:\\SOFTWARE\\GuestOS' -Force | Out-Null; "
+                "New-ItemProperty -Path 'HKLM:\\SOFTWARE\\GuestOS' -Name SetupPs1B64 "
+                "-PropertyType String -Value $b64 -Force | Out-Null; "
+                "New-Item -ItemType Directory -Force -Path 'C:\\GuestOS' | Out-Null; "
+                "Copy-Item -LiteralPath $staged -Destination 'C:\\GuestOS\\setup.ps1' -Force; "
+                "Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue\""
+            )
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            msg = str(e)
+            if (
+                'staged setup.ps1 missing' in msg
+                or 'Could not find file' in msg
+                or 'FileNotFoundException' in msg
+            ):
+                logging.warning(
+                    "VM %s: staged setup.ps1 missing after write "
+                    "(attempt %s/3); rewriting via guest agent",
+                    vmid,
+                    attempt,
+                )
+                continue
+            raise
+    if last_err is not None:
+        raise last_err
+    try:
+        write_file_to_guest(vmid, setup_complete, r'C:\Windows\Setup\Scripts\SetupComplete.cmd')
+    except Exception as e:
+        logging.warning(f"VM {vmid}: best-effort SetupComplete.cmd write failed: {e}")

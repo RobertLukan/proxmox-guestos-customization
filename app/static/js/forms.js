@@ -148,7 +148,7 @@
         '<div class="nic-static row">' +
         '<div class="col-md-4 mb-2"><label class="form-label">IP</label><input class="form-control nic-ip" value="' + (preset.ip_address || '') + '"></div>' +
         '<div class="col-md-4 mb-2"><label class="form-label">Prefix</label><input class="form-control nic-prefix" value="' + (preset.netmask_cidr || '24') + '"></div>' +
-        '<div class="col-md-4 mb-2"><label class="form-label">Gateway</label><input class="form-control nic-gw" value="' + (preset.gateway || '') + '"></div>' +
+        '<div class="col-md-4 mb-2"><label class="form-label">Gateway (optional)</label><input class="form-control nic-gw" value="' + (preset.gateway || '') + '" placeholder="omit on secondary NICs"></div>' +
         '</div>' +
         '<div class="mb-2"><label class="form-label">DNS</label><input class="form-control nic-dns" value="' + (preset.dns_servers || '') + '"></div>' +
         '<div class="form-check mb-2"><input type="checkbox" class="form-check-input nic-ipv6">' +

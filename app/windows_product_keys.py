@@ -49,6 +49,12 @@ def _normalize_edition(edition_id: str = '', caption: str = '') -> str:
     return ''
 
 
+def is_evaluation_edition(edition_id: str = '', caption: str = '') -> bool:
+    """True for Evaluation SKUs (GVLKs are invalid and break OOBE InstallPid)."""
+    blob = f'{edition_id} {caption}'.lower()
+    return 'eval' in blob
+
+
 def _detect_year(caption: str = '', build: int = 0) -> int:
     cap = caption or ''
     for year in (2025, 2022, 2019, 2016):
@@ -79,8 +85,11 @@ def resolve_server_product_key(
 
     Preference:
     1. Explicit ``product_key`` from the request (operator override)
-    2. GVLK matched from guest edition + year
+    2. GVLK matched from guest edition + year (volume-license SKUs only)
     3. Empty (caller may skip injecting ProductKey)
+
+    Evaluation editions never get an auto GVLK: those keys are for VL images and
+    cause OOBE ``InstallPid`` failures (hr=0xC004F015) that block FirstLogon.
     """
     override = (product_key or '').strip().upper()
     if override:
@@ -90,6 +99,9 @@ def resolve_server_product_key(
                 'product_key must look like XXXXX-XXXXX-XXXXX-XXXXX-XXXXX'
             )
         return override
+
+    if is_evaluation_edition(edition_id, caption):
+        return ''
 
     edition = _normalize_edition(edition_id, caption)
     if not edition:

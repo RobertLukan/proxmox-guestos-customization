@@ -13,6 +13,15 @@ RUN pip install --no-cache-dir --upgrade 'pip>=26.1.2' \
 # Copy the application code.
 COPY . .
 
+# Stamp image build time so local rebuilds are distinguishable from VERSION alone.
+# CI may pass BUILD_TIMESTAMP explicitly; otherwise use UTC now at build.
+ARG BUILD_TIMESTAMP=
+RUN if [ -n "$BUILD_TIMESTAMP" ]; then \
+      printf '%s\n' "$BUILD_TIMESTAMP" > /app/BUILD_TIMESTAMP; \
+    else \
+      date -u +%Y-%m-%dT%H:%M:%SZ > /app/BUILD_TIMESTAMP; \
+    fi
+
 EXPOSE 5001
 
 # Default command runs the web server; the worker service overrides this in

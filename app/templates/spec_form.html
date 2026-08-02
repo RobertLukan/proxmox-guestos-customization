@@ -81,8 +81,8 @@
       <input class="form-control" id="netmask_cidr" name="netmask_cidr" value="{{ p.get('netmask_cidr') or '24' }}">
     </div>
     <div class="col-md-4 mb-3">
-      <label class="form-label" for="gateway">Gateway</label>
-      <input class="form-control" id="gateway" name="gateway" value="{{ p.get('gateway') or '' }}">
+      <label class="form-label" for="gateway">Gateway (optional)</label>
+      <input class="form-control" id="gateway" name="gateway" value="{{ p.get('gateway') or '' }}" placeholder="omit on secondary NICs">
     </div>
   </div>
   <div class="mb-3">
