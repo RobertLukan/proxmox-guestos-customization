@@ -82,7 +82,7 @@ VL guests still get the matched GVLK. One unattend template; Jinja branches on
 | `ServerStandard` / `… Standard` (no Eval) | `Using Server GVLK for VM …` | `<ProductKey>` present |
 | `ServerStandardEval` / `… Evaluation` | `Skipping GVLK for Evaluation guest …` | no ProductKey; Eval OOBE regs |
 
-If you still see Eval guests getting a ProductKey, upgrade GuestOS past 2.6.2.
+If you still see Eval guests getting a ProductKey, upgrade GuestOS to **2.6.3+**.
 
 ## Verify failed but Sysprep ran
 

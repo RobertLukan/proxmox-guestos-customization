@@ -63,7 +63,9 @@ def _patch_workflow_side_effects(monkeypatch, *, clone_vmid=9055, fail_clone=Fal
     def _sleep(_seconds):
         calls['sleeps'] += 1
 
-    def _wait_agent(vmid, timeout=1200, stable_for=60):
+    def _wait_agent(vmid, timeout=1200, stable_for=60, on_progress=None, **kwargs):
+        if on_progress:
+            on_progress('guest agent mock ok')
         return True
 
     def _write_files(vmid, unattended_xml, setup_ps1, setup_complete):

@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
   title: GuestOS machine API
-  version: 2.6.3
+  version: 2.6.4
   description: |
     Sysprep customize sidecar for Proxmox (template → clone → Sysprep → verify).
     Authenticate with `Authorization: Bearer <token>` or `X-Api-Token`.
-    App version is 2.6.3+; `min_pdm_guestos` remains 2.3.0 for PDM fork compatibility.
+    App version is 2.6.4+; `min_pdm_guestos` remains 2.3.0 for PDM fork compatibility.
 servers:
   - url: https://guestos.example.com
 paths:
@@ -30,7 +30,7 @@ paths:
                 properties:
                   version:
                     type: string
-                    example: '2.6.3'
+                    example: '2.6.4'
                     description: GuestOS application version (VERSION file)
                   min_pdm_guestos:
                     type: string
