@@ -69,6 +69,72 @@ def test_unattend_sets_hostname_and_timezone():
     assert r'C:\ProgramData\GuestOS\setup.ps1' in xml
     assert '<AutoLogon>' in xml
     assert 'net user Administrator /active:yes' in xml
+    assert 'Microsoft-Windows-Setup' not in xml
+    assert '<WillShowUI>' not in xml
+    assert '<ProductKey>' not in xml
+
+
+def test_unattend_includes_product_key_when_set():
+    data = _base_data()
+    data['product_key'] = 'VDYBN-27WPP-V4HQT-9VMD4-VMK7H'
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        xml, _ps1, _cmd = _render_sysprep_files(data)
+    xml = xml.decode()
+    assert '<ProductKey>VDYBN-27WPP-V4HQT-9VMD4-VMK7H</ProductKey>' in xml
+    assert 'Microsoft-Windows-Setup' not in xml
+
+
+def test_validate_rejects_bad_product_key():
+    data = _base_data()
+    data['product_key'] = 'short'
+    with pytest.raises(ValidationError):
+        _validate_sysprep_network(data)
+
+
+def test_ensure_server_product_key_injects_gvlk(monkeypatch):
+    from app.sysprep_render import _ensure_server_product_key
+
+    monkeypatch.setattr('app.proxmox.is_windows_server_template', lambda *a, **k: True)
+    monkeypatch.setattr(
+        'app.sysprep_render._read_guest_windows_edition',
+        lambda vmid: ('ServerStandard', 'Microsoft Windows Server 2022 Standard', 20348),
+    )
+    monkeypatch.setattr(
+        'app.sysprep_render._guess_server_year_from_template',
+        lambda vmid: 2022,
+    )
+    data = {'template_vmid': 130, 'product_key': ''}
+    with flask_app.app_context():
+        _ensure_server_product_key(data, 999)
+    assert data['product_key'] == 'VDYBN-27WPP-V4HQT-9VMD4-VMK7H'
+
+
+def test_ensure_server_product_key_skips_non_server(monkeypatch):
+    from app.sysprep_render import _ensure_server_product_key
+
+    monkeypatch.setattr('app.proxmox.is_windows_server_template', lambda *a, **k: False)
+    data = {'template_vmid': 100, 'product_key': ''}
+    with flask_app.app_context():
+        _ensure_server_product_key(data, 999)
+    assert data['product_key'] == ''
+
+
+def test_ensure_server_product_key_keeps_override(monkeypatch):
+    from app.sysprep_render import _ensure_server_product_key
+
+    called = {'read': 0}
+
+    def _read(_vmid):
+        called['read'] += 1
+        return ('ServerDatacenter', 'x', 20348)
+
+    monkeypatch.setattr('app.sysprep_render._read_guest_windows_edition', _read)
+    data = {'template_vmid': 130, 'product_key': 'WX4NM-KYWYW-QJJR4-XV3QB-6VM33'}
+    with flask_app.app_context():
+        _ensure_server_product_key(data, 999)
+    assert called['read'] == 0
+    assert data['product_key'] == 'WX4NM-KYWYW-QJJR4-XV3QB-6VM33'
 
 
 def test_unattend_uses_selected_locale():

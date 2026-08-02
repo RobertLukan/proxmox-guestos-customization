@@ -28,6 +28,7 @@ from app.windows_identity import (
     DEFAULT_TIMEZONE,
     DEFAULT_WORKGROUP,
 )
+from app.windows_product_keys import resolve_server_product_key
 
 
 def _normalize_nics_from_request(data):
@@ -97,6 +98,16 @@ def _validate_sysprep_network(data):
 
     data['timezone'] = validate_timezone(data.get('timezone') or DEFAULT_TIMEZONE)
     data['locale'] = validate_locale(data.get('locale') or DEFAULT_LOCALE)
+
+    # Optional operator override; GVLK auto-fill happens later via guest agent.
+    pk = (data.get('product_key') or '').strip()
+    if pk:
+        try:
+            data['product_key'] = resolve_server_product_key(product_key=pk)
+        except ValueError as e:
+            raise ValidationError(str(e))
+    else:
+        data['product_key'] = ''
 
     nics = [_validate_one_nic(dict(n), i) for i, n in enumerate(_normalize_nics_from_request(data))]
     if len(nics) > 8:
@@ -175,6 +186,98 @@ def _prepare_domain_join(data):
     ).decode('ascii')
     # Do not keep the raw secret around once it is packed into the blob.
     data.pop('domain_password', None)
+
+
+def _guess_server_year_from_template(vmid):
+    """Best-effort Server LTSC year from template name/tags (0 if unknown)."""
+    from app.proxmox import _template_name_tags
+
+    name, tags, _ostype = _template_name_tags(vmid)
+    blob = f'{name or ""} {tags or ""}'.lower()
+    for year in (2025, 2022, 2019, 2016):
+        if str(year) in blob:
+            return year
+    return 0
+
+
+def _read_guest_windows_edition(vmid):
+    """Return ``(edition_id, caption, build)`` from the guest, best-effort."""
+    import re
+
+    from app.proxmox import run_command_in_guest
+
+    ps = (
+        "powershell.exe -NoProfile -Command "
+        "\"$cv = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion'; "
+        "$os = Get-CimInstance Win32_OperatingSystem; "
+        "Write-Output (($cv.EditionID) + '|' + ($os.Caption) + '|' + ($cv.CurrentBuild))\""
+    )
+    out = (run_command_in_guest(vmid, ps) or '').strip()
+    parts = out.split('|')
+    edition_id = (parts[0] if len(parts) > 0 else '').strip()
+    caption = (parts[1] if len(parts) > 1 else '').strip()
+    build = 0
+    if len(parts) > 2:
+        try:
+            build = int(re.sub(r'\D', '', parts[2]) or 0)
+        except ValueError:
+            build = 0
+    return edition_id, caption, build
+
+
+def _ensure_server_product_key(data, vmid):
+    """For Server templates, ensure specialize has a ProductKey.
+
+    Explicit ``product_key`` wins. Otherwise inject the matching Microsoft GVLK
+    so OOBE does not stop on Enter product key. (Unattend cannot click
+    "Do this later"; empty Setup ProductKey/WillShowUI in specialize fails.)
+    """
+    from flask import current_app
+
+    from app.proxmox import is_windows_server_template
+
+    if (data.get('product_key') or '').strip():
+        return
+
+    template_vmid = data.get('template_vmid') or vmid
+    if not is_windows_server_template(template_vmid):
+        return
+
+    edition_id, caption, build = '', '', 0
+    try:
+        edition_id, caption, build = _read_guest_windows_edition(vmid)
+    except Exception as e:
+        current_app.logger.warning(
+            "Could not read Windows edition from VM %s: %s", vmid, e
+        )
+
+    default_year = _guess_server_year_from_template(template_vmid) or 2022
+    try:
+        key = resolve_server_product_key(
+            edition_id=edition_id,
+            caption=caption,
+            build=build,
+            default_year=default_year,
+        )
+    except ValueError:
+        key = ''
+
+    if not key:
+        key = resolve_server_product_key(
+            edition_id='ServerStandard',
+            caption=f'Windows Server {default_year}',
+            build=build,
+            default_year=default_year,
+        )
+    data['product_key'] = key
+    if key:
+        current_app.logger.info(
+            "Using Server GVLK for VM %s OOBE (edition=%r caption=%r build=%s)",
+            vmid,
+            edition_id or '?',
+            caption or '?',
+            build or '?',
+        )
 
 
 def _render_sysprep_files(data):

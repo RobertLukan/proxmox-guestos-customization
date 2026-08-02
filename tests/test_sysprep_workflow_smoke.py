@@ -108,6 +108,7 @@ def _patch_workflow_side_effects(monkeypatch, *, clone_vmid=9055, fail_clone=Fal
     monkeypatch.setattr(ca, 'power_on_vm', _power_on)
     monkeypatch.setattr(ca.time, 'sleep', _sleep)
     monkeypatch.setattr(ca, 'wait_for_guest_agent', _wait_agent)
+    monkeypatch.setattr(ca, '_ensure_server_product_key', lambda data, vmid: None)
     monkeypatch.setattr(ca, '_write_sysprep_files', _write_files)
     monkeypatch.setattr(ca, 'run_shutdown_command_in_guest', _run_shutdown)
     monkeypatch.setattr(ca, '_complete_sysprep_power_cycle', _power_cycle)

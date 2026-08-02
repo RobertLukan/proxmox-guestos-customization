@@ -35,8 +35,13 @@ drops `setup.done` while leaving IP/disks applied. FirstLogonCommands is the onl
 
 1. Open the clone console (VMID on the task / PDM GuestOS tab).
 2. Confirm QEMU Guest Agent is running inside Windows.
-3. If OOBE is stuck, check AutoLogon (`LogonCount=3`) and that `setup.ps1` exists.
-4. Do not re-run in-place Sysprep on a production VM; delete the clone and start a new customize.
+3. If OOBE is stuck on **Enter product key** (common on Server 2022/2025), GuestOS
+   should inject a Microsoft GVLK into unattend specialize when no `product_key`
+   was provided. Re-run on a build that includes that support, or pass an explicit
+   `product_key`. Do not use empty Setup `ProductKey`/`WillShowUI` in specialize —
+   that fails with "could not apply unattend settings".
+4. If OOBE is stuck elsewhere, check AutoLogon (`LogonCount=3`) and that `setup.ps1` exists.
+5. Do not re-run in-place Sysprep on a production VM; delete the clone and start a new customize.
 
 ## Verify failed but Sysprep ran
 

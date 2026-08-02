@@ -64,11 +64,16 @@ not in the PDM Customize button.
 ## What GuestOS does on the clone
 
 1. Clone the template and power on; wait for a stable guest agent.
-2. Write `unattended.xml` and `C:\ProgramData\GuestOS\setup.ps1` (and related
+2. For Windows Server templates, detect edition and inject a Microsoft GVLK into
+   unattend specialize `ProductKey` when the request omits `product_key`, so OOBE
+   does not stop on Enter product key. (Unattend cannot click **Do this later**;
+   empty Setup `ProductKey`/`WillShowUI` in specialize fails.) Pass `product_key`
+   to use your own key instead.
+3. Write `unattended.xml` and `C:\ProgramData\GuestOS\setup.ps1` (and related
    scripts) via the guest agent.
-3. Run Sysprep generalize/OOBE; on first logon, `setup.ps1` applies network /
+4. Run Sysprep generalize/OOBE; on first logon, `setup.ps1` applies network /
    cleanup / optional domain join.
-4. Verify durable setup markers and expected hostname/IP before marking SUCCESS.
+5. Verify durable setup markers and expected hostname/IP before marking SUCCESS.
 
 If a job fails mid-flight, the clone may remain on the cluster — see
 [FAILURE_RUNBOOK.md](FAILURE_RUNBOOK.md).
