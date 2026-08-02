@@ -182,11 +182,34 @@ def main():
     p.add_argument('--poll-seconds', type=int, default=3600)
     p.add_argument('--cleanup', action='store_true')
     p.add_argument('--cleanup-on-failure', action='store_true')
+    p.add_argument(
+        '--ram-reserve-mb',
+        type=int,
+        default=None,
+        help='Host RAM headroom for preflight (default 4096 or LAB_SMOKE_RAM_RESERVE_MB).',
+    )
+    p.add_argument(
+        '--skip-ram-check',
+        action='store_true',
+        help='Skip PVE free-RAM preflight (not recommended; can OOM the lab).',
+    )
     args = p.parse_args()
 
     if not args.token:
         print('GUESTOS_API_TOKEN / --token required', file=sys.stderr)
         return 1
+
+    # Preflight before any clone: fail closed if the lab is short on RAM.
+    from lab_smoke_preflight import ensure_lab_ram
+
+    rc = ensure_lab_ram(
+        args.ram,
+        1,
+        reserve_mb=args.ram_reserve_mb,
+        skip=args.skip_ram_check,
+    )
+    if rc != 0:
+        return rc
 
     base = args.base_url.rstrip('/')
     insecure = args.insecure

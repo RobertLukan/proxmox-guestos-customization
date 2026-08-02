@@ -18,14 +18,16 @@ and [AD_VALIDATION.md](AD_VALIDATION.md).
 
 | ID | Item | Confirmed |
 |----|------|-----------|
+| `win11-bulk-ad` | Win11 bulk 2× VDI DHCP + AD (`lab_bulk_win11_ad_smoke.py`) | 2026-08-02 — `VDI698941A`→144, `VDI698941B`→142 SUCCESS (domain joined) |
 | `secrets-stash-2022` | Admin/domain secrets side-channel + 2022 VL full smoke | 2026-08-02 — `S22S185146` SUCCESS |
 | `eval-failclosed-2019` | Eval skip GVLK + fail-closed unknown edition | 2026-08-02 — `S19S185702` SUCCESS |
 | `win11-domain-nodisk` | Win11 join without disks | 2026-08-02 — `W11S190319` SUCCESS |
 | `recycle-bin-reset` | `$RECYCLE.BIN` reset after data volume setup | Code added 2026-08-02; live confirm on next disk smoke (optional note in verify) |
+| `lab-ram-preflight` | Refuse lab smoke if PVE free RAM &lt; guests + 4 GiB reserve | 2026-08-02 — `scripts/lab_smoke_preflight.py` wired into all `lab_*_smoke.py` |
 
 ## Suggested next smoke sequence (when ready)
 
 1. Confirm DC clock/TZ/NTP fixed (`w32tm /query /status` on DC → not LOCL; TZ correct).
-2. Run one full AD smoke (**2022** or **2019**) and check guest time (**`ntp-dc-resync`**).
+2. One AD smoke and check guest time (**`ntp-dc-resync`**).
 3. Optionally re-check Recycle Bin on D:/E: after disk smoke.
 4. Update this file: move open → done with host/VMID/date.

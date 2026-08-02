@@ -93,10 +93,24 @@
     return rules;
   }
 
+  function feedbackFor(el) {
+    if (!el) return null;
+    var scope = el.closest('.mb-3') || el.parentElement;
+    if (scope) {
+      var fb = scope.querySelector(':scope > .invalid-feedback');
+      if (fb) return fb;
+    }
+    var group = el.closest('.password-reveal-group') || el.closest('.input-group');
+    if (group && group.parentElement) {
+      return group.parentElement.querySelector('.invalid-feedback');
+    }
+    return el.parentElement && el.parentElement.querySelector('.invalid-feedback');
+  }
+
   function setInvalid(el, message) {
     el.classList.add('is-invalid');
     el.classList.remove('is-valid');
-    var fb = el.parentElement && el.parentElement.querySelector('.invalid-feedback');
+    var fb = feedbackFor(el);
     if (fb) fb.textContent = message || '';
   }
 
@@ -104,13 +118,13 @@
     el.classList.remove('is-invalid');
     if (el.value) el.classList.add('is-valid');
     else el.classList.remove('is-valid');
-    var fb = el.parentElement && el.parentElement.querySelector('.invalid-feedback');
+    var fb = feedbackFor(el);
     if (fb) fb.textContent = '';
   }
 
   function clearValidation(el) {
     el.classList.remove('is-invalid', 'is-valid');
-    var fb = el.parentElement && el.parentElement.querySelector('.invalid-feedback');
+    var fb = feedbackFor(el);
     if (fb) fb.textContent = '';
   }
 

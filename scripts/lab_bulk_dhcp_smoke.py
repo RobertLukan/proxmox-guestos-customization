@@ -37,6 +37,19 @@ def main():
         print('GUESTOS_API_TOKEN required', file=sys.stderr)
         return 1
 
+    # Preflight before any clone: fail closed if the lab is short on RAM.
+    # Defaults match this script's shared payload (2 × 4096 MiB).
+    from lab_smoke_preflight import ensure_lab_ram
+
+    skip = os.environ.get('LAB_SMOKE_SKIP_RAM_CHECK', '').strip().lower() in (
+        '1',
+        'true',
+        'yes',
+    )
+    rc = ensure_lab_ram(4096, 2, skip=skip)
+    if rc != 0:
+        return rc
+
     spec_name = f'BulkDHCP-Lab-{int(time.time()) % 100000}'
     code, spec = req(
         'POST',

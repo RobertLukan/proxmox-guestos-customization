@@ -49,13 +49,25 @@ class Task(db.Model):
     sequence_no = db.Column(db.Integer, nullable=True)
     submitter = db.Column(db.String(128), nullable=True)
     error_code = db.Column(db.String(64), nullable=True)
-    error_details = db.Column(db.String(1024), nullable=True)
+    error_details = db.Column(db.Text, nullable=True)
+    # Sanitized customization snapshot (no passwords) for Jobs history.
+    options_json = db.Column(db.Text, nullable=True)
 
     def __repr__(self):
         return '<Task {}> '.format(self.name)
 
     def _timestamp_iso(self, ts):
         return _timestamp_iso(ts)
+
+    def options(self):
+        from app.task_options import parse_options_json
+
+        return parse_options_json(self.options_json)
+
+    def options_chips(self):
+        from app.task_options import options_summary_chips
+
+        return options_summary_chips(self.options())
 
     def to_dict(self):
         return {
@@ -80,6 +92,8 @@ class Task(db.Model):
             'submitter': self.submitter,
             'error_code': self.error_code,
             'error_details': self.error_details,
+            'options': self.options(),
+            'options_chips': self.options_chips(),
         }
 
     def update_status(self, status, progress=None, message=None, result_vmid=None, result_ip_address=None, vm_uuid=None, redirect_url=None, error_code=None, error_details=None):

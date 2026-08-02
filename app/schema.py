@@ -16,7 +16,8 @@ _TASK_EXTRA_COLUMNS = (
     ('sequence_no', 'INTEGER'),
     ('submitter', 'VARCHAR(128)'),
     ('error_code', 'VARCHAR(64)'),
-    ('error_details', 'VARCHAR(1024)'),
+    ('error_details', 'TEXT'),
+    ('options_json', 'TEXT'),
 )
 
 

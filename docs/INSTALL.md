@@ -239,7 +239,7 @@ Minimum production-oriented settings:
 | `SECRET_KEY` | Required; random |
 | `PROXMOX_HOST` / `USER` / `PASSWORD` | Real cluster API (user + password) |
 | `PROXMOX_VERIFY_SSL` | **`True`** with a trusted PVE cert (or install your CA into the containers) |
-| `PRIMARY_BRIDGE` | Bridge clones should land on (defaults to `vmbr0` if unset) |
+| `PRIMARY_BRIDGE` | Bridge **or SDN VNet name** clones should land on (defaults to `vmbr0` if unset) |
 | `BEHIND_REVERSE_PROXY` | **`True`** (Compose Caddy, or your own TLS proxy) |
 | `GUESTOS_TLS_HOST` | Public DNS name operators type in the browser |
 | `GUESTOS_API_TOKEN` | Long random; shared only with PDM `guestos.cfg` |
@@ -263,7 +263,7 @@ Compose **v2** required (see [Packages / tools](#packages--tools-guestos-host)).
 **Preferred — pull from GHCR** (image published on each `v*` release):
 
 ```bash
-export GUESTOS_VERSION=2.6.6   # pin; both 2.6.6 and v2.6.6 tags exist on GHCR
+export GUESTOS_VERSION=2.6.7   # pin; both 2.6.7 and v2.6.7 tags exist on GHCR
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 # Podman: podman compose -f docker-compose.yml -f docker-compose.ghcr.yml …

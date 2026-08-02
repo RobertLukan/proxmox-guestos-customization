@@ -25,6 +25,7 @@ from app.windows_identity import (
 from app.api_auth import login_or_api_token_required, with_session_csrf
 from app.remotes import resolve_pve_remote, attach_pve_override
 from app.launch_token import verify_launch_token
+from app.task_options import options_to_json
 from app.task_secrets import stash_task_secrets
 from app.provision_limits import (
     PVE_ADMIN_HINT,
@@ -536,7 +537,8 @@ def api_provision_limits():
 @app.route('/workflow/<task_id>')
 @login_required
 def workflow(task_id):
-    return render_template('workflow.html', task_id=task_id)
+    task = Task.query.get(task_id)
+    return render_template('workflow.html', task_id=task_id, task=task)
 
 @app.route('/sysprep_form', methods=['GET', 'POST'])
 @login_required
@@ -633,11 +635,21 @@ def start_sysprep_workflow():
         template_vmid=int(data['template_vmid']) if str(data.get('template_vmid', '')).isdigit() else None,
         remote_id=(data.get('remote_id') or None),
         submitter=_request_submitter(),
+        options_json=options_to_json(data),
     )
     db.session.add(task)
     db.session.commit()
 
-    stash_task_secrets(task_id, data)
+    try:
+        stash_task_secrets(task_id, data)
+    except RuntimeError as e:
+        task.status = 'FAILURE'
+        task.message = str(e)
+        task.error_code = 'secrets_stash'
+        task.error_details = str(e)
+        db.session.commit()
+        return jsonify({'error': str(e), 'task_id': task_id}), 503
+
     sysprep_workflow_task.apply_async(
         args=(task_id, data),
         queue='clone_queue',
@@ -811,6 +823,7 @@ def start_sysprep_bulk_workflow():
             request_id=request_id,
             sequence_no=idx,
             submitter=batch.submitted_by,
+            options_json=options_to_json(data),
         )
         db.session.add(task)
         accepted += 1
@@ -823,19 +836,47 @@ def start_sysprep_bulk_workflow():
         batch.message = 'No valid items were accepted from this batch.'
     db.session.commit()
 
+    enqueued_ids = []
+    stash_failures = []
     for task_id, data in task_refs:
-        stash_task_secrets(task_id, data)
+        try:
+            stash_task_secrets(task_id, data)
+        except RuntimeError as e:
+            task = Task.query.get(task_id)
+            if task:
+                task.status = 'FAILURE'
+                task.message = str(e)
+                task.error_code = 'secrets_stash'
+                task.error_details = str(e)
+                db.session.commit()
+            stash_failures.append(task_id)
+            continue
         sysprep_workflow_task.apply_async(
             args=(task_id, data),
             queue='clone_queue',
         )
+        enqueued_ids.append(task_id)
+
+    if stash_failures and not enqueued_ids:
+        batch.status = 'FAILED'
+        batch.message = 'Could not stash task secrets; no jobs were started.'
+        db.session.commit()
+        return jsonify({
+            'batch_id': batch_id,
+            'request_id': request_id,
+            'accepted_count': 0,
+            'rejected_count': rejected + len(stash_failures),
+            'task_ids': [],
+            'error': 'Unable to stash task secrets securely.',
+            'idempotent_replay': False,
+        }), 503
 
     resp = {
         'batch_id': batch_id,
         'request_id': request_id,
-        'accepted_count': accepted,
-        'rejected_count': rejected,
-        'task_ids': [t for t, _ in task_refs],
+        'accepted_count': len(enqueued_ids),
+        'rejected_count': rejected + len(stash_failures),
+        'task_ids': enqueued_ids,
         'idempotent_replay': False,
     }
     if warnings:

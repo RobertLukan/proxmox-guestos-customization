@@ -553,10 +553,9 @@
     var rows = parsed.rows;
     var bulkGateway = (form.querySelector('#bulk_gateway') || {}).value || '';
     var bulkDns = (form.querySelector('#bulk_dns_servers') || {}).value || '';
-    // In bulk mode the per-row list owns hostnames/IPs.
+    // In bulk mode the per-row list owns hostnames/IPs — keep domain_profile.
     shared.hostname = '';
     shared.ip_address = '';
-    shared.domain_profile = '';
     shared.vlan = '';
     shared.dns_servers = bulkDns.trim();
     if (mode === 'dhcp') {

@@ -486,6 +486,14 @@ def get_vm_nic_macs(vmid):
 
 def _build_net_config(bridge, vlan, existing_net=''):
     """Build a virtio netN config string, preserving MAC when present."""
+    from app.validators import ValidationError, validate_bridge
+
+    try:
+        bridge = validate_bridge(bridge) or ''
+    except ValidationError as e:
+        raise ValueError(str(e)) from e
+    if not bridge:
+        raise ValueError('Bridge is required for net config.')
     mac_match = re.search(r'([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})', existing_net or '')
     if mac_match:
         net_config = f'virtio={mac_match.group(1)},bridge={bridge}'

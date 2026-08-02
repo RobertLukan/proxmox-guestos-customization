@@ -143,3 +143,24 @@ def validate_workgroup(value):
             f"Invalid workgroup (1-15 chars, letters/digits/hyphen only): {value!r}"
         )
     return label
+
+
+# Linux bridge / Proxmox SDN VNet iface names (no commas or '=' — those alter netN).
+BRIDGE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+
+
+def validate_bridge(value, field='bridge'):
+    """Return a safe Proxmox bridge / SDN VNet name, or None when empty.
+
+    Rejects commas, spaces, and ``=`` so the value cannot inject extra QEMU
+    ``netN`` key/value pairs when interpolated into ``bridge=…``.
+    """
+    if value in (None, '', 'None'):
+        return None
+    name = str(value).strip()
+    if not BRIDGE_RE.match(name) or ',' in name or '=' in name:
+        raise ValidationError(
+            f"Invalid {field} (use a bridge or SDN VNet name; "
+            f"letters/digits/._- only, no commas): {value!r}"
+        )
+    return name

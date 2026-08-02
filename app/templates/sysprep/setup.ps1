@@ -557,6 +557,13 @@ for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
 
 # Scrub the credential-bearing script from disk regardless of outcome.
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+# Also remove durable copies that carried domain_join_b64 (registry + C:\GuestOS).
+try {
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\GuestOS' -Name SetupPs1B64 -ErrorAction SilentlyContinue
+} catch {}
+Remove-Item -LiteralPath 'C:\GuestOS\setup.ps1' -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath 'C:\Windows\Temp\GuestOS-setup.ps1' -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath "$env:TEMP\GuestOS-setup.ps1" -Force -ErrorAction SilentlyContinue
 
 # Mark complete before reboot so FirstLogonCommands re-entry is a no-op.
 Write-GuestOsSetupMarker -Status done -Detail 'ok'
@@ -593,6 +600,15 @@ if ($workgroup) {
 
 # Mark complete before reboot so FirstLogonCommands re-entry is a no-op.
 Write-GuestOsSetupMarker -Status done -Detail 'ok'
+
+# Scrub durable setup.ps1 copies (may still contain network/identity blobs).
+try {
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\GuestOS' -Name SetupPs1B64 -ErrorAction SilentlyContinue
+} catch {}
+Remove-Item -LiteralPath 'C:\GuestOS\setup.ps1' -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath 'C:\Windows\Temp\GuestOS-setup.ps1' -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath "$env:TEMP\GuestOS-setup.ps1" -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 
 if ($pagefileLetter) {
     Write-Output "setup.ps1: Restarting so pagefile on ${pagefileLetter}: becomes active."

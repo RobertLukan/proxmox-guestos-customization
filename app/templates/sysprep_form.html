@@ -139,17 +139,6 @@
             </select>
             <div class="invalid-feedback"></div>
         </div>
-        <div class="mb-3" id="domain_profile_group">
-            <label for="domain_profile" class="form-label">Domain Profile (optional)</label>
-            <select class="form-select" id="domain_profile" name="domain_profile">
-                <option value="">Select a profile</option>
-                {% for profile, details in domain_profiles.items() %}
-                <option value="{{ profile }}">{{ profile }}</option>
-                {% endfor %}
-            </select>
-            <div class="form-text">Fills DNS and VLAN from the profile. Domain-join credentials stay on the server.</div>
-            <div class="invalid-feedback"></div>
-        </div>
         <div class="mb-3" id="vlan_group">
             <label for="vlan" class="form-label">VLAN (optional)</label>
             <input type="number" name="vlan" id="vlan" class="form-control" data-validate="vlan" min="1" max="4094">
@@ -235,6 +224,17 @@
             <div class="invalid-feedback"></div>
         </div>
         <div id="domain_fields" hidden>
+            <div class="mb-3" id="domain_profile_group">
+                <label for="domain_profile" class="form-label">Domain Profile</label>
+                <select class="form-select" id="domain_profile" name="domain_profile">
+                    <option value="">Select a profile</option>
+                    {% for profile, details in domain_profiles.items() %}
+                    <option value="{{ profile }}">{{ profile }}</option>
+                    {% endfor %}
+                </select>
+                <div class="form-text">Fills DNS and VLAN from the profile when available. Required when using profile credentials. Credentials stay on the server.</div>
+                <div class="invalid-feedback"></div>
+            </div>
             <div class="form-check mb-3">
                 <input type="checkbox" class="form-check-input" id="use_domain_profile_credentials" checked>
                 <label class="form-check-label" for="use_domain_profile_credentials">Use Domain Profile Credentials</label>
@@ -352,7 +352,6 @@
     var ipAddressInput = form.querySelector('#ip_address');
     var netmaskInput = form.querySelector('#netmask_cidr');
     var gatewayInput = form.querySelector('#gateway');
-    var domainProfileGroup = form.querySelector('#domain_profile_group');
     var vlanGroup = form.querySelector('#vlan_group');
     var netmaskGroup = form.querySelector('#netmask_group');
     var gatewayGroup = form.querySelector('#gateway_group');
@@ -655,10 +654,6 @@
             dnsServersGroup.hidden = isBulk;
             dnsServersGroup.style.display = isBulk ? 'none' : '';
         }
-        if (domainProfileGroup) {
-            domainProfileGroup.hidden = isBulkStatic;
-            domainProfileGroup.style.display = isBulkStatic ? 'none' : '';
-        }
         if (vlanGroup) {
             vlanGroup.hidden = isBulk;
             vlanGroup.style.display = isBulk ? 'none' : '';
@@ -686,9 +681,6 @@
                 // Gateway optional: secondary / multi-homed NICs often omit it.
                 gatewayInput.removeAttribute('data-required');
             }
-        }
-        if (isBulk) {
-            profileSelect.value = '';
         }
         if (networkModeSelect && isBulk && bulkNetworkInputMode) {
             networkModeSelect.value = bulkNetworkInputMode.value;

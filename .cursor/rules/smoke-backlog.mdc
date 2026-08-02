@@ -8,6 +8,10 @@ alwaysApply: true
 Before starting or proposing lab smoke tests, read and follow
 [docs/SMOKE_BACKLOG.md](docs/SMOKE_BACKLOG.md).
 
+- Lab smokes run a PVE free-RAM preflight (`scripts/lab_smoke_preflight.py`)
+  before cloning. Do not bypass with `--skip-ram-check` unless the user asks.
+  If a prior smoke left running guests, stop/delete them first or the check
+  will (correctly) refuse to start more VMs.
 - Prefer executing **Open** backlog items in the next smoke round instead of
   repeating only previously green paths.
 - After a successful live check, move the item to **Done** with host/VMID/date

@@ -11,6 +11,7 @@ from app.proxmox import run_command_in_guest, write_file_to_guest
 from app.util import as_bool as _as_bool
 from app.validators import (
     ValidationError,
+    validate_bridge,
     validate_dns_servers,
     validate_domain,
     validate_hostname,
@@ -59,7 +60,7 @@ def _validate_one_nic(nic, index=0):
     nic['use_dhcp'] = use_dhcp
     nic['network_mode'] = 'dhcp' if use_dhcp else 'static'
     nic['vlan'] = validate_vlan(nic.get('vlan'))
-    nic['bridge'] = (nic.get('bridge') or '').strip() or None
+    nic['bridge'] = validate_bridge(nic.get('bridge'))
     nic['dns_list'] = validate_dns_servers(nic.get('dns_servers'), allow_ipv6=True)
     if not use_dhcp:
         nic['ip_address'] = validate_ipv4(nic.get('ip_address'), field=f'NIC{index} IP address')

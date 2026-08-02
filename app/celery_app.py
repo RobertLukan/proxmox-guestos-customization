@@ -156,7 +156,10 @@ def _fail_sysprep_task(task_id, message, vmid=None, hostname=None, error_code=No
         _abandon_cancelled_clone(task_id, vmid=vmid, hostname=hostname, data=data)
         return
     task.status = 'FAILURE'
-    task.message = message
+    full = str(message or '')
+    task.error_details = full
+    # Short badge / list text (DB column historically VARCHAR(512)).
+    task.message = full if len(full) <= 512 else (full[:509] + '...')
     if error_code:
         task.error_code = error_code
     if vmid is not None:

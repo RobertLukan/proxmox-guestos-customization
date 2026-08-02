@@ -2,6 +2,7 @@ import pytest
 
 from app.validators import (
     ValidationError,
+    validate_bridge,
     validate_dns_servers,
     validate_hostname,
     validate_ipv4,
@@ -73,3 +74,15 @@ def test_validate_dns_servers_parses_list():
 def test_validate_dns_servers_rejects_bad_entry():
     with pytest.raises(ValidationError):
         validate_dns_servers('10.0.0.1, notanip')
+
+
+def test_validate_bridge_ok():
+    assert validate_bridge('vmbr0') == 'vmbr0'
+    assert validate_bridge('vnet-prod') == 'vnet-prod'
+    assert validate_bridge('') is None
+
+
+@pytest.mark.parametrize('bad', ['vmbr0,tag=10', 'bad=bridge', 'has space', 'a' * 65])
+def test_validate_bridge_rejects(bad):
+    with pytest.raises(ValidationError):
+        validate_bridge(bad)

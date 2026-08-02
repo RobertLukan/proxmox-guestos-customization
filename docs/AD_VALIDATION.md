@@ -34,7 +34,13 @@ python3 scripts/lab_full_feature_smoke.py --template-vmid 130 --poll
 python3 scripts/lab_full_feature_smoke.py --template-vmid 120 --poll
 # Win11 + domain, no disk customize
 python3 scripts/lab_full_feature_smoke.py --template-vmid 127 --no-disks --poll
+# Win11 bulk: 2 VDIs, DHCP, DNS=lab DC, AD join
+python3 scripts/lab_bulk_win11_ad_smoke.py --poll
 ```
+
+Lab smokes refuse to start when Proxmox free RAM is below
+`(guests × ram) + 4 GiB` reserve (`scripts/lab_smoke_preflight.py`).
+Override only with `--skip-ram-check` / `LAB_SMOKE_SKIP_RAM_CHECK=1`.
 
 ## What “validated” means here
 
@@ -55,3 +61,4 @@ python3 scripts/lab_full_feature_smoke.py --template-vmid 127 --no-disks --poll
 ## Security
 
 Join passwords stay server-side when using profile credentials; they are never sent to the browser.
+On the guest (2.6.7+), `setup.ps1` scrubs `SetupPs1B64` / `C:\GuestOS\setup.ps1` after join so the AD password is not left on disk.

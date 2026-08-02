@@ -139,7 +139,11 @@ def _load_sqlite(task_id: str) -> dict | None:
 
 
 def stash_task_secrets(task_id: str, data: dict) -> None:
-    """Move sensitive fields from ``data`` into a short-TTL side channel."""
+    """Move sensitive fields from ``data`` into a short-TTL side channel.
+
+    Raises ``RuntimeError`` when secrets cannot be stashed (do not fall back
+    onto the Celery/Redis payload in production).
+    """
     secrets = {}
     for key in _SECRET_KEYS:
         val = data.pop(key, None)
@@ -151,13 +155,16 @@ def stash_task_secrets(task_id: str, data: dict) -> None:
         return
     if _stash_sqlite(task_id, secrets):
         return
-    # Last resort: put secrets back so the job can still run (lab without Redis).
+    # Restore onto data so the caller can decide; refuse enqueue by raising.
+    data.update(secrets)
     _log.error(
-        'Could not stash task secrets for %s; restoring onto payload '
-        '(configure Redis for production).',
+        'Could not stash task secrets for %s (Redis and SQLite failed).',
         task_id,
     )
-    data.update(secrets)
+    raise RuntimeError(
+        'Unable to stash task secrets securely. Configure Redis (or fix the '
+        'database) and retry — passwords will not be placed on the Celery broker.'
+    )
 
 
 def load_task_secrets(task_id: str, data: dict) -> None:

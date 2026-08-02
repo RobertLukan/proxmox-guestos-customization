@@ -38,3 +38,19 @@ def test_scrub_workflow_secrets():
     assert 'domain_password' not in data
     assert 'domain_join_b64' not in data
     assert data['hostname'] == 'H'
+
+
+def test_stash_fail_closed_when_backends_unavailable(app, monkeypatch):
+    from app import task_secrets as ts
+
+    monkeypatch.setattr(ts, '_stash_redis', lambda *a, **k: False)
+    monkeypatch.setattr(ts, '_stash_sqlite', lambda *a, **k: False)
+    data = {'administrator_password': 'secret', 'hostname': 'H'}
+    with app.app_context():
+        try:
+            ts.stash_task_secrets('fail-closed-1', data)
+            assert False, 'expected RuntimeError'
+        except RuntimeError as e:
+            assert 'stash' in str(e).lower()
+        # Secrets restored onto data so caller can clean up; not left only on Redis.
+        assert data.get('administrator_password') == 'secret'

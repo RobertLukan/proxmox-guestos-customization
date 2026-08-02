@@ -3,33 +3,40 @@
 {% block main_class %}app-main-wide{% endblock %}
 {% block content %}
 <h1>Customization Jobs</h1>
-<p class="page-lead">History of GuestOS clone+Sysprep (and related) jobs. The PDM <em>GuestOS</em> tab reads the same ledger via <code>/api/tasks</code>.</p>
+<p class="page-lead">History of GuestOS clone+Sysprep jobs. Options and errors are stored with each job so you can review them later. The PDM <em>GuestOS</em> tab reads the same ledger via <code>/api/tasks</code>.</p>
 {% if batch %}
-<div class="alert alert-info">
-  Showing batch <code>{{ batch.id }}</code> — accepted {{ batch.accepted_items }},
-  rejected {{ batch.rejected_items }}, cancelled {{ batch.cancelled_items }}.
-  <a href="{{ url_for('jobs_page') }}">Clear batch filter</a>
+<div class="alert alert-info d-flex flex-wrap align-items-center gap-2 justify-content-between">
+  <div>
+    Showing batch <code>{{ batch.id }}</code> — accepted {{ batch.accepted_items }},
+    rejected {{ batch.rejected_items }}, cancelled {{ batch.cancelled_items }}.
+    <a href="{{ url_for('jobs_page') }}">Clear batch filter</a>
+  </div>
+  {% if batch.status not in ('SUCCESS', 'FAILED', 'CANCELLED') %}
+  <button type="button" class="btn btn-outline-danger btn-sm" id="cancel-batch-btn"
+          data-batch-id="{{ batch.id }}">Cancel batch</button>
+  {% endif %}
 </div>
 {% endif %}
 {% if tasks %}
 <div class="table-responsive">
-<table class="table table-sm align-middle">
+<table class="table table-sm align-middle" id="jobs-table">
   <thead>
     <tr>
       <th>Started</th>
       <th>Batch</th>
-      <th>Name</th>
       <th>Hostname</th>
       <th>Remote</th>
       <th>Template</th>
       <th>Result VM</th>
+      <th>Options</th>
       <th>Status</th>
+      <th>Result / Error</th>
       <th></th>
     </tr>
   </thead>
   <tbody>
     {% for t in tasks %}
-    <tr>
+    <tr data-task-id="{{ t.id }}" data-status="{{ t.status }}">
       <td class="text-nowrap small">{{ t.timestamp }}</td>
       <td>
         {% if t.batch_id %}
@@ -39,15 +46,34 @@
           —
         {% endif %}
       </td>
-      <td>{{ t.name }}</td>
       <td>{{ t.hostname or '—' }}</td>
       <td>{{ t.remote_id or '—' }}</td>
       <td>{% if t.template_vmid %}{{ t.template_vmid }}{% else %}—{% endif %}</td>
       <td>{% if t.result_vmid %}{{ t.result_vmid }}{% else %}—{% endif %}</td>
+      <td class="small">
+        {% set chips = t.options_chips() %}
+        {% if chips == ['—'] %}
+          <span class="text-muted">—</span>
+        {% else %}
+          {% for c in chips %}
+            <span class="badge text-bg-light border">{{ c }}</span>
+          {% endfor %}
+        {% endif %}
+      </td>
       <td>
-        <span class="badge text-bg-{% if t.status == 'SUCCESS' %}success{% elif t.status == 'FAILURE' %}danger{% else %}primary{% endif %}">
-          {{ t.status }}{% if t.status not in ('SUCCESS','FAILURE') %} {{ t.progress }}%{% endif %}
+        <span class="badge text-bg-{% if t.status == 'SUCCESS' %}success{% elif t.status == 'FAILURE' %}danger{% elif t.status == 'CANCELLED' %}secondary{% else %}primary{% endif %}">
+          {{ t.status }}{% if t.status not in ('SUCCESS','FAILURE','CANCELLED') %} {{ t.progress }}%{% endif %}
         </span>
+      </td>
+      <td class="small" style="max-width: 18rem;">
+        {% if t.status == 'FAILURE' %}
+          {% if t.error_code %}<code>{{ t.error_code }}</code> {% endif %}
+          <span class="text-danger" title="{{ t.error_details or t.message }}">{{ (t.error_details or t.message or '')[:120] }}{% if (t.error_details or t.message or '')|length > 120 %}…{% endif %}</span>
+        {% elif t.status == 'SUCCESS' %}
+          <span class="text-muted" title="{{ t.message }}">{{ (t.message or 'OK')[:80] }}{% if (t.message or '')|length > 80 %}…{% endif %}</span>
+        {% else %}
+          <span class="text-muted">{{ (t.message or '')[:80] }}</span>
+        {% endif %}
       </td>
       <td><a class="btn btn-outline-secondary btn-sm" href="{{ url_for('workflow', task_id=t.id) }}">Open</a></td>
     </tr>
@@ -55,10 +81,54 @@
   </tbody>
 </table>
 </div>
+<p class="text-muted small mb-0" id="jobs-refresh-hint">Auto-refreshes while jobs are running.</p>
 {% else %}
 <div class="alert alert-info">No jobs recorded yet.</div>
 {% endif %}
-<div class="d-grid">
+<div class="d-grid mt-3">
   <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Back to Home</a>
 </div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var cancelBtn = document.getElementById('cancel-batch-btn');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', async function () {
+      var batchId = cancelBtn.getAttribute('data-batch-id');
+      if (!batchId || !window.confirm('Cancel all running jobs in this batch?')) return;
+      cancelBtn.disabled = true;
+      try {
+        var meta = document.querySelector('meta[name="csrf-token"]');
+        var headers = { 'Accept': 'application/json', 'Content-Type': 'application/json' };
+        if (meta) headers['X-CSRFToken'] = meta.getAttribute('content');
+        var resp = await fetch('/api/batches/' + encodeURIComponent(batchId) + '/cancel', {
+          method: 'POST',
+          headers: headers,
+          body: '{}',
+        });
+        if (!resp.ok) {
+          var err = await resp.json().catch(function () { return {}; });
+          window.alert(err.error || ('Cancel failed (HTTP ' + resp.status + ')'));
+          cancelBtn.disabled = false;
+          return;
+        }
+        window.location.reload();
+      } catch (e) {
+        window.alert('Cancel failed: ' + e);
+        cancelBtn.disabled = false;
+      }
+    });
+  }
+
+  var table = document.getElementById('jobs-table');
+  if (!table) return;
+  var running = Array.prototype.some.call(table.querySelectorAll('tr[data-status]'), function (tr) {
+    var s = tr.getAttribute('data-status');
+    return s === 'PENDING' || s === 'STARTED' || s === 'PROGRESS';
+  });
+  if (!running) return;
+  setTimeout(function () { window.location.reload(); }, 10000);
+})();
+</script>
 {% endblock %}

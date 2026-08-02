@@ -32,6 +32,11 @@ in unattend hung Sysprep in lab). FirstLogon extracts it to
 
 Also written: `HKLM\SOFTWARE\GuestOS` `SetupStatus=done|failed` (survives ProgramData cleanup).
 
+**Credential scrub (2.6.7+):** After setup completes (domain or workgroup path),
+`setup.ps1` removes `SetupPs1B64`, `C:\GuestOS\setup.ps1`, and Temp
+`GuestOS-setup.ps1` copies so domain-join credentials are not left on disk.
+Markers (`setup.done`) remain for verify.
+
 **Do not run `setup.ps1` from SetupComplete.cmd** — that path runs during specialize and
 specialize cleanup can delete `ProgramData\GuestOS` after the script finishes, which
 drops `setup.done` while leaving IP/disks applied. FirstLogonCommands is the only runner.

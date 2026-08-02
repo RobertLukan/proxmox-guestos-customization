@@ -27,6 +27,11 @@ VL 2019, …) share the same code path — community test reports wanted.
 ## Network readiness
 
 - Clones attach to `PRIMARY_BRIDGE` (or the bridge chosen in the wizard).
+- **Proxmox SDN:** after you create a VNet and click Apply, it appears as a
+  Linux bridge with that VNet’s name. Set `PRIMARY_BRIDGE` / wizard bridge to
+  the **VNet name**. Leave GuestOS **VLAN** empty unless the VNet is
+  VLAN-aware and you intentionally need a guest tag (many SDN zones reject
+  `tag=` on the NIC). DNS/gateway/AD must be reachable **on that VNet**.
 - Static IP customize needs a free address, correct prefix/gateway/DNS.
 - Domain join needs DNS that can resolve the domain controller (see
   [AD_VALIDATION.md](AD_VALIDATION.md)).

@@ -2,16 +2,54 @@
 {% block title %}Task Status{% endblock %}
 {% block content %}
 <h1>Task Status</h1>
-<p class="page-lead">Live progress for the background job.</p>
+<p class="page-lead">Live progress for the background job. Options and errors stay available after the run finishes.</p>
+
+{% if task %}
+<div class="card mb-3">
+  <div class="card-body">
+    <h2 class="h6">Job</h2>
+    <dl class="row mb-0 small">
+      <dt class="col-sm-3">Hostname</dt><dd class="col-sm-9">{{ task.hostname or '—' }}</dd>
+      <dt class="col-sm-3">Template</dt><dd class="col-sm-9">{{ task.template_vmid or '—' }}</dd>
+      <dt class="col-sm-3">Result VM</dt><dd class="col-sm-9">{{ task.result_vmid or '—' }}</dd>
+      <dt class="col-sm-3">Options</dt>
+      <dd class="col-sm-9">
+        {% set chips = task.options_chips() %}
+        {% if chips == ['—'] %}
+          <span class="text-muted">— (older job; options not recorded)</span>
+        {% else %}
+          {% for c in chips %}<span class="badge text-bg-light border me-1">{{ c }}</span>{% endfor %}
+          <details class="mt-2">
+            <summary>Full options</summary>
+            <pre class="small mb-0 mt-1 p-2 bg-light border rounded" style="max-height: 12rem; overflow: auto;">{{ task.options() | tojson(indent=2) }}</pre>
+          </details>
+        {% endif %}
+      </dd>
+      {% if task.error_code or task.error_details %}
+      <dt class="col-sm-3">Error</dt>
+      <dd class="col-sm-9">
+        {% if task.error_code %}<code>{{ task.error_code }}</code><br>{% endif %}
+        <pre class="small mb-0 mt-1 p-2 bg-light border rounded text-danger" style="max-height: 14rem; overflow: auto; white-space: pre-wrap;">{{ task.error_details or task.message }}</pre>
+      </dd>
+      {% endif %}
+    </dl>
+  </div>
+</div>
+{% endif %}
+
 <div id="status-container">
     <div class="progress mb-3" style="height: 0.65rem;">
         <div id="progress-bar" class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
     </div>
-    <p id="status-message" class="text-muted mb-0"></p>
+    <p id="status-message" class="text-muted mb-0" aria-live="polite"></p>
 </div>
 <div id="result-container" style="display: none;">
     <div id="result-alert" class="alert" role="alert"></div>
+    <div id="result-error-details" class="mb-3" style="display: none;">
+      <pre class="small p-2 bg-light border rounded text-danger" style="max-height: 16rem; overflow: auto; white-space: pre-wrap;"></pre>
+    </div>
     <div class="d-grid gap-2">
+        <a href="{{ url_for('jobs_page') }}" class="btn btn-outline-secondary">Back to Jobs</a>
         <a href="{{ url_for('index') }}" class="btn btn-primary">Back to Template Selection</a>
     </div>
 </div>
@@ -23,43 +61,57 @@
     const statusMessage = document.getElementById('status-message');
     const resultContainer = document.getElementById('result-container');
     const resultAlert = document.getElementById('result-alert');
+    const resultErrorDetails = document.getElementById('result-error-details');
     const statusContainer = document.getElementById('status-container');
 
     const urlParts = window.location.pathname.split('/');
     const taskId = urlParts[urlParts.length - 1];
     let pollInterval;
+    let consecutiveErrors = 0;
 
     async function pollTaskStatus() {
         try {
             const response = await fetch(`{{ url_for('task_status', task_id='') }}${taskId}`);
+            if (!response.ok) throw new Error('HTTP ' + response.status);
             const data = await response.json();
+            consecutiveErrors = 0;
 
             progressBar.style.width = data.progress + '%';
             progressBar.setAttribute('aria-valuenow', data.progress);
-            statusMessage.innerText = data.message;
+            statusMessage.innerText = data.message || '';
 
-            if (data.status === 'SUCCESS' || data.status === 'FAILURE') {
+            if (data.status === 'SUCCESS' || data.status === 'FAILURE' || data.status === 'CANCELLED') {
                 clearInterval(pollInterval);
                 statusContainer.style.display = 'none';
                 resultContainer.style.display = 'block';
 
-                if (data.redirect_url) {
-                    window.location.href = data.redirect_url;
-                    return;
-                }
-
+                // Do not auto-redirect on success — keep options/error reviewable.
                 if (data.status === 'SUCCESS') {
                     resultAlert.classList.add('alert-success');
+                    resultAlert.innerText = data.message || 'Success';
+                } else if (data.status === 'CANCELLED') {
+                    resultAlert.classList.add('alert-secondary');
+                    resultAlert.innerText = data.message || 'Cancelled';
                 } else {
                     resultAlert.classList.add('alert-danger');
+                    resultAlert.innerText = (data.error_code ? ('[' + data.error_code + '] ') : '') +
+                        (data.message || 'Failed');
+                    const detail = data.error_details || data.message || '';
+                    if (detail && resultErrorDetails) {
+                        resultErrorDetails.style.display = 'block';
+                        resultErrorDetails.querySelector('pre').textContent = detail;
+                    }
                 }
-                resultAlert.innerText = data.message;
             }
         } catch (error) {
+            consecutiveErrors += 1;
             console.error('Error polling task status:', error);
-            clearInterval(pollInterval);
-            statusMessage.innerText = 'Error fetching status.';
-            progressBar.style.width = '0%';
+            statusMessage.innerText = 'Temporary error fetching status (retrying)…';
+            // Keep polling through transient network blips; stop after ~1 minute of failures.
+            if (consecutiveErrors >= 30) {
+                clearInterval(pollInterval);
+                statusMessage.innerText = 'Stopped polling after repeated errors. Open Jobs to review this task.';
+            }
         }
     }
 
