@@ -6,6 +6,9 @@ import tempfile
 os.environ.setdefault('SECRET_KEY', 'test-secret-key')
 _db_fd, _db_path = tempfile.mkstemp(suffix='.db')
 os.environ.setdefault('DATABASE_URL', f'sqlite:///{_db_path}')
+# Avoid CI/unit tests hitting a real Redis for Celery / JTI / task-secrets.
+os.environ.setdefault('CELERY_BROKER_URL', 'memory://')
+os.environ.setdefault('CELERY_RESULT_BACKEND', 'memory://')
 
 import pytest
 

@@ -9,20 +9,21 @@ def test_stash_and_load_roundtrip(app):
         'administrator_password': 'AdminSecret!',
         'domain_password': 'DomainSecret!',
     }
-    stash_task_secrets('task-secrets-1', data)
-    assert 'administrator_password' not in data
-    assert 'domain_password' not in data
-    assert data['hostname'] == 'HOST1'
+    with app.app_context():
+        stash_task_secrets('task-secrets-1', data)
+        assert 'administrator_password' not in data
+        assert 'domain_password' not in data
+        assert data['hostname'] == 'HOST1'
 
-    restored = {'hostname': 'HOST1'}
-    load_task_secrets('task-secrets-1', restored)
-    assert restored['administrator_password'] == 'AdminSecret!'
-    assert restored['domain_password'] == 'DomainSecret!'
+        restored = {'hostname': 'HOST1'}
+        load_task_secrets('task-secrets-1', restored)
+        assert restored['administrator_password'] == 'AdminSecret!'
+        assert restored['domain_password'] == 'DomainSecret!'
 
-    # One-shot consume.
-    again = {}
-    load_task_secrets('task-secrets-1', again)
-    assert 'administrator_password' not in again
+        # One-shot consume.
+        again = {}
+        load_task_secrets('task-secrets-1', again)
+        assert 'administrator_password' not in again
 
 
 def test_scrub_workflow_secrets():

@@ -4,7 +4,7 @@
 [![Security](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/security.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/security.yml)
 [![CodeQL](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/codeql.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/codeql.yml)
 
-**Current release: [2.6.5](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
+**Current release: [2.6.6](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
 
 > **Not an official Proxmox product.** Lab-validated matrix (versions + editions):
 > [docs/VALIDATED_MATRIX.md](docs/VALIDATED_MATRIX.md). Server 2025 and several
@@ -97,7 +97,7 @@ cp .env.example .env
 # Compose HTTPS: GUESTOS_TLS_HOST, BEHIND_REVERSE_PROXY=True; set PRIMARY_BRIDGE to your PVE bridge.
 chmod +x deploy/caddy/gen-selfsigned.sh
 ./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"   # lab self-signed; use real certs in prod
-export GUESTOS_VERSION=2.6.5   # pin a release; or omit for :latest
+export GUESTOS_VERSION=2.6.6   # pin a release; or omit for :latest
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
@@ -153,7 +153,7 @@ not save the wrong architecture.
 ```bash
 # Connected machine (force amd64 even on Apple Silicon / ARM builders)
 PLATFORM=linux/amd64
-VER=2.6.5
+VER=2.6.6
 docker pull --platform "$PLATFORM" "ghcr.io/robertlukan/proxmox-guestos-customization:${VER}"
 docker pull --platform "$PLATFORM" redis:7-alpine
 docker pull --platform "$PLATFORM" caddy:2.8-alpine
