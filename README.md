@@ -6,7 +6,7 @@
 
 **Current release: [2.6.1](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
 
-> **Not an official Proxmox product.** Lab-validated on Windows Server 2019 and Windows 11; Server 2022/2025 use the same Server family (tag and validate in your lab). Support is community / GitHub issues only — [open an issue](https://github.com/RobertLukan/proxmox-guestos-customization/issues).
+> **Not an official Proxmox product.** Lab-validated on Windows Server 2019, **Windows Server 2022**, and Windows 11. Server 2025 uses the same Server family path — **lab validation coming soon**. Support is community / GitHub issues only — [open an issue](https://github.com/RobertLukan/proxmox-guestos-customization/issues).
 
 GuestOS is **Sysprep-only** (template → clone → guest agent). In-place Sysprep of existing/production VMs is **disabled**.
 
@@ -33,9 +33,9 @@ GuestOS is **Sysprep-only** (template → clone → guest agent). In-place Syspr
 
 | Area | Notes |
 |------|--------|
-| Clone + Sysprep (hostname, static/DHCP, optional AD join) | **Stable** — validated on Server 2019 and Win11 in lab (2022/2025: same Server path) |
+| Clone + Sysprep (hostname, static/DHCP, optional AD join) | **Stable** — lab-validated on Server 2019, Server 2022, and Win11 (Server 2025: same path, validation coming soon) |
 | Bulk Win11 batch (CSV / API) | **Stable for lab** — max 10/batch, 20/day; Win11 only |
-| Configure disks (OS / data / pagefile) | **Windows Server family** (2019/2022/2025 via name/tag); hidden for Win11 |
+| Configure disks (OS / data / pagefile) | **Windows Server family** (2019/2022 lab-validated; 2025 via name/tag, validation coming soon); hidden for Win11 |
 | Provisioning safeguards (cores/RAM/disk/storage) | **Stable** — no in-app override; use PVE for exceptions |
 | PDM Customize + GuestOS tab | **Optional** AGPL fork; build/install `.deb`s yourself (no public APT feed yet) |
 
