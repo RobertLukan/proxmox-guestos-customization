@@ -80,6 +80,8 @@ Compose runs separate workers for these queues (`worker`, `verify-worker`).
 - Invalid rows are rejected before enqueue where possible.
 - Idempotency supports safe retries via `Idempotency-Key` or payload `request_id`.
 - Cancel marks matching pending/running tasks as `CANCELLED` best-effort.
+  Clones that already have a `result_vmid` are renamed/tagged
+  `failed-customization` and hard-stopped when PVE is reachable.
 - Failed items remain in task history for triage.
 
 See [`FAILURE_RUNBOOK.md`](FAILURE_RUNBOOK.md) for cleanup and saturation signals.

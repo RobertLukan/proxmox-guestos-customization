@@ -107,6 +107,7 @@ def _patch_workflow_side_effects(monkeypatch, *, clone_vmid=9055, fail_clone=Fal
     monkeypatch.setattr(ca, 'get_vm_nic_macs', _macs)
     monkeypatch.setattr(ca, 'set_lifecycle_tag', _noop_tag)
     monkeypatch.setattr(ca, 'mark_vm_customization_failed', _noop_tag)
+    monkeypatch.setattr(ca, 'power_off_vm', lambda *a, **k: None)
     monkeypatch.setattr(ca, 'power_on_vm', _power_on)
     monkeypatch.setattr(ca.time, 'sleep', _sleep)
     monkeypatch.setattr(ca, 'wait_for_guest_agent', _wait_agent)

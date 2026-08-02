@@ -9,6 +9,8 @@ from app.proxmox import (
     is_proxmox_template,
     use_pve_override,
     classify_windows_guest_family,
+    mark_vm_customization_failed,
+    power_off_vm,
 )
 from app.celery_app import sysprep_workflow_task
 from app.models import Task, User, BatchRequest, CustomizationSpec
@@ -21,8 +23,9 @@ from app.windows_identity import (
     DEFAULT_WORKGROUP,
 )
 from app.api_auth import login_or_api_token_required, with_session_csrf
-from app.remotes import resolve_pve_remote
+from app.remotes import resolve_pve_remote, attach_pve_override
 from app.launch_token import verify_launch_token
+from app.task_secrets import stash_task_secrets
 from app.provision_limits import (
     PVE_ADMIN_HINT,
     validate_resource_caps,
@@ -634,6 +637,7 @@ def start_sysprep_workflow():
     db.session.add(task)
     db.session.commit()
 
+    stash_task_secrets(task_id, data)
     sysprep_workflow_task.apply_async(
         args=(task_id, data),
         queue='clone_queue',
@@ -820,6 +824,7 @@ def start_sysprep_bulk_workflow():
     db.session.commit()
 
     for task_id, data in task_refs:
+        stash_task_secrets(task_id, data)
         sysprep_workflow_task.apply_async(
             args=(task_id, data),
             queue='clone_queue',
@@ -914,6 +919,26 @@ def api_cancel_batch(batch_id):
     batch.cancelled_items = len(cancellable)
     batch.message = 'Batch cancelled; running tasks marked cancelled best-effort.'
     db.session.commit()
+
+    # Best-effort: tag/stop clones that already have a result_vmid.
+    for task in cancellable:
+        if not task.result_vmid:
+            continue
+        try:
+            override = attach_pve_override({'remote_id': task.remote_id or ''})
+            with use_pve_override(override):
+                mark_vm_customization_failed(task.result_vmid, hostname=task.hostname)
+                try:
+                    power_off_vm(task.result_vmid)
+                except Exception as e:
+                    app.logger.warning(
+                        'Cancel stop failed for VM %s: %s', task.result_vmid, e
+                    )
+        except Exception as e:
+            app.logger.warning(
+                'Cancel mark failed for VM %s: %s', task.result_vmid, e
+            )
+
     return jsonify({
         'batch_id': batch_id,
         'cancelled_items': len(cancellable),

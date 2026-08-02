@@ -88,9 +88,9 @@ def prepare_disk_plan(data):
             'role': role,
             'reformat': _as_bool(
                 entry.get('reformat'),
-                # Pagefile volumes should be dedicated; template leftovers (wrong
-                # letter/size) are common when reusing a secondary disk.
-                True if str(entry.get('role', '')).lower() == 'pagefile' else False,
+                # Default False: never wipe an unmatched secondary template disk
+                # unless the operator explicitly requests reformat.
+                False,
             ),
             'label': (str(entry.get('label') or '').strip() or None),
         }

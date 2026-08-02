@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
   title: GuestOS machine API
-  version: 2.6.4
+  version: 2.6.5
   description: |
     Sysprep customize sidecar for Proxmox (template → clone → Sysprep → verify).
     Authenticate with `Authorization: Bearer <token>` or `X-Api-Token`.
-    App version is 2.6.4+; `min_pdm_guestos` remains 2.3.0 for PDM fork compatibility.
+    App version is 2.6.5+; `min_pdm_guestos` remains 2.3.0 for PDM fork compatibility.
 servers:
   - url: https://guestos.example.com
 paths:
@@ -30,7 +30,7 @@ paths:
                 properties:
                   version:
                     type: string
-                    example: '2.6.4'
+                    example: '2.6.5'
                     description: GuestOS application version (VERSION file)
                   min_pdm_guestos:
                     type: string
@@ -443,6 +443,12 @@ components:
             type: object
         administrator_password:
           type: string
+        product_key:
+          type: string
+          description: >
+            Optional Windows product key for specialize. When omitted on Server VL
+            images, GuestOS injects a matched Microsoft GVLK. Never auto-injected
+            for Evaluation SKUs or when guest edition cannot be read.
         join_domain:
           type: boolean
           default: false
@@ -483,7 +489,9 @@ components:
                 type: boolean
         fast_waits:
           type: boolean
-          description: Lab-only shorter boot/agent waits
+          description: >
+            Lab-only shorter boot/agent waits. Honored only when the GuestOS
+            instance has ALLOW_FAST_WAITS=true (or under TESTING). Ignored otherwise.
     SysprepBulkStart:
       type: object
       required:

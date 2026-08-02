@@ -10,6 +10,7 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 |---------|--------------|--------------|
 | Task `FAILURE` early (“Invalid sysprep input”) | Bad hostname/IP/domain/`manage_disks` | Task message; Server name/tag for disks |
 | Stuck ~60–85% “Waiting for QEMU Guest Agent” | Guest agent / first-boot loop | Console on clone; QGA package; template health |
+| Fail writing unattend / setup before Sysprep | QGA `file-write` ACL / agent overload | Worker log: `agent file-write` / Permission denied — see [QGA file writes](#qga-file-writes) |
 | Stuck ~88–92% after Sysprep | Shutdown wait missed / hung generalize | Console; agent bounce; orphaned clone VMID in task |
 | `verification failed` / `setup.done missing` | FirstLogon `setup.ps1` never finished | Guest `C:\ProgramData\GuestOS\` markers + transcript; on **Eval** Server check InstallPid / GVLK regression below |
 | Stuck ~98% waiting for `setup.ps1` after Sysprep | OOBE never reached FirstLogon (often Eval+GVLK) | Console: product-key / InstallPid `0xC004F015` → see Evaluation vs GVLK |
@@ -72,8 +73,14 @@ job sits at ~98% waiting for `setup.ps1` / `setup.done`.
 - set OOBE registry markers (`SetupDisplayedProductKey` /
   `UnattendCreatedUser`) so the product-key UI is skipped without InstallPid.
 
-VL guests still get the matched GVLK. One unattend template; Jinja branches on
-`windows_evaluation` — not separate setup trees.
+VL guests still get the matched GVLK when edition is known. One unattend
+template; Jinja branches on `windows_evaluation` — not separate setup trees.
+
+**Fail closed (2.6.5+):** If the guest-agent edition probe returns empty (WMI/QGA
+glitch), GuestOS does **not** invent a Standard GVLK. Worker log:
+`Skipping auto-GVLK … guest edition unknown`. Pass explicit `product_key` or
+fix QGA/WMI, then re-run. Blind Standard fallback could recreate the Eval
+`0xC004F015` failure.
 
 **Operator checks:**
 
@@ -81,8 +88,22 @@ VL guests still get the matched GVLK. One unattend template; Jinja branches on
 |---------------|------------|-------------------|
 | `ServerStandard` / `… Standard` (no Eval) | `Using Server GVLK for VM …` | `<ProductKey>` present |
 | `ServerStandardEval` / `… Evaluation` | `Skipping GVLK for Evaluation guest …` | no ProductKey; Eval OOBE regs |
+| empty / unreadable | `Skipping auto-GVLK … edition unknown` | no ProductKey |
 
-If you still see Eval guests getting a ProductKey, upgrade GuestOS to **2.6.3+**.
+If you still see Eval guests getting a ProductKey, upgrade GuestOS to **2.6.3+**
+(prefer current release).
+
+## QGA file writes
+
+GuestOS prefers Proxmox native ``agent/file-write`` (with chunking for large
+payloads), then falls back to guest-exec PowerShell. Common failures:
+
+1. **Permission denied / file-write unsupported** — confirm the PVE token can use
+   guest agent file APIs; check worker logs for `agent file-write` / fallback.
+2. **Staged `setup.ps1` missing after write** — older chunked exec overload;
+   upgrade so native file-write is used. Confirm `GuestOS-FirstLogon.cmd` exists
+   under `C:\Windows\System32\` before Sysprep.
+3. Re-run Customize on a fresh clone after fixing the template agent.
 
 ## Verify failed but Sysprep ran
 
@@ -100,6 +121,10 @@ Failed jobs **do not** auto-delete the clone. GuestOS:
 3. Sets tags **`failed-customization`** and **`lifecycle-failed`**.
 
 Find them in PVE by tag `failed-customization` or name prefix `failed-`. Inspect, then delete manually when done.
+
+Cancelled jobs (batch cancel or mid-flight cancel after clone) also tag/stop the
+clone when a `result_vmid` is known — they should not remain as untagged
+`lifecycle-*` runners.
 
 ### Stage tags (lifecycle-*)
 

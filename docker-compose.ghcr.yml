@@ -4,7 +4,7 @@
 # Package (public): ghcr.io/robertlukan/proxmox-guestos-customization
 # Images are linux/amd64 only (Proxmox utility VM).
 #
-#   export GUESTOS_VERSION=2.6.4          # or v2.6.4 — both tags are published
+#   export GUESTOS_VERSION=2.6.5          # or v2.6.5 — both tags are published
 #   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 #   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 #

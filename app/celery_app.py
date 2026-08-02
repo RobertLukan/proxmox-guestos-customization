@@ -4,6 +4,7 @@ from app.models import Task, _utcnow
 from app.proxmox import (
     clone_vm,
     power_on_vm,
+    power_off_vm,
     wait_for_guest_agent,
     run_shutdown_command_in_guest,
     get_primary_mac_address,
@@ -17,6 +18,7 @@ from app.proxmox import (
 )
 from app.disks import prepare_disk_plan
 from app.remotes import attach_pve_override
+from app.task_secrets import load_task_secrets, scrub_workflow_secrets
 from app.util import as_bool as _as_bool
 from app.validators import ValidationError, validate_mac
 from app.task_progress import update_task_progress
@@ -69,11 +71,12 @@ __all__ = [
     '_sysprep_wait_timings',
     'sysprep_verify_task',
     '_fail_sysprep_task',
+    '_abandon_cancelled_clone',
 ]
 
 
 # Production defaults for the fixed first-boot sleep and guest-agent stability.
-# Smoke tests may pass fast_waits=true to use the short lab timings instead.
+# Request ``fast_waits`` is honored only when TESTING or ALLOW_FAST_WAITS.
 _BOOT_SETTLE_DEFAULT = 180
 _AGENT_STABLE_DEFAULT = 60
 _BOOT_SETTLE_FAST = 30
@@ -83,10 +86,11 @@ _AGENT_STABLE_FAST = 15
 def _sysprep_wait_timings(data=None):
     """Return (boot_settle_seconds, agent_stable_seconds).
 
-    Priority: request ``fast_waits`` → app config env overrides → production defaults.
+    Priority: gated ``fast_waits`` → app config env overrides → production defaults.
     """
     data = data or {}
-    if _as_bool(data.get('fast_waits')):
+    allow_fast = bool(app.config.get('TESTING')) or bool(app.config.get('ALLOW_FAST_WAITS'))
+    if _as_bool(data.get('fast_waits')) and allow_fast:
         return _BOOT_SETTLE_FAST, _AGENT_STABLE_FAST
     boot = app.config.get('SYSPREP_BOOT_SETTLE_SECONDS')
     agent = app.config.get('SYSPREP_AGENT_STABLE_SECONDS')
@@ -106,12 +110,50 @@ def _task_cancelled(task_id):
     return bool(task and task.status == 'CANCELLED')
 
 
-def _fail_sysprep_task(task_id, message, vmid=None, hostname=None, error_code=None):
+def _mark_clone_failed(vmid, hostname=None, data=None, stop=False):
+    """Rename/tag a clone on the correct PVE remote; optionally hard-stop it."""
+    if not vmid:
+        return
+    try:
+        override = attach_pve_override(data or {})
+    except ValueError as e:
+        app.logger.warning("Could not resolve PVE remote to mark VM %s: %s", vmid, e)
+        override = None
+    try:
+        with use_pve_override(override):
+            ok, detail = mark_vm_customization_failed(vmid, hostname=hostname)
+            app.logger.info("Failed customization mark for VM %s: %s (%s)", vmid, ok, detail)
+            if stop:
+                try:
+                    power_off_vm(vmid)
+                except Exception as e:
+                    app.logger.warning("Could not stop cancelled VM %s: %s", vmid, e)
+    except Exception as e:
+        app.logger.warning("Could not mark failed VM %s: %s", vmid, e)
+
+
+def _abandon_cancelled_clone(task_id, vmid=None, hostname=None, data=None):
+    """Persist result_vmid and tag/stop a clone when the task was cancelled."""
+    task = Task.query.get(task_id)
+    if task:
+        if vmid is not None:
+            task.result_vmid = vmid
+        if task.message and 'cancel' not in (task.message or '').lower():
+            task.message = f"{task.message} Clone abandoned after cancel."
+        elif not task.message:
+            task.message = 'Cancelled; clone abandoned (tagged failed-customization).'
+        db.session.commit()
+    if vmid:
+        _mark_clone_failed(vmid, hostname=hostname or (task.hostname if task else None), data=data, stop=True)
+
+
+def _fail_sysprep_task(task_id, message, vmid=None, hostname=None, error_code=None, data=None):
     """Mark task FAILURE and, when a clone exists, rename/tag it for analysis."""
     task = Task.query.get(task_id)
     if not task:
         return
     if task.status == 'CANCELLED':
+        _abandon_cancelled_clone(task_id, vmid=vmid, hostname=hostname, data=data)
         return
     task.status = 'FAILURE'
     task.message = message
@@ -121,11 +163,7 @@ def _fail_sysprep_task(task_id, message, vmid=None, hostname=None, error_code=No
         task.result_vmid = vmid
     db.session.commit()
     if vmid:
-        try:
-            ok, detail = mark_vm_customization_failed(vmid, hostname=hostname or task.hostname)
-            app.logger.info("Failed customization mark for VM %s: %s (%s)", vmid, ok, detail)
-        except Exception as e:
-            app.logger.warning("Could not mark failed VM %s: %s", vmid, e)
+        _mark_clone_failed(vmid, hostname=hostname or task.hostname, data=data, stop=False)
 
 
 def _clone_nics_arg(data):
@@ -164,12 +202,14 @@ def _attach_macs_to_nics(data, vmid):
 def sysprep_workflow_task(self, task_id, data):
     with app.app_context():
         new_vmid = None
-        hostname = (data or {}).get('hostname')
+        data = dict(data or {})
+        hostname = data.get('hostname')
         try:
+            load_task_secrets(task_id, data)
             try:
                 pve_override = attach_pve_override(data)
             except ValueError as e:
-                _fail_sysprep_task(task_id, str(e), hostname=hostname, error_code='remote')
+                _fail_sysprep_task(task_id, str(e), hostname=hostname, error_code='remote', data=data)
                 return
 
             with use_pve_override(pve_override):
@@ -200,11 +240,11 @@ def sysprep_workflow_task(self, task_id, data):
                         check_storage_for_template(data['template_vmid'])
                 except ValidationError as e:
                     _fail_sysprep_task(
-                        task_id, f"Invalid sysprep input: {e}", hostname=hostname, error_code='validation'
+                        task_id, f"Invalid sysprep input: {e}", hostname=hostname, error_code='validation', data=data
                     )
                     return
                 except ValueError as e:
-                    _fail_sysprep_task(task_id, str(e), hostname=hostname, error_code='validation')
+                    _fail_sysprep_task(task_id, str(e), hostname=hostname, error_code='validation', data=data)
                     return
 
                 if _task_cancelled(task_id):
@@ -240,6 +280,7 @@ def sysprep_workflow_task(self, task_id, data):
                     data['disk_plan_b64'] = ''
 
                 if _task_cancelled(task_id):
+                    _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
                     return
                 set_lifecycle_tag(new_vmid, 'lifecycle-customizing')
                 update_task_progress(task_id, 35, "Generating sysprep files...")
@@ -249,6 +290,7 @@ def sysprep_workflow_task(self, task_id, data):
                 unattended_xml, setup_ps1, setup_complete = _render_sysprep_files(data)
 
                 if _task_cancelled(task_id):
+                    _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
                     return
                 set_lifecycle_tag(new_vmid, 'lifecycle-booting')
                 update_task_progress(task_id, 50, "Powering on VM...")
@@ -263,6 +305,7 @@ def sysprep_workflow_task(self, task_id, data):
                     time.sleep(boot_settle)
 
                 if _task_cancelled(task_id):
+                    _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
                     return
                 update_task_progress(task_id, 60, "Waiting for QEMU Guest Agent to stabilize...")
                 wait_for_guest_agent(
@@ -274,6 +317,7 @@ def sysprep_workflow_task(self, task_id, data):
                 update_task_progress(task_id, 70, "QEMU Guest Agent is ready.")
 
                 if _task_cancelled(task_id):
+                    _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
                     return
                 set_lifecycle_tag(new_vmid, 'lifecycle-customizing')
                 update_task_progress(task_id, 80, "Resolving product key and writing sysprep files...")
@@ -284,6 +328,7 @@ def sysprep_workflow_task(self, task_id, data):
                 update_task_progress(task_id, 85, "Sysprep files written successfully.")
 
                 if _task_cancelled(task_id):
+                    _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
                     return
                 set_lifecycle_tag(new_vmid, 'lifecycle-sysprep')
                 update_task_progress(task_id, 88, "Running Sysprep...")
@@ -303,13 +348,17 @@ def sysprep_workflow_task(self, task_id, data):
                         vmid=new_vmid,
                         hostname=hostname,
                         error_code='sysprep_timeout',
+                        data=data,
                     )
                     return
 
                 if _task_cancelled(task_id):
+                    _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
                     return
                 set_lifecycle_tag(new_vmid, 'lifecycle-verifying')
                 update_task_progress(task_id, 95, "Clone and Sysprep phase complete; queued for verification...")
+                # Do not pass admin/domain secrets (or packed join blob) into verify queue.
+                scrub_workflow_secrets(data)
                 sysprep_verify_task.apply_async(
                     args=(task_id, new_vmid, data),
                     queue='verify_queue',
@@ -324,59 +373,73 @@ def sysprep_workflow_task(self, task_id, data):
                 vmid=new_vmid,
                 hostname=hostname,
                 error_code='exception',
+                data=data,
             )
 
 
 @celery.task(bind=True)
 def sysprep_verify_task(self, task_id, vmid, data):
     with app.app_context():
+        data = dict(data or {})
+        hostname = data.get('hostname')
         if _task_cancelled(task_id):
+            _abandon_cancelled_clone(task_id, vmid=vmid, hostname=hostname, data=data)
             return
-        hostname = (data or {}).get('hostname')
         try:
-            set_lifecycle_tag(vmid, 'lifecycle-verifying')
-            update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
-            expected_ip = None if data.get('use_dhcp') else data.get('ip_address')
-            expected_ipv6 = data.get('ipv6_address') if data.get('enable_ipv6') else None
-            verify_summary, verify_ok = _verify_sysprep_result(
-                vmid,
-                data.get('hostname'),
-                expected_ip=expected_ip,
-                expected_domain=data.get('domain_name') if data.get('join_domain') else None,
-                expected_ipv6=expected_ipv6,
-                on_progress=lambda msg: update_task_progress(task_id, 98, msg),
-            )
-            if data.get('manage_disks') and data.get('disk_guest_plan'):
-                disk_summary, disk_ok = _verify_disks(
+            try:
+                pve_override = attach_pve_override(data)
+            except ValueError as e:
+                _fail_sysprep_task(
+                    task_id, str(e), vmid=vmid, hostname=hostname, error_code='remote', data=data
+                )
+                return
+
+            with use_pve_override(pve_override):
+                set_lifecycle_tag(vmid, 'lifecycle-verifying')
+                update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
+                expected_ip = None if data.get('use_dhcp') else data.get('ip_address')
+                expected_ipv6 = data.get('ipv6_address') if data.get('enable_ipv6') else None
+                verify_summary, verify_ok = _verify_sysprep_result(
                     vmid,
-                    data['disk_guest_plan'],
+                    data.get('hostname'),
+                    expected_ip=expected_ip,
+                    expected_domain=data.get('domain_name') if data.get('join_domain') else None,
+                    expected_ipv6=expected_ipv6,
                     on_progress=lambda msg: update_task_progress(task_id, 98, msg),
                 )
-                verify_summary = f'{verify_summary}; {disk_summary}'
-                verify_ok = verify_ok and disk_ok
+                if data.get('manage_disks') and data.get('disk_guest_plan'):
+                    disk_summary, disk_ok = _verify_disks(
+                        vmid,
+                        data['disk_guest_plan'],
+                        on_progress=lambda msg: update_task_progress(task_id, 98, msg),
+                    )
+                    verify_summary = f'{verify_summary}; {disk_summary}'
+                    verify_ok = verify_ok and disk_ok
 
-            task = Task.query.get(task_id)
-            if not task:
-                return
-            if task.status == 'CANCELLED':
-                return
-            if verify_ok:
-                set_lifecycle_tag(vmid, 'lifecycle-ready')
-                task.status = 'SUCCESS'
-                task.progress = 100
-                task.message = (
-                    f"Sysprep workflow for {data['hostname']} completed. "
-                    f"Verify: {verify_summary}"
-                )
-                db.session.commit()
-            else:
-                _fail_sysprep_task(
-                    task_id,
-                    f"Sysprep finished but verification failed for {data['hostname']}: {verify_summary}",
-                    vmid=vmid,
-                    hostname=hostname,
-                    error_code='verify',
-                )
+                task = Task.query.get(task_id)
+                if not task:
+                    return
+                if task.status == 'CANCELLED':
+                    _abandon_cancelled_clone(task_id, vmid=vmid, hostname=hostname, data=data)
+                    return
+                if verify_ok:
+                    set_lifecycle_tag(vmid, 'lifecycle-ready')
+                    task.status = 'SUCCESS'
+                    task.progress = 100
+                    task.message = (
+                        f"Sysprep workflow for {data['hostname']} completed. "
+                        f"Verify: {verify_summary}"
+                    )
+                    db.session.commit()
+                else:
+                    _fail_sysprep_task(
+                        task_id,
+                        f"Sysprep finished but verification failed for {data['hostname']}: {verify_summary}",
+                        vmid=vmid,
+                        hostname=hostname,
+                        error_code='verify',
+                        data=data,
+                    )
         except Exception as e:
             app.logger.error(f"Verify task {task_id} failed: {e}", exc_info=True)
             _fail_sysprep_task(
@@ -385,6 +448,7 @@ def sysprep_verify_task(self, task_id, vmid, data):
                 vmid=vmid,
                 hostname=hostname,
                 error_code='verify_exception',
+                data=data,
             )
 
 

@@ -3,9 +3,10 @@
 GuestOS only customizes **Proxmox Windows templates** (clone → Sysprep). Use this
 checklist before the first Customize / Clone + Sysprep job.
 
-Validated in lab: **Windows Server 2019**, **Windows 11**.  
-Supported Server family (same code path): **2019 / 2022 / 2025** — tag templates
-and run a smoke job before production use.
+Validated in lab: see **[VALIDATED_MATRIX.md](VALIDATED_MATRIX.md)** (versions +
+editions). Short form: Server **2019 Standard Evaluation**, Server **2022
+Standard** (VL), **Windows 11**. Other years/editions (2025, Datacenter, 2016,
+VL 2019, …) share the same code path — community test reports wanted.
 
 ## Required
 
@@ -93,5 +94,5 @@ If a job fails mid-flight, the clone may remain on the cluster — see
 
 Use a **disposable** template clone (or accept that failed smoke jobs leave
 orphaned VMs to delete). Do not point first tests at production golden images
-you cannot recreate. For Server 2022/2025, run at least one single Customize
-(static or DHCP) before enabling `manage_disks` or AD join in production.
+you cannot recreate. Lab-validated: Server 2019 Eval, Server 2022 VL, Win11.
+For Server 2025, run at least one single Customize before production.

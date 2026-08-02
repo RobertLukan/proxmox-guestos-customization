@@ -977,6 +977,30 @@ def power_on_vm(vmid):
         raise Exception(f"VM {vmid} failed to power on.")
 
 
+def power_off_vm(vmid, timeout=60):
+    """Hard-stop a VM if running (best-effort for cancelled/failed clones)."""
+    proxmox = get_proxmox_api()
+    if not proxmox:
+        raise Exception("Failed to connect to Proxmox.")
+    node = _get_vm_node(vmid)
+    if not node:
+        raise Exception(f"VM with VMID {vmid} not found.")
+    status = proxmox.nodes(node).qemu(vmid).status.current.get().get('status')
+    if status != 'running':
+        return
+    try:
+        proxmox.nodes(node).qemu(vmid).status.stop.post()
+    except Exception:
+        proxmox.nodes(node).qemu(vmid).status.shutdown.post(timeout=timeout)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        cur = proxmox.nodes(node).qemu(vmid).status.current.get().get('status')
+        if cur == 'stopped':
+            return
+        time.sleep(2)
+    raise Exception(f"VM {vmid} did not stop within {timeout}s.")
+
+
 def delete_vm(vmid, purge=True, timeout=120):
     """Stop (if needed) and delete a QEMU VM. Used by lab smoke cleanup.
 

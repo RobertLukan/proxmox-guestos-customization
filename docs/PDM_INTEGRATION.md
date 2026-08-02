@@ -31,7 +31,7 @@ GUESTOS_LAUNCH_SECRET=must-match-pdm-guestos-cfg
 
 ```bash
 ./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"
-export GUESTOS_VERSION=2.6.0   # pin a release
+export GUESTOS_VERSION=2.6.5   # pin a release (2.6.3+ required for Eval/GVLK fix)
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 # Dev / unreleased tree instead:

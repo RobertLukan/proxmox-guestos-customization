@@ -1,0 +1,18 @@
+---
+description: Check docs/SMOKE_BACKLOG.md before/after lab smoke rounds
+alwaysApply: true
+---
+
+# Lab smoke backlog
+
+Before starting or proposing lab smoke tests, read and follow
+[docs/SMOKE_BACKLOG.md](docs/SMOKE_BACKLOG.md).
+
+- Prefer executing **Open** backlog items in the next smoke round instead of
+  repeating only previously green paths.
+- After a successful live check, move the item to **Done** with host/VMID/date
+  in that file (do not invent results).
+- NTP/domain time (`ntp-dc-resync`) stays open until a post–DC-fix smoke
+  confirms guest UTC/local time matches reality.
+- Do not run another full smoke solely for Recycle Bin / NTP unless the user
+  asks or the backlog item is the reason for the round.

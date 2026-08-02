@@ -36,6 +36,19 @@ def test_verify_rejects_reuse(app):
     assert 'already used' in err.lower()
 
 
+def test_verify_rejects_when_durable_jti_stores_unavailable(app, monkeypatch):
+    """Fail closed: do not accept launch tokens via per-process memory alone."""
+    app.config['GUESTOS_LAUNCH_SECRET'] = 'unit-test-secret'
+    monkeypatch.setattr('app.launch_token._consume_jti_redis', lambda *a, **k: None)
+    monkeypatch.setattr('app.launch_token._consume_jti_sqlite', lambda *a, **k: None)
+    tok = sign_launch_token(120, 'vie-1')
+    ok, err = verify_launch_token(
+        tok['exp'], tok['template_vmid'], tok['remote_id'], tok['jti'], tok['sig'],
+    )
+    assert not ok
+    assert 'already used' in err.lower()
+
+
 def test_verify_rejects_expired(app, monkeypatch):
     app.config['GUESTOS_LAUNCH_SECRET'] = 'unit-test-secret'
     tok = sign_launch_token(120, 'vie-1', ttl=60)

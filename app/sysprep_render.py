@@ -264,6 +264,20 @@ def _ensure_server_product_key(data, vmid):
     if (data.get('product_key') or '').strip():
         return
 
+    edition_known = bool((edition_id or '').strip() or (caption or '').strip())
+    if not edition_known:
+        # Fail closed: unknown edition must not get a VL Standard GVLK (that
+        # recreates the Eval InstallPid 0xC004F015 regression).
+        data['product_key'] = ''
+        current_app.logger.warning(
+            "Skipping auto-GVLK for VM %s: guest edition unknown "
+            "(edition=%r caption=%r); pass product_key or fix guest agent WMI.",
+            vmid,
+            edition_id or '?',
+            caption or '?',
+        )
+        return
+
     default_year = _guess_server_year_from_template(template_vmid) or 2022
     try:
         key = resolve_server_product_key(
@@ -275,15 +289,8 @@ def _ensure_server_product_key(data, vmid):
     except ValueError:
         key = ''
 
-    # Only fall back to a generic Standard GVLK when the guest is a real VL SKU
-    # whose edition string we failed to parse — never for Evaluation.
-    if not key and not data['windows_evaluation']:
-        key = resolve_server_product_key(
-            edition_id='ServerStandard',
-            caption=f'Windows Server {default_year}',
-            build=build,
-            default_year=default_year,
-        )
+    # Do not invent a Standard GVLK when the edition string did not match —
+    # only inject a key we resolved from the live guest identity.
     data['product_key'] = key
     if key:
         current_app.logger.info(
@@ -297,6 +304,14 @@ def _ensure_server_product_key(data, vmid):
         current_app.logger.info(
             "Skipping GVLK for Evaluation guest VM %s (edition=%r caption=%r); "
             "unattend will skip OOBE product-key UI.",
+            vmid,
+            edition_id or '?',
+            caption or '?',
+        )
+    else:
+        current_app.logger.warning(
+            "No GVLK matched for VM %s (edition=%r caption=%r); "
+            "OOBE may prompt for a product key unless product_key is set.",
             vmid,
             edition_id or '?',
             caption or '?',

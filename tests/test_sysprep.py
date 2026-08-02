@@ -167,6 +167,26 @@ def test_ensure_server_product_key_skips_non_server(monkeypatch):
     assert data['windows_evaluation'] is False
 
 
+def test_ensure_server_product_key_skips_unknown_edition(monkeypatch):
+    """Fail closed: empty edition must not invent a Standard GVLK."""
+    from app.sysprep_render import _ensure_server_product_key
+
+    monkeypatch.setattr('app.proxmox.is_windows_server_template', lambda *a, **k: True)
+    monkeypatch.setattr(
+        'app.sysprep_render._read_guest_windows_edition',
+        lambda vmid: ('', '', 0),
+    )
+    monkeypatch.setattr(
+        'app.sysprep_render._guess_server_year_from_template',
+        lambda vmid: 2022,
+    )
+    data = {'template_vmid': 130, 'product_key': ''}
+    with flask_app.app_context():
+        _ensure_server_product_key(data, 999)
+    assert data['product_key'] == ''
+    assert data['windows_evaluation'] is False
+
+
 def test_ensure_server_product_key_keeps_override(monkeypatch):
     from app.sysprep_render import _ensure_server_product_key
     from app.windows_product_keys import _SERVER_GVLK
@@ -215,6 +235,32 @@ def test_setup_ps1_contains_network_config():
     assert 'New-NetRoute' in ps1
     assert 'New-NetIPAddress' in ps1
     assert r"C:\ProgramData\GuestOS\setup.log" in ps1
+
+
+def test_setup_ps1_resets_recycle_bin_on_data_volumes():
+    data = _base_data()
+    data['manage_disks'] = True
+    data['disk_plan_b64'] = base64.b64encode(
+        json.dumps(
+            [
+                {'role': 'os', 'serial': 'guestos-os'},
+                {
+                    'role': 'data',
+                    'serial': 'guestos-data-0',
+                    'drive_letter': 'D',
+                    'label': 'Data',
+                    'reformat': False,
+                },
+            ]
+        ).encode('utf-8')
+    ).decode('ascii')
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        _xml, ps1, _cmd = _render_sysprep_files(data)
+    ps1 = ps1.decode()
+    assert 'function Reset-GuestOsRecycleBin' in ps1
+    assert "Remove-Item -LiteralPath $path -Recurse -Force" in ps1
+    assert 'Reset-GuestOsRecycleBin -Letter $Letter' in ps1
 
 
 def test_setup_ps1_optional_ipv6():
@@ -371,6 +417,7 @@ def test_domain_join_password_is_not_interpolated_raw():
     ps1 = ps1.decode()
     assert nasty not in ps1  # raw secret never appears
     assert 'Add-Computer' in ps1
+    assert 'w32tm /resync /force' in ps1
     # The blob still round-trips to the correct password.
     decoded = json.loads(base64.b64decode(data['domain_join_b64']))
     assert decoded['password'] == nasty

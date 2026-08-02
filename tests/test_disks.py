@@ -19,7 +19,9 @@ def test_manage_disks_default_plan():
     roles = [d['role'] for d in data['disks']]
     assert roles == ['os', 'pagefile', 'data']
     assert data['disks'][1]['serial'] == 'guestos-pagefile'
+    assert data['disks'][1]['reformat'] is False
     assert data['disks'][2]['drive_letter'] == 'D'
+    assert data['disks'][2]['reformat'] is False
 
 
 def test_manage_disks_rejects_bad_role():

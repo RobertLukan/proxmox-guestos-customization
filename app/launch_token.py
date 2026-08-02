@@ -76,6 +76,7 @@ def _consume_jti_sqlite(jti: str, exp: int) -> bool | None:
     """Return True if newly consumed, False if already used, None on DB error."""
     try:
         from sqlalchemy import text
+        from sqlalchemy.exc import IntegrityError
         from app import db
 
         db.session.execute(
@@ -98,12 +99,17 @@ def _consume_jti_sqlite(jti: str, exp: int) -> bool | None:
         if existing:
             db.session.commit()
             return False
-        db.session.execute(
-            text('INSERT INTO launch_jti (jti, exp, used_at) VALUES (:jti, :exp, :used_at)'),
-            {'jti': jti, 'exp': int(exp), 'used_at': time.time()},
-        )
-        db.session.commit()
-        return True
+        try:
+            db.session.execute(
+                text('INSERT INTO launch_jti (jti, exp, used_at) VALUES (:jti, :exp, :used_at)'),
+                {'jti': jti, 'exp': int(exp), 'used_at': time.time()},
+            )
+            db.session.commit()
+            return True
+        except IntegrityError:
+            # Concurrent consumer won the race — treat as already used (fail closed).
+            db.session.rollback()
+            return False
     except Exception as e:  # noqa: BLE001
         try:
             from app import db
@@ -126,13 +132,22 @@ def _consume_jti_memory(jti: str) -> bool:
 
 
 def _consume_jti(jti: str, exp: int) -> bool:
+    """Consume jti. Prefer Redis, then SQLite. Memory only when both unavailable.
+
+    When SQLite reports a unique-key race (already used), fail closed — do not
+    fall through to per-process memory (gunicorn multi-worker replay risk).
+    """
     redis_result = _consume_jti_redis(jti, exp)
     if redis_result is not None:
         return redis_result
     sqlite_result = _consume_jti_sqlite(jti, exp)
     if sqlite_result is not None:
         return sqlite_result
-    return _consume_jti_memory(jti)
+    _log.error(
+        'Launch JTI durable stores unavailable; rejecting token to avoid '
+        'cross-worker replay (configure Redis).'
+    )
+    return False
 
 
 def verify_launch_token(exp, template_vmid, remote_id, jti, sig) -> tuple[bool, str]:

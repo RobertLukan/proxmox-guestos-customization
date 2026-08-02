@@ -127,9 +127,10 @@ Short form:
 - `ostype` is a Windows type (`win10`, `win11`, …).
 - Prefer a clean image (few extra local users).
 
-Validated: Windows Server 2019, Windows 11 (Server 2022/2025: same Server family —
-tag and smoke-test). See [AD_VALIDATION.md](AD_VALIDATION.md)
-if you need domain join.
+Validated: Windows Server 2019 (Standard Evaluation), Windows Server 2022
+(Standard VL), Windows 11 — full edition matrix and community asks:
+[VALIDATED_MATRIX.md](VALIDATED_MATRIX.md). See
+[AD_VALIDATION.md](AD_VALIDATION.md) for domain join.
 
 ### Credentials to prepare
 
@@ -262,7 +263,7 @@ Compose **v2** required (see [Packages / tools](#packages--tools-guestos-host)).
 **Preferred — pull from GHCR** (image published on each `v*` release):
 
 ```bash
-export GUESTOS_VERSION=2.6.4   # pin; both 2.6.4 and v2.6.4 tags exist on GHCR
+export GUESTOS_VERSION=2.6.5   # pin; both 2.6.5 and v2.6.5 tags exist on GHCR
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 # Podman: podman compose -f docker-compose.yml -f docker-compose.ghcr.yml …

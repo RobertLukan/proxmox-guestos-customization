@@ -133,6 +133,9 @@ try:
 except ValueError:
     SYSPREP_AGENT_STABLE_SECONDS = 60
 
+# Lab/smoke only: honor request fast_waits=true. Off by default in production.
+ALLOW_FAST_WAITS = _env_bool('ALLOW_FAST_WAITS', False)
+
 # Bulk / provisioning safeguards (no superadmin bypass — use PVE for exceptions).
 try:
     BULK_MAX_ITEMS = max(1, int(os.environ.get('BULK_MAX_ITEMS') or '10'))

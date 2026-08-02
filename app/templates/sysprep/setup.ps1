@@ -178,6 +178,22 @@ function Clear-GuestOsDriveLetter([string]$Letter) {
     }
 }
 
+function Reset-GuestOsRecycleBin {
+    param([string]$Letter)
+    # After Format-Volume or drive-letter reassignment, Explorer often reports a
+    # corrupted Recycle Bin ($RECYCLE.BIN). Drop it; Windows recreates a clean one.
+    $Letter = $Letter.Substring(0, 1).ToUpper()
+    $path = ('{0}:\{1}' -f $Letter, '$RECYCLE.BIN')
+    try {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+            Write-Output "setup.ps1: Reset Recycle Bin on ${Letter}:"
+        }
+    } catch {
+        Write-Output "setup.ps1: Recycle Bin reset skipped on ${Letter}:: $($_.Exception.Message)"
+    }
+}
+
 function Ensure-GuestOsVolume {
     param(
         $Disk,
@@ -237,6 +253,7 @@ function Ensure-GuestOsVolume {
             }
         }
     }
+    Reset-GuestOsRecycleBin -Letter $Letter
     return (Get-Partition -DiskNumber $Disk.Number -ErrorAction SilentlyContinue |
         Where-Object { $_.DriveLetter } | Select-Object -First 1)
 }
@@ -525,6 +542,13 @@ for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
         {% endif %}
         $joined = $true
         Write-Output "setup.ps1: Joined domain $($j.domain)."
+        # Best-effort: pull time from the domain (PDC) before the membership reboot.
+        # Does not fail the job if the DC clock/NTP is wrong — that is an AD/lab issue.
+        try {
+            w32tm /resync /force 2>&1 | ForEach-Object { Write-Output "setup.ps1: w32tm: $_" }
+        } catch {
+            Write-Output "setup.ps1: w32tm /resync skipped: $($_.Exception.Message)"
+        }
     } catch {
         Write-Output "setup.ps1: Domain join attempt $($i + 1) failed: $($_.Exception.Message)"
         Start-Sleep -Seconds 15

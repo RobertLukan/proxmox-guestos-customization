@@ -2,6 +2,9 @@
 
 GuestOS can join clones to AD from `setup.ps1` using credentials from `DOMAIN_PROFILES_JSON` (or form fields when profile credentials are disabled).
 
+For the full **OS / edition** lab matrix (not only AD), see
+[VALIDATED_MATRIX.md](VALIDATED_MATRIX.md).
+
 ## Lab status (2026-08-02)
 
 | Check | Result |
