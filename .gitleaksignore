@@ -1,0 +1,9 @@
+# Public Microsoft GVLKs (KMS client setup keys) — not secrets.
+# https://learn.microsoft.com/en-us/windows-server/get-started/kms-client-activation-keys
+# Fingerprints from commit that introduced dashed key literals in tests.
+63ce00a2d934da37597985cc176a56b7b257a8f4:tests/test_sysprep.py:generic-api-key:133
+63ce00a2d934da37597985cc176a56b7b257a8f4:tests/test_windows_product_keys.py:generic-api-key:9
+63ce00a2d934da37597985cc176a56b7b257a8f4:tests/test_windows_product_keys.py:generic-api-key:13
+63ce00a2d934da37597985cc176a56b7b257a8f4:tests/test_windows_product_keys.py:generic-api-key:27
+63ce00a2d934da37597985cc176a56b7b257a8f4:tests/test_windows_product_keys.py:generic-api-key:36
+63ce00a2d934da37597985cc176a56b7b257a8f4:tests/test_windows_product_keys.py:generic-api-key:45
