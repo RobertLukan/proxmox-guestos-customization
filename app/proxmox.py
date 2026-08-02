@@ -700,7 +700,11 @@ def _parse_disk_value(raw):
 
 
 def list_vm_disks(vmid):
-    """Return unused+used disk entries for a QEMU VM (scsi/virtio/sata/ide)."""
+    """Return bus disk entries for a QEMU VM (scsi/virtio/sata/ide).
+
+    Skips CD-ROM/ISO/cloud-init. Firmware volumes (``efidiskN``, ``tpmstateN``)
+    and detached ``unusedN`` slots are not bus keys and are never returned.
+    """
     proxmox = get_proxmox_api()
     node = _get_vm_node(vmid)
     if not proxmox or not node:
@@ -846,6 +850,11 @@ def reconcile_vm_disks(vmid, disks_plan):
     """Attach/grow disks per plan. Returns guest_plan list for setup.ps1 / verify.
 
     New disks use the boot disk storage and copied options (aio, discard, …).
+
+    EFI (``efidiskN``) and TPM (``tpmstateN``) volumes are not bus disks and are
+    never reused. Bus indices for new attaches are tracked in-memory so a stale
+    ``list_vm_disks`` refresh cannot reassign ``scsi1`` and push the previous
+    volume to ``unusedN`` (Proxmox replaces the slot).
     """
     from app.disks import COPYABLE_DISK_OPTS  # local import avoids cycles
 
@@ -854,8 +863,19 @@ def reconcile_vm_disks(vmid, disks_plan):
     disks = list(boot['disks'])
     copy_opts = {k: v for k, v in boot['opts'].items() if k in COPYABLE_DISK_OPTS}
     guest_plan = []
+    bus = boot['bus']
+    # Track indices locally — do not rely solely on re-listing after each attach.
+    used_indices = {d['index'] for d in disks if d['bus'] == bus}
+
+    def _alloc_bus_key():
+        n = 0
+        while n in used_indices:
+            n += 1
+        used_indices.add(n)
+        return f'{bus}{n}'
 
     # Map existing non-boot disks for reuse (serial match, else ascending index).
+    # Never treat firmware volumes as candidates (they are not in ``disks``).
     non_boot = [d for d in disks if d['key'] != boot['key']]
 
     for item in disks_plan:
@@ -918,12 +938,9 @@ def reconcile_vm_disks(vmid, disks_plan):
             if cur is not None and size_gb > cur:
                 _resize_disk_to_gb(proxmox, node, vmid, matched['key'], cur, size_gb)
             pve_key = matched['key']
+            used_indices.add(matched['index'])
         else:
-            bus = boot['bus']
-            # Refresh disk list for next free index after prior attaches.
-            disks, _, _, _ = list_vm_disks(vmid)
-            idx = _next_bus_index(disks, bus)
-            pve_key = f'{bus}{idx}'
+            pve_key = _alloc_bus_key()
             value = _format_disk_value(boot['storage'], size_gb, copy_opts, serial=serial)
             proxmox.nodes(node).qemu(vmid).config.post(**{pve_key: value})
 
@@ -1062,16 +1079,52 @@ def _is_transient_agent_error(exc):
 
 
 def write_file_to_guest(vmid, content, file_path):
-    """Writes a file to the guest OS via QEMU Guest Agent."""
-    content_b64 = base64.b64encode(content).decode('ascii')
+    """Writes a file to the guest OS via QEMU Guest Agent.
 
-    command = (
-        "powershell -command \""
-        f"New-Item -ItemType Directory -Force -Path (Split-Path -Path '{file_path}' -Parent); "
-        f"[System.IO.File]::WriteAllBytes('{file_path}', "
-        f"[System.Convert]::FromBase64String('{content_b64}'))\""
+    Small files are written in one ``agent.exec`` call. Larger payloads are
+    staged as base64 chunks then decoded — a single embedded WriteAllBytes
+    command fails with qemu-ga ``Invalid argument`` once the command line is
+    too long (seen with disk-customize ``setup.ps1`` ~35 KiB base64).
+    """
+    raw = content if isinstance(content, (bytes, bytearray)) else bytes(content)
+    content_b64 = base64.b64encode(raw).decode('ascii')
+    # Keep the full PowerShell -Command well under typical guest-agent limits.
+    max_inline_b64 = 8000
+
+    if len(content_b64) <= max_inline_b64:
+        command = (
+            "powershell -NoProfile -Command \""
+            f"New-Item -ItemType Directory -Force -Path (Split-Path -Path '{file_path}' -Parent) | Out-Null; "
+            f"[System.IO.File]::WriteAllBytes('{file_path}', "
+            f"[System.Convert]::FromBase64String('{content_b64}'))\""
+        )
+        run_command_in_guest(vmid, command)
+        return
+
+    chunk_size = 6000
+    b64_path = f'{file_path}.guestos.b64'
+    run_command_in_guest(
+        vmid,
+        "powershell -NoProfile -Command \""
+        f"New-Item -ItemType Directory -Force -Path (Split-Path -Path '{file_path}' -Parent) | Out-Null; "
+        f"Set-Content -LiteralPath '{b64_path}' -Value '' -Encoding Ascii\"",
     )
-    run_command_in_guest(vmid, command)
+    for i in range(0, len(content_b64), chunk_size):
+        chunk = content_b64[i:i + chunk_size]
+        run_command_in_guest(
+            vmid,
+            "powershell -NoProfile -Command \""
+            f"Add-Content -LiteralPath '{b64_path}' -Value '{chunk}' "
+            f"-Encoding Ascii -NoNewline\"",
+        )
+    run_command_in_guest(
+        vmid,
+        "powershell -NoProfile -Command \""
+        f"$b = Get-Content -LiteralPath '{b64_path}' -Raw; "
+        f"[System.IO.File]::WriteAllBytes('{file_path}', "
+        f"[System.Convert]::FromBase64String($b)); "
+        f"Remove-Item -LiteralPath '{b64_path}' -Force -ErrorAction SilentlyContinue\"",
+    )
 
 
 def run_command_in_guest(vmid, command, retries=8, retry_delay=15):

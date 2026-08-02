@@ -61,6 +61,11 @@ If `manage_disks=true` on a non-Server template, the job **fails validation**
 (no silent skip). Disk customize is exposed in the **GuestOS UI / machine API**,
 not in the PDM Customize button.
 
+**EFI / TPM:** UEFI templates may include `efidisk0` and optionally `tpmstate0`.
+Those firmware volumes are **not** treated as OS/data/pagefile disks and are
+left alone. Configure disks only allocates new `scsi`/`virtio`/… bus slots for
+pagefile/data (or reuses existing non-boot bus disks with matching serials).
+
 ## What GuestOS does on the clone
 
 1. Clone the template and power on; wait for a stable guest agent.
@@ -70,9 +75,10 @@ not in the PDM Customize button.
    empty Setup `ProductKey`/`WillShowUI` in specialize fails.) Pass `product_key`
    to use your own key instead.
 3. Write `unattended.xml` and `C:\ProgramData\GuestOS\setup.ps1` (and related
-   scripts) via the guest agent.
+   scripts) via the guest agent. Large `setup.ps1` (disk plans) is written in
+   chunks to stay under QEMU guest-agent command-line limits.
 4. Run Sysprep generalize/OOBE; on first logon, `setup.ps1` applies network /
-   cleanup / optional domain join.
+   cleanup / optional domain join / disk letters.
 5. Verify durable setup markers and expected hostname/IP before marking SUCCESS.
 
 If a job fails mid-flight, the clone may remain on the cluster — see

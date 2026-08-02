@@ -84,3 +84,104 @@ def test_matched_disk_inherits_boot_copy_opts():
     assert 'ssd=1' in out
     assert 'backup=0' in out
     assert 'iothread=1' in out
+
+
+def test_next_bus_index_skips_occupied():
+    from app.proxmox import _next_bus_index
+
+    disks = [
+        {'bus': 'scsi', 'index': 0},
+        {'bus': 'scsi', 'index': 1},
+    ]
+    assert _next_bus_index(disks, 'scsi') == 2
+
+
+def test_reconcile_allocates_distinct_bus_keys_without_relist(monkeypatch):
+    """Two new disks must not both land on scsi1 (which orphans the first to unused0)."""
+    from app import proxmox as px
+
+    posts = []
+
+    class _Cfg:
+        def post(self, **kwargs):
+            posts.append(kwargs)
+
+    class _Qemu:
+        def __init__(self):
+            self.config = _Cfg()
+
+    class _Nodes:
+        def qemu(self, vmid):
+            return _Qemu()
+
+    class _Proxmox:
+        def nodes(self, node):
+            return _Nodes()
+
+    boot_disks = [{
+        'key': 'scsi0',
+        'bus': 'scsi',
+        'index': 0,
+        'storage': 'data15_nvme',
+        'opts': {'discard': 'on', 'iothread': '1', 'ssd': '1'},
+        'size_gb': 64,
+        'raw': 'data15_nvme:vm-1-disk-1,discard=on,iothread=1,size=64G,ssd=1',
+        'serial': None,
+        'head': 'data15_nvme:vm-1-disk-1',
+        'volume': 'vm-1-disk-1',
+    }]
+
+    def _boot(vmid):
+        return {
+            'key': 'scsi0',
+            'bus': 'scsi',
+            'index': 0,
+            'storage': 'data15_nvme',
+            'opts': {'discard': 'on', 'iothread': '1', 'ssd': '1'},
+            'size_gb': 64,
+            'raw': boot_disks[0]['raw'],
+            'disks': list(boot_disks),
+            'node': 'pve',
+            'proxmox': _Proxmox(),
+            'cfg': {'efidisk0': 'data15_nvme:vm-1-disk-0,efitype=4m,size=4M'},
+        }
+
+    monkeypatch.setattr(px, 'get_boot_disk_spec', _boot)
+    # If code still re-lists and gets a stale empty secondary list, in-memory
+    # tracking must still allocate scsi1 then scsi2.
+    monkeypatch.setattr(
+        px,
+        'list_vm_disks',
+        lambda vmid: (list(boot_disks), {}, 'pve', _Proxmox()),
+    )
+    monkeypatch.setattr(px, '_set_disk_serial', lambda *a, **k: None)
+
+    plan = [
+        {'role': 'os', 'serial': 'guestos-os', 'drive_letter': 'C', 'min_size_gb': 64},
+        {
+            'role': 'pagefile',
+            'serial': 'guestos-pagefile',
+            'drive_letter': 'P',
+            'size_gb': 16,
+            'ensure_pagefile': True,
+            'reformat': True,
+        },
+        {
+            'role': 'data',
+            'serial': 'guestos-data-0',
+            'drive_letter': 'D',
+            'size_gb': 50,
+            'ensure_pagefile': False,
+            'reformat': False,
+            'label': 'Data',
+        },
+    ]
+    guest = px.reconcile_vm_disks(99, plan)
+    keys = [p['pve_key'] for p in guest]
+    assert keys == ['scsi0', 'scsi1', 'scsi2']
+    assert len(posts) == 2
+    assert 'scsi1' in posts[0]
+    assert 'scsi2' in posts[1]
+    assert 'serial=guestos-pagefile' in posts[0]['scsi1']
+    assert 'serial=guestos-data-0' in posts[1]['scsi2']
+    assert 'efidisk' not in ''.join(keys)
