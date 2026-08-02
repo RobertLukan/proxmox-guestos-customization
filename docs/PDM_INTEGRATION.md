@@ -31,7 +31,7 @@ GUESTOS_LAUNCH_SECRET=must-match-pdm-guestos-cfg
 
 ```bash
 ./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"
-export GUESTOS_VERSION=2.5.1   # pin a release
+export GUESTOS_VERSION=2.6.0   # pin a release
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 # Dev / unreleased tree instead:
@@ -75,9 +75,9 @@ options (`aio`, `discard`, `cache`, …). Existing template disks are reused
 (online/extend) instead of duplicated. Post-Sysprep verify checks volumes and
 pagefile placement when requested.
 
-**Policy:** disk reconcile runs only for **Windows Server 2019** templates
-(matched by template **name** or **tags**, e.g. `server2019` / `win2019` /
-`ws2019` / `guestos-disk`). If `manage_disks` is set on a non–Server-2019
+**Policy:** disk reconcile runs only for **Windows Server** templates
+(matched by template **name** or **tags**, e.g. `windowsserver2019|2022|2025`,
+`server2022`, `ws2025`, `guestos-disk`). If `manage_disks` is set on a non-Server
 template (e.g. Win11), the workflow **fails validation** with a clear error
 (no silent disable). Disk customize is available via the machine API / smoke
 scripts; it is **not** exposed in the PDM Customize UI.

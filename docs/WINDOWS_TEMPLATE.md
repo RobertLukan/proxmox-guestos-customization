@@ -3,7 +3,9 @@
 GuestOS only customizes **Proxmox Windows templates** (clone → Sysprep). Use this
 checklist before the first Customize / Clone + Sysprep job.
 
-Validated in lab: **Windows Server 2019**, **Windows 11**.
+Validated in lab: **Windows Server 2019**, **Windows 11**.  
+Supported Server family (same code path): **2019 / 2022 / 2025** — tag templates
+and run a smoke job before production use.
 
 ## Required
 
@@ -12,7 +14,7 @@ Validated in lab: **Windows Server 2019**, **Windows 11**.
    (VM → Summary / guest agent).
 3. In Proxmox **Options**, enable **QEMU Guest Agent** for the VM.
 4. Set QEMU **OS Type** to a Windows value (`win10`, `win11`, …). GuestOS filters
-   templates by this `ostype`.
+   templates by this `ostype`. Proxmox does **not** encode Server year in `ostype`.
 5. Set a known local **Administrator** password (GuestOS Sysprep will set a new
    password from the wizard / API payload).
 6. Prefer a **clean** image: few extra local users, no half-finished domain join,
@@ -35,25 +37,27 @@ GuestOS classifies caps primarily from Proxmox **tags**:
 | Tag | Family | Caps (defaults) |
 |-----|--------|-----------------|
 | `windows11` | Win11 / VDI | 8 cores, 64 GB RAM, 600 GB requested disks |
-| `windowsserver2019` (or `windowsserver*`) | Server | 16 cores, 64 GB RAM, 2 TB requested disks |
+| `windowsserver2019` / `windowsserver2022` / `windowsserver2025` (or any `windowsserver*`) | Server | 16 cores, 64 GB RAM, 2 TB requested disks |
 
 Lab examples: template **127** → `windows11`; template **120** → `windowsserver2019`.
 
-Also accepted: name heuristics and tags such as `guestos-disk`, `server2019`, `win11`, `vdi`.
+Also accepted: name heuristics (`server2022`, `ws2025`, …) and tags such as
+`guestos-disk`, `server2019`, `server2022`, `server2025`, `win11`, `vdi`.
 
-## Optional: Configure disks (Server 2019 only)
+## Optional: Configure disks (Windows Server family)
 
 `manage_disks` attaches/onlines/extends OS, data, and pagefile volumes at
 customize time. It is **not** available for Win11 (flat disk layout) — the Disks
 wizard step is hidden for `windows11` templates and the API rejects
 `manage_disks=true` for non-Server families.
 
-The template must be recognized as Server 2019 via **name or tags**, for example:
+The template must be recognized as **Windows Server** via **name or tags**, for example:
 
-- Name contains: `server2019`, `win2019`, `ws2019`, …
-- Or tags such as: `windowsserver2019`, `guestos-disk`, `guestos-disks`, `server2019`, …
+- Name contains: `server2019`, `server2022`, `server2025`, `win2019`, `ws2022`, …
+- Or tags such as: `windowsserver2019`, `windowsserver2022`, `windowsserver2025`,
+  `guestos-disk`, `guestos-disks`, `server2022`, …
 
-If `manage_disks=true` on a non–2019 template, the job **fails validation**
+If `manage_disks=true` on a non-Server template, the job **fails validation**
 (no silent skip). Disk customize is exposed in the **GuestOS UI / machine API**,
 not in the PDM Customize button.
 
@@ -73,4 +77,5 @@ If a job fails mid-flight, the clone may remain on the cluster — see
 
 Use a **disposable** template clone (or accept that failed smoke jobs leave
 orphaned VMs to delete). Do not point first tests at production golden images
-you cannot recreate.
+you cannot recreate. For Server 2022/2025, run at least one single Customize
+(static or DHCP) before enabling `manage_disks` or AD join in production.

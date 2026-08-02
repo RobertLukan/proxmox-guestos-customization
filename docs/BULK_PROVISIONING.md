@@ -29,8 +29,9 @@ In **New VM with Sysprep** on a **Windows 11** template (`windows11` tag), choos
 3. Submit. GuestOS creates a `batch_id` and enqueues one task per row.
 4. Jobs page can be filtered by `batch_id`.
 
-**Windows Server** templates (e.g. `windowsserver2019`) do **not** offer bulk mode —
-use single Customize only. The API rejects bulk starts against Server templates.
+**Windows Server** templates (e.g. `windowsserver2019` / `2022` / `2025`) do **not**
+offer bulk mode — use single Customize only. The API rejects bulk starts against
+Server templates.
 
 ## Safeguards (no override)
 
@@ -51,7 +52,7 @@ provision exceptions directly in Proxmox VE.
 Template family is classified primarily by Proxmox tags:
 
 - `windows11` → Win11 caps (lab template **127**)
-- `windowsserver2019` → Server caps (lab template **120**)
+- `windowsserver2019` / `windowsserver2022` / `windowsserver2025` (or `windowsserver*`) → Server caps (lab template **120** is 2019)
 
 Disk totals apply to requested `manage_disks` plan sizes only (thin clones without
 Configure disks do not sum template size into the GuestOS disk cap). The wizard also

@@ -117,7 +117,7 @@ Optional: `touch /etc/containers/nodocker` to silence the podman-docker banner.
 ### Windows golden image
 
 Full checklist: **[WINDOWS_TEMPLATE.md](WINDOWS_TEMPLATE.md)** (guest agent,
-ostype, convert-to-template, Server 2019 disk tags, what Sysprep does on the
+ostype, convert-to-template, Server disk tags, what Sysprep does on the
 clone).
 
 Short form:
@@ -127,7 +127,8 @@ Short form:
 - `ostype` is a Windows type (`win10`, `win11`, …).
 - Prefer a clean image (few extra local users).
 
-Validated: Windows Server 2019, Windows 11. See [AD_VALIDATION.md](AD_VALIDATION.md)
+Validated: Windows Server 2019, Windows 11 (Server 2022/2025: same Server family —
+tag and smoke-test). See [AD_VALIDATION.md](AD_VALIDATION.md)
 if you need domain join.
 
 ### Credentials to prepare
@@ -261,7 +262,7 @@ Compose **v2** required (see [Packages / tools](#packages--tools-guestos-host)).
 **Preferred — pull from GHCR** (image published on each `v*` release):
 
 ```bash
-export GUESTOS_VERSION=2.5.1   # pin; both 2.5.1 and v2.5.1 tags exist on GHCR
+export GUESTOS_VERSION=2.6.0   # pin; both 2.6.0 and v2.6.0 tags exist on GHCR
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 # Podman: podman compose -f docker-compose.yml -f docker-compose.ghcr.yml …

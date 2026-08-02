@@ -99,23 +99,31 @@ def test_check_storage_blocks(app):
             check_storage_for_template(127, get_usage=usage)
 
 
-def test_tags_windowsserver2019_and_windows11():
-    assert pm._tags_indicate_server_2019('windowsserver2019') is True
+def test_tags_windowsserver_family_and_windows11():
+    assert pm._tags_indicate_server('windowsserver2019') is True
+    assert pm._tags_indicate_server('windowsserver2022') is True
+    assert pm._tags_indicate_server('windowsserver2025') is True
+    assert pm._tags_indicate_server('guestos-server2025') is True
+    assert pm._tags_indicate_server('server2022') is True
     assert pm._tags_indicate_windows11('windows11') is True
     assert pm.classify_windows_guest_family.__name__ == 'classify_windows_guest_family'
 
 
 def test_classify_from_tags(monkeypatch):
-    monkeypatch.setattr(
-        pm,
-        '_template_name_tags',
-        lambda vmid, node=None, proxmox=None: (
-            'WInServer2019Template' if str(vmid) == '120' else 'Win11-templ2',
-            'windowsserver2019' if str(vmid) == '120' else 'windows11',
-            'win10' if str(vmid) == '120' else 'win11',
-        ),
-    )
+    def _meta(vmid, node=None, proxmox=None):
+        v = str(vmid)
+        if v == '120':
+            return 'WInServer2019Template', 'windowsserver2019', 'win10'
+        if v == '121':
+            return 'Srv2022', 'windowsserver2022', 'win11'
+        if v == '122':
+            return 'Srv2025', 'windowsserver2025', 'win11'
+        return 'Win11-templ2', 'windows11', 'win11'
+
+    monkeypatch.setattr(pm, '_template_name_tags', _meta)
     assert pm.classify_windows_guest_family(120) == 'server'
+    assert pm.classify_windows_guest_family(121) == 'server'
+    assert pm.classify_windows_guest_family(122) == 'server'
     assert pm.classify_windows_guest_family(127) == 'win11'
 
 

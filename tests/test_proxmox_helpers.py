@@ -156,18 +156,32 @@ def test_require_sysprep_template_accepts_windows_template(monkeypatch):
     assert pm.require_sysprep_template(120) == 'win10'
 
 
-def test_windows_server_2019_name_matcher():
-    assert pm._looks_like_windows_server_2019_name('WIN-SERVER2019-TPL') is True
-    assert pm._looks_like_windows_server_2019_name('Windows 2019 Core') is True
-    assert pm._looks_like_windows_server_2019_name('ws2019-base') is True
-    assert pm._looks_like_windows_server_2019_name('Windows11-template') is False
+def test_windows_server_name_matcher():
+    assert pm._looks_like_windows_server_name('WIN-SERVER2019-TPL') is True
+    assert pm._looks_like_windows_server_name('Windows 2019 Core') is True
+    assert pm._looks_like_windows_server_name('ws2019-base') is True
+    assert pm._looks_like_windows_server_name('tpl-win-server2022') is True
+    assert pm._looks_like_windows_server_name('WS2025-DC') is True
+    assert pm._looks_like_windows_server_name('w2k22-base') is True
+    assert pm._looks_like_windows_server_name('Windows11-template') is False
 
 
-def test_is_windows_server_2019_template_uses_vm_name(monkeypatch):
+def test_is_windows_server_template_uses_vm_name(monkeypatch):
     vms = [{'vmid': 120, 'name': 'tpl-win-server2019', 'template': 1, 'node': 'pve'}]
     configs = {120: {'ostype': 'win10', 'name': 'ignored'}}
     monkeypatch.setattr(pm, 'get_proxmox_api', lambda: _FakeProxmoxTemplates(vms, configs))
+    assert pm.is_windows_server_template(120) is True
+    # Deprecated alias still works.
     assert pm.is_windows_server_2019_template(120) is True
+
+
+def test_is_windows_server_template_2022_and_2025_names(monkeypatch):
+    for vmid, name in ((121, 'tpl-server2022'), (122, 'win-server-2025-dc')):
+        vms = [{'vmid': vmid, 'name': name, 'template': 1, 'node': 'pve'}]
+        configs = {vmid: {'ostype': 'win11', 'name': 'ignored'}}
+        monkeypatch.setattr(pm, 'get_proxmox_api', lambda v=vms, c=configs: _FakeProxmoxTemplates(v, c))
+        assert pm.is_windows_server_template(vmid) is True
+        assert pm.classify_windows_guest_family(vmid) == 'server'
 
 
 def test_delete_vm_stops_then_deletes(monkeypatch):

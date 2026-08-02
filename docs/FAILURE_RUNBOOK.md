@@ -8,7 +8,7 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 
 | Symptom | Likely cause | First checks |
 |---------|--------------|--------------|
-| Task `FAILURE` early (“Invalid sysprep input”) | Bad hostname/IP/domain/`manage_disks` | Task message; Server 2019 name/tag for disks |
+| Task `FAILURE` early (“Invalid sysprep input”) | Bad hostname/IP/domain/`manage_disks` | Task message; Server name/tag for disks |
 | Stuck ~60–85% “Waiting for QEMU Guest Agent” | Guest agent / first-boot loop | Console on clone; QGA package; template health |
 | Stuck ~88–92% after Sysprep | Shutdown wait missed / hung generalize | Console; agent bounce; orphaned clone VMID in task |
 | `verification failed` / `setup.done missing` | FirstLogon `setup.ps1` never finished | Guest `C:\ProgramData\GuestOS\` markers + transcript |
@@ -73,7 +73,7 @@ Non-lifecycle tags (e.g. `uuid:…`, family tags) are preserved.
 
 ## Silent disk skip (removed)
 
-`manage_disks=true` on a non–Server-2019 template now **fails validation** (no silent disable). Name/tag the template (`server2019`, `win2019`, `ws2019`, `guestos-disk`, …) or omit `manage_disks`. Disk customize is not exposed in the PDM Customize UI — use the machine API / smoke script.
+`manage_disks=true` on a non-Server template now **fails validation** (no silent disable). Name/tag the template (`windowsserver2019|2022|2025`, `server2022`, `guestos-disk`, …) or omit `manage_disks`. Disk customize is not exposed in the PDM Customize UI — use the machine API / smoke script.
 
 ## Compose / Redis
 

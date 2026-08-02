@@ -57,22 +57,29 @@ _WINDOWS_OSTYPES = frozenset({
 })
 
 
-def _looks_like_windows_server_2019_name(name):
-    """Best-effort name matcher for Windows Server 2019 templates."""
+def _looks_like_windows_server_name(name):
+    """Best-effort name matcher for Windows Server templates (2019/2022/2025+)."""
     s = str(name or '').strip().lower().replace('_', ' ').replace('-', ' ')
     if not s:
         return False
     compact = s.replace(' ', '')
-    return (
-        'server2019' in compact
-        or 'windows2019' in compact
-        or 'win2019' in compact
-        or 'ws2019' in compact
-        or 'w2k19' in compact
-        or 'srv2019' in compact
-        or 'srv19' in compact
-        or ('2019' in compact and any(t in compact for t in ('server', 'win', 'ws', 'srv', 'w2k')))
+    year_tokens = (
+        'server2019', 'windows2019', 'win2019', 'ws2019', 'w2k19', 'srv2019', 'srv19',
+        'server2022', 'windows2022', 'win2022', 'ws2022', 'w2k22', 'srv2022', 'srv22',
+        'server2025', 'windows2025', 'win2025', 'ws2025', 'w2k25', 'srv2025', 'srv25',
     )
+    if any(t in compact for t in year_tokens):
+        return True
+    # Year + server-ish token (avoid matching desktop names that merely contain a year).
+    for year in ('2019', '2022', '2025'):
+        if year in compact and any(
+            t in compact for t in ('server', 'win', 'ws', 'srv', 'w2k')
+        ):
+            # Exclude clear desktop/Win11 names.
+            if 'windows11' in compact or 'win11' in compact:
+                continue
+            return True
+    return False
 
 
 def _parse_proxmox_tags(tags):
@@ -81,19 +88,28 @@ def _parse_proxmox_tags(tags):
     return {p.strip().lower() for p in raw.replace(';', ',').split(',') if p.strip()}
 
 
-def _tags_indicate_server_2019(tags):
-    """True when Proxmox tags include an explicit GuestOS / server capability."""
+def _tags_indicate_server(tags):
+    """True when Proxmox tags mark a Windows Server / disk-capable template."""
     parts = _parse_proxmox_tags(tags)
     markers = {
         'guestos-disk',
         'guestos-disks',
         'guestos-server2019',
+        'guestos-server2022',
+        'guestos-server2025',
         'server2019',
+        'server2022',
+        'server2025',
         'win2019',
+        'win2022',
+        'win2025',
         'ws2019',
-        # Lab / operator convention (template 120): windowsserver2019
+        'ws2022',
+        'ws2025',
+        # Lab / operator convention: windowsserver2019 / 2022 / 2025
         'windowsserver2019',
         'windowsserver2022',
+        'windowsserver2025',
         'windowsserver2016',
     }
     if parts & markers:
@@ -163,30 +179,35 @@ def _template_name_tags(vmid, node=None, proxmox=None):
     return name, tags, ostype
 
 
-def is_windows_server_2019_template(vmid, node=None, proxmox=None):
-    """True when template metadata indicates Windows Server 2019.
+def is_windows_server_template(vmid, node=None, proxmox=None):
+    """True when template metadata indicates Windows Server (2019/2022/2025+).
 
-    Proxmox ``ostype`` cannot reliably distinguish Server 2019 from Win11 for
-    all templates in this lab (often both are ``win10``), so this helper uses
-    template name and optional tags (``windowsserver2019``, ``guestos-disk``, …).
+    Proxmox ``ostype`` cannot reliably distinguish Server from Win11 for all
+    templates (often both are ``win10``/``win11``), so this helper uses template
+    name and tags (``windowsserver2022``, ``guestos-disk``, …).
     """
     name, tags, _ostype = _template_name_tags(vmid, node=node, proxmox=proxmox)
-    if _looks_like_windows_server_2019_name(name):
+    if _looks_like_windows_server_name(name):
         return True
-    return _tags_indicate_server_2019(tags)
+    return _tags_indicate_server(tags)
+
+
+def is_windows_server_2019_template(vmid, node=None, proxmox=None):
+    """Deprecated alias for :func:`is_windows_server_template`."""
+    return is_windows_server_template(vmid, node=node, proxmox=proxmox)
 
 
 def classify_windows_guest_family(vmid, node=None, proxmox=None):
     """Classify a Windows template as ``server`` or ``win11`` for resource caps.
 
     Preference order:
-    1. Explicit tags (``windowsserver2019``, ``windows11``, …)
+    1. Explicit tags (``windowsserver2022``, ``windows11``, …)
     2. Name heuristics
     3. ``ostype == win11`` → win11; otherwise default to win11/desktop caps
        (safe for VDI; Server must be tagged/named).
     """
     name, tags, ostype = _template_name_tags(vmid, node=node, proxmox=proxmox)
-    if _tags_indicate_server_2019(tags) or _looks_like_windows_server_2019_name(name):
+    if _tags_indicate_server(tags) or _looks_like_windows_server_name(name):
         return 'server'
     if _tags_indicate_windows11(tags) or _looks_like_windows11_name(name):
         return 'win11'

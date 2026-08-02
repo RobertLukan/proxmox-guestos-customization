@@ -10,7 +10,7 @@ from app.proxmox import (
     get_vm_nic_macs,
     use_pve_override,
     require_windows_guest,
-    is_windows_server_2019_template,
+    is_windows_server_template,
     reconcile_vm_disks,
     set_lifecycle_tag,
     mark_vm_customization_failed,
@@ -176,12 +176,13 @@ def sysprep_workflow_task(self, task_id, data):
                     _validate_sysprep_network(data)
                     _prepare_domain_join(data)
                     if _as_bool(data.get('manage_disks')):
-                        if not is_windows_server_2019_template(data['template_vmid']):
+                        if not is_windows_server_template(data['template_vmid']):
                             raise ValidationError(
-                                'manage_disks requires a Windows Server 2019 template '
-                                '(name/tag: server2019, win2019, ws2019, or guestos-disk). Win11 and '
-                                'other guests keep a flat disk layout — omit manage_disks '
-                                'or retarget a Server 2019 template.'
+                                'manage_disks requires a Windows Server template '
+                                '(name/tag: windowsserver2019|2022|2025, server2022, '
+                                'guestos-disk, …). Windows 11 and other guests keep a '
+                                'flat disk layout — omit manage_disks or retarget a '
+                                'Server template.'
                             )
                         prepare_disk_plan(data)
                         from app.proxmox import classify_windows_guest_family

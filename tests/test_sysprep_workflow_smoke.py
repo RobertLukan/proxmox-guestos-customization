@@ -99,7 +99,7 @@ def _patch_workflow_side_effects(monkeypatch, *, clone_vmid=9055, fail_clone=Fal
         return ['BC:24:11:00:11:22']
 
     monkeypatch.setattr(ca, 'require_windows_guest', _require_windows)
-    monkeypatch.setattr(ca, 'is_windows_server_2019_template', lambda vmid: True)
+    monkeypatch.setattr(ca, 'is_windows_server_template', lambda vmid: True)
     monkeypatch.setattr(ca, 'clone_vm', _clone)
     monkeypatch.setattr(ca, 'get_primary_mac_address', _mac)
     monkeypatch.setattr(ca, 'get_vm_nic_macs', _macs)
@@ -203,15 +203,15 @@ def test_sysprep_workflow_mocked_success(app, monkeypatch):
         assert calls['sleeps'] >= 1  # initial boot-settle wait (mocked)
 
 
-def test_sysprep_workflow_rejects_manage_disks_on_non_server_2019(app, monkeypatch):
+def test_sysprep_workflow_rejects_manage_disks_on_non_server(app, monkeypatch):
     _patch_workflow_side_effects(monkeypatch, clone_vmid=9057)
     import app.celery_app as ca
 
-    monkeypatch.setattr(ca, 'is_windows_server_2019_template', lambda vmid: False)
+    monkeypatch.setattr(ca, 'is_windows_server_template', lambda vmid: False)
 
     task_id = str(uuid.uuid4())
     with app.app_context():
-        db.session.add(Task(id=task_id, name='Sysprep Workflow', description='non-srv2019'))
+        db.session.add(Task(id=task_id, name='Sysprep Workflow', description='non-server'))
         db.session.commit()
         sysprep_workflow_task.run(
             task_id,
@@ -225,8 +225,7 @@ def test_sysprep_workflow_rejects_manage_disks_on_non_server_2019(app, monkeypat
         )
         task = db.session.get(Task, task_id)
         assert task.status == 'FAILURE'
-        assert 'manage_disks requires a Windows Server 2019' in (task.message or '') or \
-        'manage_disks is only supported' in (task.message or '')
+        assert 'manage_disks requires a Windows Server' in (task.message or '')
 
 
 def test_sysprep_workflow_mocked_clone_failure(app, monkeypatch):

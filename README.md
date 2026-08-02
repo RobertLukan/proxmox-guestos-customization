@@ -4,9 +4,9 @@
 [![Security](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/security.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/security.yml)
 [![CodeQL](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/codeql.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/codeql.yml)
 
-**Current release: [2.5.1](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
+**Current release: [2.6.0](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
 
-> **Not an official Proxmox product.** Lab-validated on Windows Server 2019 and Windows 11. Support is community / GitHub issues only — [open an issue](https://github.com/RobertLukan/proxmox-guestos-customization/issues).
+> **Not an official Proxmox product.** Lab-validated on Windows Server 2019 and Windows 11; Server 2022/2025 use the same Server family (tag and validate in your lab). Support is community / GitHub issues only — [open an issue](https://github.com/RobertLukan/proxmox-guestos-customization/issues).
 
 GuestOS is **Sysprep-only** (template → clone → guest agent). In-place Sysprep of existing/production VMs is **disabled**.
 
@@ -18,7 +18,7 @@ GuestOS is **Sysprep-only** (template → clone → guest agent). In-place Syspr
 ## Start here
 
 1. **Deploy GuestOS alone** (recommended first step): Docker Compose + TLS — follow [docs/INSTALL.md](docs/INSTALL.md) §1–2.
-2. Prepare a **Windows golden image** template — [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md). Tag templates (`windows11` / `windowsserver2019`) so caps and UI modes classify correctly.
+2. Prepare a **Windows golden image** template — [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md). Tag templates (`windows11` / `windowsserver2019` / `windowsserver2022` / `windowsserver2025`) so caps and UI modes classify correctly.
 3. Open the UI, change the default password, run one **Clone + Sysprep** smoke.
 4. *(Optional)* For VDI fleets, use **Bulk desktops** on a Win11 template — [docs/BULK_PROVISIONING.md](docs/BULK_PROVISIONING.md).
 5. *(Optional / advanced)* Wire **Proxmox Datacenter Manager** with the AGPL GuestOS fork — [docs/INSTALL.md](docs/INSTALL.md) §3 and [PDM integration](docs/PDM_INTEGRATION.md).
@@ -33,9 +33,9 @@ GuestOS is **Sysprep-only** (template → clone → guest agent). In-place Syspr
 
 | Area | Notes |
 |------|--------|
-| Clone + Sysprep (hostname, static/DHCP, optional AD join) | **Stable** — validated on Server 2019 and Win11 in lab |
+| Clone + Sysprep (hostname, static/DHCP, optional AD join) | **Stable** — validated on Server 2019 and Win11 in lab (2022/2025: same Server path) |
 | Bulk Win11 batch (CSV / API) | **Stable for lab** — max 10/batch, 20/day; Win11 only |
-| Configure disks (OS / data / pagefile) | **Server 2019 only** (name/tag); hidden for Win11 |
+| Configure disks (OS / data / pagefile) | **Windows Server family** (2019/2022/2025 via name/tag); hidden for Win11 |
 | Provisioning safeguards (cores/RAM/disk/storage) | **Stable** — no in-app override; use PVE for exceptions |
 | PDM Customize + GuestOS tab | **Optional** AGPL fork; build/install `.deb`s yourself (no public APT feed yet) |
 
@@ -92,7 +92,7 @@ cp .env.example .env
 # Compose HTTPS: GUESTOS_TLS_HOST, BEHIND_REVERSE_PROXY=True; set PRIMARY_BRIDGE to your PVE bridge.
 chmod +x deploy/caddy/gen-selfsigned.sh
 ./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"   # lab self-signed; use real certs in prod
-export GUESTOS_VERSION=2.5.1   # pin a release; or omit for :latest
+export GUESTOS_VERSION=2.6.0   # pin a release; or omit for :latest
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
@@ -148,7 +148,7 @@ not save the wrong architecture.
 ```bash
 # Connected machine (force amd64 even on Apple Silicon / ARM builders)
 PLATFORM=linux/amd64
-VER=2.5.1
+VER=2.6.0
 docker pull --platform "$PLATFORM" "ghcr.io/robertlukan/proxmox-guestos-customization:${VER}"
 docker pull --platform "$PLATFORM" redis:7-alpine
 docker pull --platform "$PLATFORM" caddy:2.8-alpine
