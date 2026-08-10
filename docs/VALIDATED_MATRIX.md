@@ -8,7 +8,7 @@ needs community reports**.
 **GuestOS release when this matrix was last updated:** see [VERSION](../VERSION)
 (matrix date below). Prefer current `main` / latest GHCR tag when testing.
 
-**Matrix date:** 2026-08-02
+**Matrix date:** 2026-08-10
 
 ## What “lab OK” means
 
@@ -25,11 +25,12 @@ licensing advice, or production certification.
 
 ## Lab-validated (maintainer)
 
-| OS | Channel / edition (as seen by guest) | Tag used | DHCP | AD join | Configure disks | Notes |
-|----|--------------------------------------|----------|------|---------|-----------------|-------|
-| Windows Server **2019** | **Standard Evaluation** (`ServerStandardEval`) | `windowsserver2019` | OK | OK | OK | Eval path (no VL GVLK); fix in 2.6.3+ |
-| Windows Server **2022** | **Standard** volume-license (`ServerStandard`) | `windowsserver2022` | OK | OK | OK | Auto GVLK for OOBE |
-| Windows **11** | Desktop / VDI template | `windows11` | OK | OK | — | Disks N/A (Win11); bulk path separate |
+| OS | Channel / edition (as seen by guest) | Tag used | DHCP | Static IP | AD join | Configure disks | Notes |
+|----|--------------------------------------|----------|------|-----------|---------|-----------------|-------|
+| Windows Server **2019** | **Standard Evaluation** (`ServerStandardEval`) | `windowsserver2019` | OK | — | OK | OK | Eval path (no VL GVLK); fix in 2.6.3+ |
+| Windows Server **2022** | **Standard** volume-license (`ServerStandard`) | `windowsserver2022` | OK | — | OK | OK | Auto GVLK for OOBE |
+| Windows Server **2025** | **Datacenter Evaluation** | `windowsserver2025` | — | OK | — | — | Eval path; static IP smoke 2026-08 |
+| Windows **11** | Desktop / VDI template | `windows11` | OK | — | OK | — | Disks N/A (Win11); bulk path separate |
 
 Lab smoke helpers: `scripts/lab_full_feature_smoke.py` (see [AD_VALIDATION.md](AD_VALIDATION.md)).
 
@@ -45,7 +46,8 @@ coverage). **Please report** success or failure.
 | Server **2019** | Datacenter (VL or Eval) | Code (GVLK DC / Eval skip) | High |
 | Server **2022** | Datacenter (VL or Eval) | Code | High |
 | Server **2022** | Standard **Evaluation** | Code (Eval skip) | Medium |
-| Server **2025** | Standard / Datacenter (VL or Eval) | Code (tags + GVLK) | **Highest** — “coming soon” on README |
+| Server **2025** | Standard / Datacenter **VL** | Code (tags + GVLK) | High — VL SKUs; AD + disks not smoked |
+| Server **2025** | Datacenter Eval + AD and/or disks | Partial lab (static only) | High — extend the Eval row |
 | Server **2016** | Standard / Datacenter (VL or Eval) | Code (GVLK 2016) | Medium |
 | Windows **11** | Other builds / editions than the lab template | Code (Win11 family) | Medium — note build |
 | Windows **10** | Desktop | Not a separate family | Low — may work as `win10` ostype; report if used |
@@ -82,17 +84,18 @@ Maintainers will update this matrix when reports are confirmed.
 
 ## Feature coverage (lab)
 
-| Feature | 2019 Eval | 2022 Standard VL | Win11 |
-|---------|-----------|------------------|-------|
-| Clone + Sysprep + verify | OK | OK | OK |
-| DHCP | OK | OK | OK |
-| AD join (`lab.test`) | OK | OK | OK |
-| Disks (OS + pagefile + data) | OK | OK | N/A |
-| Bulk Win11 batch | — | — | Lab-exercised separately |
-| Static IP / IPv6 / multi-NIC | Not in full-feature smoke | Not in full-feature smoke | Not in full-feature smoke |
+| Feature | 2019 Eval | 2022 Standard VL | 2025 Datacenter Eval | Win11 |
+|---------|-----------|------------------|----------------------|-------|
+| Clone + Sysprep + verify | OK | OK | OK | OK |
+| DHCP | OK | OK | — | OK |
+| Static IP | — | — | OK | — |
+| AD join (`lab.test`) | OK | OK | — | OK |
+| Disks (OS + pagefile + data) | OK | OK | — | N/A |
+| Bulk Win11 batch | — | — | — | Lab-exercised separately |
+| IPv6 / multi-NIC | Not smoked | Not smoked | Not smoked | Not smoked |
 
-Static IP, IPv6, and multi-NIC are implemented and unit-covered where applicable;
-live community reports welcome.
+Static IP is lab-OK on Server 2025 Datacenter Eval; IPv6 and multi-NIC remain
+unit-covered only. Community reports welcome for other OS × feature combinations.
 
 ## Related docs
 

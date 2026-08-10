@@ -243,17 +243,67 @@ def resolve_domain_join_from_request(data):
 def load_user(user_id):
     return User.query.get(int(user_id))
 
+DEFAULT_UI_PASSWORD = 'changeme'
+
+
+def _user_has_default_password(user=None):
+    """True when the operator UI password is still the shipped default."""
+    u = user if user is not None else User.query.get(1)
+    return bool(u and u.check_password(DEFAULT_UI_PASSWORD))
+
+
+@app.before_request
+def _gate_default_ui_password():
+    """Block authenticated UI/API session use until default password is changed.
+
+    Machine API tokens are unaffected (no Flask-Login session). Health/version
+    stay public. Does not require TLS/Caddy. Skipped under TESTING so unit
+    suites can keep the shipped default hash without changing every fixture.
+    """
+    if app.config.get('TESTING'):
+        return None
+    if not current_user.is_authenticated:
+        return None
+    endpoint = (request.endpoint or '')
+    if endpoint in {
+        'change_password',
+        'logout',
+        'static',
+        'api_health',
+        'api_version',
+        'login',
+    }:
+        return None
+    if not _user_has_default_password(current_user):
+        return None
+    if (
+        request.path.startswith('/api/')
+        or request.path.startswith('/start_')
+        or request.path.startswith('/task_status')
+    ):
+        return jsonify({
+            'error': 'Default UI password must be changed before provisioning.',
+            'code': 'default_password',
+        }), 403
+    flash('Change the default password before using GuestOS.', 'warning')
+    return redirect(url_for('change_password'))
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
+        if _user_has_default_password(current_user) and not app.config.get('TESTING'):
+            return redirect(url_for('change_password'))
         return redirect(url_for('index'))
     if request.method == 'POST':
-        user = User.query.get(1) # Assuming user with id 1 exists
+        user = User.query.get(1)  # Assuming user with id 1 exists
         if user and user.check_password(request.form['password']):
             login_user(user)
+            if _user_has_default_password(user) and not app.config.get('TESTING'):
+                flash('Change the default password before using GuestOS.', 'warning')
+                return redirect(url_for('change_password'))
             return redirect(url_for('index'))
-        else:
-            flash('Invalid password')
+        flash('Invalid password')
     return render_template('login.html')
 
 
@@ -280,6 +330,9 @@ def launch_from_pdm():
         flash('GuestOS has no operator user configured.')
         return redirect(url_for('login'))
     login_user(user)
+    if _user_has_default_password(user) and not app.config.get('TESTING'):
+        flash('Change the default password before using GuestOS.', 'warning')
+        return redirect(url_for('change_password'))
 
     template_vmid = (request.args.get('template_vmid') or '').strip()
     remote_id = (request.args.get('remote_id') or '').strip()
@@ -306,6 +359,8 @@ def change_password():
             flash('Current password is incorrect.')
         elif len(new_password) < 8:
             flash('New password must be at least 8 characters long.')
+        elif new_password == DEFAULT_UI_PASSWORD:
+            flash('Choose a password other than the shipped default.')
         elif new_password != confirm_password:
             flash('New passwords do not match.')
         else:
@@ -356,7 +411,12 @@ def task_status(task_id):
 
 @app.route('/api/health')
 def api_health():
-    """Liveness plus shallow dependency checks for Compose/load balancers."""
+    """Liveness plus shallow dependency checks for Compose/load balancers.
+
+    Also reports Celery worker/queue visibility (clone_queue / verify_queue).
+    Missing workers degrade status so Compose/operators can spot stuck-at-95%
+    verify handoffs early. Does not require Caddy/TLS.
+    """
     checks = {'app': 'ok'}
     status = 'ok'
     # SQLite / DB
@@ -371,6 +431,8 @@ def api_health():
     broker = (app.config.get('CELERY_BROKER_URL') or '').strip()
     if app.config.get('TESTING'):
         checks['redis'] = 'skipped'
+        checks['clone_worker'] = 'skipped'
+        checks['verify_worker'] = 'skipped'
     elif broker.startswith('redis'):
         try:
             import redis  # type: ignore
@@ -383,8 +445,27 @@ def api_health():
             logging.warning('health redis check failed: %s', public_error_text(e, fallback='unavailable'))
             checks['redis'] = 'error'
             status = 'degraded'
+        clone_ok, verify_ok, worker_detail = _celery_queue_worker_checks()
+        checks['clone_worker'] = 'ok' if clone_ok else 'error'
+        checks['verify_worker'] = 'ok' if verify_ok else 'error'
+        if worker_detail:
+            checks['celery_detail'] = worker_detail
+        if not clone_ok or not verify_ok:
+            status = 'degraded'
     else:
         checks['redis'] = 'skipped'
+        checks['clone_worker'] = 'skipped'
+        checks['verify_worker'] = 'skipped'
+
+    # Default UI password still in use (ops risk; does not alone degrade readiness).
+    try:
+        user = User.query.get(1)
+        checks['default_password'] = (
+            'true' if (user and user.check_password('changeme')) else 'false'
+        )
+    except Exception:  # noqa: BLE001
+        checks['default_password'] = 'unknown'
+
     code = 200 if status == 'ok' else 503
     return jsonify({
         'status': status,
@@ -392,6 +473,37 @@ def api_health():
         'build_time': app.config.get('APP_BUILD_TIME') or None,
         'checks': checks,
     }), code
+
+
+def _celery_queue_worker_checks():
+    """Return (clone_ok, verify_ok, detail) via Celery inspect active_queues."""
+    try:
+        from app import celery as celery_app
+        insp = celery_app.control.inspect(timeout=1.0)
+        if insp is None:
+            return False, False, 'inspect unavailable'
+        active_queues = insp.active_queues() or {}
+        if not active_queues:
+            ping = insp.ping() or {}
+            if not ping:
+                return False, False, 'no workers responded'
+            return False, False, 'workers up but no active_queues'
+        clone_ok = False
+        verify_ok = False
+        for _worker, queues in active_queues.items():
+            names = {q.get('name') for q in (queues or []) if isinstance(q, dict)}
+            if 'clone_queue' in names:
+                clone_ok = True
+            if 'verify_queue' in names:
+                verify_ok = True
+        detail = f'workers={len(active_queues)} clone={clone_ok} verify={verify_ok}'
+        return clone_ok, verify_ok, detail
+    except Exception as e:  # noqa: BLE001
+        logging.warning(
+            'health celery worker check failed: %s',
+            public_error_text(e, fallback='unavailable'),
+        )
+        return False, False, type(e).__name__
 
 
 @app.route('/api/version')

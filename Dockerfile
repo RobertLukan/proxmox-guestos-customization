@@ -7,11 +7,18 @@ WORKDIR /app
 
 # Install Python dependencies first for better layer caching.
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade 'pip>=26.1.2' 'setuptools>=83.0.0' \
+RUN pip install --no-cache-dir --upgrade 'pip>=26.1.2' \
+    && pip uninstall -y setuptools pkg_resources 2>/dev/null || true \
     && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir --force-reinstall 'setuptools>=83.0.0' 'msgpack>=1.2.1' \
+    && pip install --no-cache-dir --force-reinstall --no-cache-dir \
+         'setuptools==83.0.0' 'msgpack==1.2.1' \
+    && find /usr/local/lib -type d -name 'setuptools-7*' -prune -exec rm -rf {} + 2>/dev/null || true \
+    && find /usr/local/lib -type d -name 'msgpack-1.1*' -prune -exec rm -rf {} + 2>/dev/null || true \
     && rm -f /usr/local/lib/python*/ensurepip/_bundled/setuptools-*.whl \
-    && python -c "import setuptools, msgpack; assert setuptools.__version__ >= '83.0.0'; assert msgpack.version >= (1, 2, 1)" \
+    && python -c "import setuptools, msgpack, importlib.metadata as m; \
+assert m.version('setuptools') >= '83.0.0', m.version('setuptools'); \
+assert m.version('msgpack') >= '1.2.1', m.version('msgpack'); \
+print('setuptools', m.version('setuptools'), 'msgpack', m.version('msgpack'))" \
     && pip check
 
 # Copy the application code.

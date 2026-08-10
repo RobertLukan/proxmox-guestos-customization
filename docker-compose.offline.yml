@@ -1,0 +1,31 @@
+# Offline / air-gap overlay: never pull from registries on recreate.
+#
+# Use after images are already present locally (docker load / prior pull):
+#
+#   # Online host: save
+#   docker pull --platform linux/amd64 \
+#     ghcr.io/robertlukan/proxmox-guestos-customization:${GUESTOS_VERSION}
+#   docker save -o guestos-${GUESTOS_VERSION}.tar \
+#     ghcr.io/robertlukan/proxmox-guestos-customization:${GUESTOS_VERSION}
+#
+#   # Air-gap host: load + up (no registry, no Caddy required)
+#   docker load -i guestos-${GUESTOS_VERSION}.tar
+#   export GUESTOS_VERSION=2.6.14
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml \
+#     -f docker-compose.offline.yml up -d --no-build
+#
+# Caddy remains optional — omit/disable the caddy service if you serve :5001
+# on a trusted network (BEHIND_REVERSE_PROXY=False). This overlay does not
+# enforce TLS.
+#
+# Set REDIS_PASSWORD in .env for any non-lab deploy (Compose rewrites Celery URLs).
+
+services:
+  web:
+    pull_policy: never
+
+  worker:
+    pull_policy: never
+
+  verify-worker:
+    pull_policy: never

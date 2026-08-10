@@ -147,8 +147,21 @@ While a customize runs, GuestOS replaces a single `lifecycle-*` tag so operators
 | Write unattend / setup | `lifecycle-customizing` |
 | Sysprep | `lifecycle-sysprep` |
 | Verify | `lifecycle-verifying` |
-| Success | `lifecycle-ready` |
+| Success | `lifecycle-ready` (also clears `failed-customization` if present) |
 | Failure | `lifecycle-failed` (+ `failed-customization`) |
+
+Tag updates parse both Proxmox `;` and `,` delimiters so lifecycle replace
+works when the live config already uses semicolons.
+
+### Stuck around 95% (“queued for verification”)
+
+After Sysprep, the clone worker enqueues `verify_queue` and returns. If
+**verify-worker** is down or not consuming that queue, the UI can sit near 95%
+while the guest may already have `setup.done`. Check:
+
+1. `docker compose ps` — `verify-worker` healthy/running
+2. `GET /api/health` — `checks.clone_worker` and `checks.verify_worker` should be `ok`
+3. Worker logs for the verify task
 
 Non-lifecycle tags (e.g. `uuid:…`, family tags) are preserved.
 
@@ -158,8 +171,9 @@ Non-lifecycle tags (e.g. `uuid:…`, family tags) are preserved.
 
 ## Compose / Redis
 
-- `/api/health` reports `database` + `redis` (503 when degraded).
+- `/api/health` reports `database`, `redis`, `clone_worker`, `verify_worker`, and `default_password` (503 when degraded).
 - Set `REDIS_PASSWORD` in `.env`; Compose wires it into Celery URLs via `deploy/compose-redis-env.sh`.
+- Air-gap: `docker-compose.offline.yml` sets `pull_policy: never` so recreate does not hit the registry.
 - Durable launch JTIs use Redis when available, else SQLite `launch_jti`.
 
 ## Bulk saturation

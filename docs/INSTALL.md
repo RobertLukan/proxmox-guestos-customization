@@ -263,7 +263,7 @@ Compose **v2** required (see [Packages / tools](#packages--tools-guestos-host)).
 **Preferred — pull from GHCR** (image published on each `v*` release):
 
 ```bash
-export GUESTOS_VERSION=2.6.13   # pin; both 2.6.13 and v2.6.13 tags exist on GHCR
+export GUESTOS_VERSION=2.6.14   # pin; both 2.6.14 and v2.6.14 tags exist on GHCR
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 # Podman: podman compose -f docker-compose.yml -f docker-compose.ghcr.yml …
@@ -304,10 +304,13 @@ or bulk start. See [BULK_PROVISIONING.md](BULK_PROVISIONING.md) and
 
 ### 2.5 First login (standalone UI)
 
-1. Open `https://<GUESTOS_TLS_HOST>/`.
+1. Open `https://<GUESTOS_TLS_HOST>/` (or `http://127.0.0.1:5001` on a trusted host — Caddy/TLS is optional).
 2. Log in with the default password **`changeme`**.
-3. **Change Password** immediately.
+3. You are redirected to **Change Password** — replace the default before the UI allows provisioning (`GET /api/health` reports `checks.default_password`).
 4. Optionally run one **Clone + Sysprep** from a Windows template to validate.
+
+Set `REDIS_PASSWORD` in `.env` for non-lab deploys. Air-gap: add
+`docker-compose.offline.yml` (`pull_policy: never`) after `docker load`.
 
 Machine API (no browser):
 

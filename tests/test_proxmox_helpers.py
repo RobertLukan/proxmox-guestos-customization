@@ -46,6 +46,32 @@ def test_update_vm_tags_replaces_lifecycle_and_keeps_others(monkeypatch):
     assert 'uuid:abc' in tags  # non-lifecycle tags preserved
 
 
+def test_update_vm_tags_parses_semicolon_delimiter(monkeypatch):
+    store = {'tags': 'uuid:abc;lifecycle-cloning;failed-customization'}
+    monkeypatch.setattr(pm, 'get_proxmox_api', lambda: _FakeProxmoxTags(store))
+    ok, _msg = pm._update_vm_tags(1, 'node1', tags_to_add=['lifecycle-ready'])
+    assert ok is True
+    assert ';' in store['tags']
+    tags = set(pm._split_proxmox_tag_list(store['tags']))
+    assert 'lifecycle-ready' in tags
+    assert 'lifecycle-cloning' not in tags
+    assert 'uuid:abc' in tags
+    assert 'failed-customization' in tags  # only cleared via set_lifecycle_tag ready
+
+
+def test_set_lifecycle_ready_clears_failed_customization(monkeypatch):
+    store = {'tags': 'uuid:abc;lifecycle-failed;failed-customization'}
+    monkeypatch.setattr(pm, 'get_proxmox_api', lambda: _FakeProxmoxTags(store))
+    monkeypatch.setattr(pm, '_get_vm_node', lambda vmid: 'node1')
+    ok, _msg = pm.set_lifecycle_tag(1, 'lifecycle-ready')
+    assert ok is True
+    tags = set(pm._split_proxmox_tag_list(store['tags']))
+    assert 'lifecycle-ready' in tags
+    assert 'lifecycle-failed' not in tags
+    assert 'failed-customization' not in tags
+    assert 'uuid:abc' in tags
+
+
 def test_is_windows_ostype():
     assert pm.is_windows_ostype('win11') is True
     assert pm.is_windows_ostype('WIN10') is True

@@ -9,6 +9,10 @@ def test_api_health_and_version(client):
     assert health['status'] == 'ok'
     assert 'checks' in health
     assert health['checks'].get('database') == 'ok'
+    assert health['checks'].get('redis') == 'skipped'
+    assert health['checks'].get('clone_worker') == 'skipped'
+    assert health['checks'].get('verify_worker') == 'skipped'
+    assert health['checks'].get('default_password') in ('true', 'false')
     ver = client.get('/api/version').get_json()
     assert 'version' in ver
     assert ver['version'] == client.application.config['APP_VERSION']

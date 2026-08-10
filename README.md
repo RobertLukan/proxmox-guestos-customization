@@ -4,12 +4,13 @@
 [![Security](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/security.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/security.yml)
 [![CodeQL](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/codeql.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/codeql.yml)
 
-**Current release: [2.6.13](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
+**Current release: [2.6.14](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
 
 > **Not an official Proxmox product.** Lab-validated matrix (versions + editions):
-> [docs/VALIDATED_MATRIX.md](docs/VALIDATED_MATRIX.md). Server 2025 and several
-> editions still need **community test reports**. Support is community / GitHub
-> issues only — [open an issue](https://github.com/RobertLukan/proxmox-guestos-customization/issues).
+> [docs/VALIDATED_MATRIX.md](docs/VALIDATED_MATRIX.md) (includes Server **2025
+> Datacenter Eval** with static IP). Other 2025 SKUs / AD / disks still welcome
+> as community reports. Support is community / GitHub issues only —
+> [open an issue](https://github.com/RobertLukan/proxmox-guestos-customization/issues).
 
 GuestOS is **Sysprep-only** (template → clone → guest agent). In-place Sysprep of existing/production VMs is **disabled**.
 
@@ -36,7 +37,7 @@ GuestOS is **Sysprep-only** (template → clone → guest agent). In-place Syspr
 
 | Area | Notes |
 |------|--------|
-| Clone + Sysprep (hostname, static/DHCP, optional AD join) | **Stable** for lab-tested rows in [VALIDATED_MATRIX.md](docs/VALIDATED_MATRIX.md); Server 2025 / other editions: code-ready, community reports welcome |
+| Clone + Sysprep (hostname, static/DHCP, optional AD join) | **Stable** for lab-tested rows in [VALIDATED_MATRIX.md](docs/VALIDATED_MATRIX.md) (2019 Eval, 2022 Std VL, 2025 Datacenter Eval static, Win11); other editions welcome as reports |
 | Bulk Win11 batch (CSV / API) | **Stable for lab** — max 10/batch, 20/day; Win11 only |
 | Configure disks (OS / data / pagefile) | **Windows Server family** — lab OK on 2019 Eval + 2022 Standard VL; see matrix for gaps |
 | Provisioning safeguards (cores/RAM/disk/storage) | **Stable** — no in-app override; use PVE for exceptions |
@@ -97,7 +98,7 @@ cp .env.example .env
 # Compose HTTPS: GUESTOS_TLS_HOST, BEHIND_REVERSE_PROXY=True; set PRIMARY_BRIDGE to your PVE bridge.
 chmod +x deploy/caddy/gen-selfsigned.sh
 ./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"   # lab self-signed; use real certs in prod
-export GUESTOS_VERSION=2.6.13   # pin a release; or omit for :latest
+export GUESTOS_VERSION=2.6.14   # pin a release; or omit for :latest
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
@@ -126,7 +127,8 @@ curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
 - **HTTP loopback debug:** `http://127.0.0.1:5001` on the GuestOS host only
 - **Podman note:** `podman-docker` alone is not enough if `docker compose` still invokes Python **`docker-compose` 1.29** (fails on Python 3.12 with `No module named 'distutils'`). Install `docker-compose-v2` or `podman-compose` and confirm `docker compose version` / `podman compose version` shows **v2**. Details: [docs/INSTALL.md](docs/INSTALL.md#packages--tools-guestos-host).
 
-Default UI password: `changeme` — change it immediately via **Change Password**.
+Default UI password: `changeme` — **required** to change via **Change Password**
+before the UI will allow provisioning (API tokens still work for machine clients).
 
 ### Quick local / venv setup
 
@@ -145,17 +147,19 @@ utility VM). **Compose v1 (`docker-compose` 1.x) is not supported.**
 
 **Air-gapped hosts** (no registry access): on a connected machine pull **amd64**
 images and save them, copy the archive across, then load and start with the
-normal GHCR overlay (`--no-build`). You still need the repo (or release tarball)
-for `docker-compose*.yml`, `.env`, and Caddy certs — not a separate compose file.
-Always pin `--platform linux/amd64` when pulling so a non-amd64 build host does
-not save the wrong architecture.
+GHCR + **offline** overlays (`pull_policy: never`, `--no-build`). You still need
+the repo (or release tarball) for `docker-compose*.yml` and `.env`. Caddy/TLS is
+optional — omit redis/caddy from the save list and disable the `caddy` service if
+you expose trusted-network `:5001` only. Always pin `--platform linux/amd64`
+when pulling.
 
 ```bash
 # Connected machine (force amd64 even on Apple Silicon / ARM builders)
 PLATFORM=linux/amd64
-VER=2.6.7
+VER=2.6.14
 docker pull --platform "$PLATFORM" "ghcr.io/robertlukan/proxmox-guestos-customization:${VER}"
 docker pull --platform "$PLATFORM" redis:7-alpine
+# optional if using Compose Caddy:
 docker pull --platform "$PLATFORM" caddy:2.8-alpine
 docker save \
   "ghcr.io/robertlukan/proxmox-guestos-customization:${VER}" \
@@ -167,7 +171,9 @@ docker save \
 gunzip -c "guestos-${VER}-amd64-images.tar.gz" | docker load
 export GUESTOS_VERSION="${VER}"
 export DOCKER_DEFAULT_PLATFORM=linux/amd64
-docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
+# Prefer REDIS_PASSWORD in .env for non-lab
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml \
+  -f docker-compose.offline.yml up -d --no-build
 ```
 
 ## Configuration

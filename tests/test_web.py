@@ -53,6 +53,34 @@ def test_login_flow_and_change_password(client):
     assert resp.status_code == 200  # re-rendered login page with a flash, not a redirect
 
 
+def test_change_password_rejects_default_password(client):
+    _login(client)
+    token = _csrf_token(client.get('/change_password').data)
+    resp = client.post('/change_password', data={
+        'current_password': 'changeme',
+        'new_password': 'changeme',
+        'confirm_password': 'changeme',
+        'csrf_token': token,
+    })
+    assert resp.status_code == 200
+    assert b'shipped default' in resp.data
+
+
+def test_default_password_gate_blocks_ui_when_not_testing(client, app):
+    """Outside TESTING, session users must change changeme before the home page."""
+    app.config['TESTING'] = False
+    try:
+        token = _csrf_token(client.get('/login').data)
+        resp = client.post('/login', data={'password': 'changeme', 'csrf_token': token})
+        assert resp.status_code == 302
+        assert '/change_password' in resp.headers['Location']
+        blocked = client.get('/')
+        assert blocked.status_code == 302
+        assert '/change_password' in blocked.headers['Location']
+    finally:
+        app.config['TESTING'] = True
+
+
 def test_change_password_rejects_wrong_current(client):
     token = _csrf_token(client.get('/login').data)
     client.post('/login', data={'password': 'changeme', 'csrf_token': token})

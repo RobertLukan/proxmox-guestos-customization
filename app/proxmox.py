@@ -82,10 +82,23 @@ def _looks_like_windows_server_name(name):
     return False
 
 
+def _split_proxmox_tag_list(tags):
+    """Split a Proxmox tags string on ``;`` or ``,`` (PVE uses both)."""
+    raw = str(tags or '')
+    return [p.strip() for p in raw.replace(';', ',').split(',') if p.strip()]
+
+
 def _parse_proxmox_tags(tags):
     """Return a lowercased set of Proxmox VM tags."""
-    raw = str(tags or '')
-    return {p.strip().lower() for p in raw.replace(';', ',').split(',') if p.strip()}
+    return {p.lower() for p in _split_proxmox_tag_list(tags)}
+
+
+def _proxmox_tag_delimiter(raw_tags):
+    """Prefer semicolon when the live config already uses it (PVE default)."""
+    raw = str(raw_tags or '')
+    if ';' in raw:
+        return ';'
+    return ','
 
 
 def _tags_indicate_server(tags):
@@ -397,14 +410,19 @@ def get_primary_mac_address(vmid, node=None, proxmox=None):
     return match.group(1) if match else None
 
 def _update_vm_tags(vmid, node, tags_to_add=None, tags_to_remove=None):
+    """Add/remove tags on a VM. ``tags_to_remove`` entries are prefix matches.
+
+    Parses both Proxmox ``;`` and ``,`` delimiters so lifecycle replace works on
+    configs that already use semicolon-separated tags.
+    """
     proxmox = get_proxmox_api()
     if not proxmox:
         return False, "Failed to connect to Proxmox."
     try:
         vm_config = proxmox.nodes(node).qemu(vmid).config.get()
         current_tags_str = vm_config.get('tags', '')
-        current_tags = set(current_tags_str.split(',')) if current_tags_str else set()
-        current_tags.discard('')
+        delimiter = _proxmox_tag_delimiter(current_tags_str)
+        current_tags = set(_split_proxmox_tag_list(current_tags_str))
         if tags_to_add:
             for current_tag in list(current_tags):
                 if current_tag.startswith('lifecycle-'):
@@ -416,7 +434,7 @@ def _update_vm_tags(vmid, node, tags_to_add=None, tags_to_remove=None):
                 for current_tag in list(current_tags):
                     if current_tag.startswith(tag_prefix):
                         current_tags.remove(current_tag)
-        new_tags_str = ','.join(sorted(list(filter(None, current_tags))))
+        new_tags_str = delimiter.join(sorted(list(filter(None, current_tags))))
         proxmox.nodes(node).qemu(vmid).config.set(tags=new_tags_str)
         return True, "VM tags updated successfully."
     except Exception as e:
@@ -424,14 +442,19 @@ def _update_vm_tags(vmid, node, tags_to_add=None, tags_to_remove=None):
 
 
 def set_lifecycle_tag(vmid, lifecycle_tag, extra_tags=None):
-    """Set a replacing ``lifecycle-*`` stage tag on the VM (best-effort)."""
+    """Set a replacing ``lifecycle-*`` stage tag on the VM (best-effort).
+
+    On ``lifecycle-ready``, also clear sticky ``failed-customization`` so a
+    later successful re-customize does not leave a permanent failure tag.
+    """
     node = _get_vm_node(vmid)
     if not node:
         return False, f"VM {vmid} not found."
     tags = [lifecycle_tag]
     if extra_tags:
         tags.extend(extra_tags)
-    return _update_vm_tags(vmid, node, tags_to_add=tags)
+    remove = ['failed-customization'] if lifecycle_tag == 'lifecycle-ready' else None
+    return _update_vm_tags(vmid, node, tags_to_add=tags, tags_to_remove=remove)
 
 
 def rename_vm(vmid, name):
