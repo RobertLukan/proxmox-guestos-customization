@@ -130,6 +130,19 @@ def _complete_sysprep_power_cycle(task_id, vmid, progress_base=88, agent_stable_
         )
 
     def _agent_progress(msg):
+        # Clarify this is the post-Sysprep/OOBE wait, not guest setup.ps1 work.
+        if msg.startswith('Waiting for guest agent stability'):
+            msg = msg.replace(
+                'Waiting for guest agent stability',
+                'Waiting for guest agent after Sysprep',
+                1,
+            )
+        elif msg.startswith('Guest agent unavailable'):
+            msg = msg.replace(
+                'Guest agent unavailable',
+                'Guest agent unavailable after Sysprep',
+                1,
+            )
         update_task_progress(task_id, min(progress_base + 7, 96), msg)
 
     wait_for_guest_agent(

@@ -120,10 +120,31 @@ function Keep-GuestOsAutoLogonForReboot {
         Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value '1' -ErrorAction SilentlyContinue
         Set-ItemProperty -Path $winlogon -Name AutoLogonCount -Value 1 -Type DWord -ErrorAction SilentlyContinue
     } catch {}
+    # FirstLogonCommands run only once after OOBE. An intentional pagefile/domain
+    # reboot must re-invoke setup via RunOnce so pending_reboot can finalize.
+    try {
+        $cmd = 'C:\Windows\System32\GuestOS-FirstLogon.cmd'
+        if (-not (Test-Path -LiteralPath $cmd)) {
+            @(
+                '@echo off',
+                'rem GuestOS: extract setup.ps1 from HKLM and run it (RunOnce after pending_reboot).',
+                'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference=''Stop''; $b=(Get-ItemProperty -Path ''HKLM:\SOFTWARE\GuestOS'' -Name SetupPs1B64 -ErrorAction Stop).SetupPs1B64; $out=$env:TEMP+''\GuestOS-setup.ps1''; [IO.File]::WriteAllBytes($out,[Convert]::FromBase64String($b)); & $out"'
+            ) | Set-Content -LiteralPath $cmd -Encoding ASCII
+        }
+        $runOnce = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'
+        if (-not (Test-Path -LiteralPath $runOnce)) {
+            New-Item -Path $runOnce -Force | Out-Null
+        }
+        Set-ItemProperty -Path $runOnce -Name 'GuestOSFinalizeSetup' `
+            -Value ("cmd.exe /c `"" + $cmd + "`"") -ErrorAction SilentlyContinue
+        Write-Output "setup.ps1: Registered RunOnce GuestOSFinalizeSetup for post-reboot finalize."
+    } catch {
+        Write-Output "setup.ps1: RunOnce registration warning: $($_.Exception.Message)"
+    }
 }
 function Scrub-GuestOsSetupArtifacts {
     # Remove durable setup.ps1 (may contain domain_join_b64). Keep SetupPs1B64
-    # until final done so FirstLogon can re-run after pending_reboot.
+    # until final done so RunOnce/FirstLogon can re-run after pending_reboot.
     try {
         Remove-ItemProperty -Path 'HKLM:\SOFTWARE\GuestOS' -Name SetupPs1B64 -ErrorAction SilentlyContinue
     } catch {}
@@ -141,6 +162,7 @@ if (Test-GuestOsPendingReboot) {
     Scrub-GuestOsSetupArtifacts
     Clear-GuestOsAutoLogon
     try { Stop-Transcript | Out-Null } catch {}
+    Invoke-GuestOsLogoff
     exit 0
 }
 if (Test-Path -LiteralPath $lockPath) {
@@ -627,7 +649,7 @@ for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
     }
 }
 
-# Do not scrub SetupPs1B64 before an intentional reboot — FirstLogon must
+# Do not scrub SetupPs1B64 before an intentional reboot — RunOnce must
 # re-extract setup.ps1 to mark done. Scrub only on final done paths.
 if ($joined) {
     Write-Output "setup.ps1: Restarting to finalize domain membership."

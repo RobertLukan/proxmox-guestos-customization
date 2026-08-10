@@ -38,7 +38,9 @@ Also written: `HKLM\SOFTWARE\GuestOS` `SetupStatus=done|failed|pending_reboot` (
 **Credential scrub:** After setup reaches **final** `done` (including the post-reboot finalize),
 `setup.ps1` removes `SetupPs1B64`, `C:\GuestOS\setup.ps1`, and Temp
 `GuestOS-setup.ps1` copies so domain-join credentials are not left on disk.
-While `pending_reboot` is set, `SetupPs1B64` is kept so FirstLogon can re-run once.
+While `pending_reboot` is set, `SetupPs1B64` is kept and `Keep-GuestOsAutoLogonForReboot`
+registers `HKLM\\...\\RunOnce\\GuestOSFinalizeSetup` (FirstLogonCommands do **not**
+re-run after an intentional reboot).
 Markers (`setup.done`) remain for verify.
 **Do not run `setup.ps1` from SetupComplete.cmd** — that path runs during specialize and
 specialize cleanup can delete `ProgramData\GuestOS` after the script finishes, which

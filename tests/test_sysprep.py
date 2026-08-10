@@ -262,6 +262,10 @@ def test_setup_ps1_resets_recycle_bin_on_data_volumes():
     assert 'Reset-GuestOsRecycleBin' in ps1
     assert 'pending_reboot' in ps1
     assert 'Keep-GuestOsAutoLogonForReboot' in ps1
+    assert 'GuestOSFinalizeSetup' in ps1
+    assert 'RunOnce' in ps1
+    assert 'pending_reboot observed -- marking setup done' in ps1
+    assert 'Invoke-GuestOsLogoff' in ps1
     assert 'Removing stale pagefile' in ps1
     assert 'function Reset-GuestOsRecycleBin' in ps1
     assert "Remove-Item -LiteralPath $path -Recurse -Force" in ps1
