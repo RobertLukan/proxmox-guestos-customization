@@ -10,3 +10,6 @@ Flask-Login==0.6.3
 Werkzeug==3.1.8
 python-dotenv==1.2.2
 gunicorn==26.0.0
+# Pin transitive deps flagged in image scans (Trivy).
+msgpack>=1.2.1
+setuptools>=83.0.0

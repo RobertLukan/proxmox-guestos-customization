@@ -37,7 +37,7 @@ from app.provision_limits import (
 )
 from app.bulk_validate import validate_bulk_items
 from app.validators import ValidationError
-from app.util import public_error_text
+from app.util import public_error_text, sanitize_log_fragment
 from flask_login import login_user, logout_user, login_required, current_user
 import uuid
 import logging
@@ -565,10 +565,14 @@ def api_template_disks(vmid):
                 )
             return jsonify(inventory_vm_disks(vmid))
     except Exception as e:
-        logging.warning('template disks inventory failed for %s: %s', vmid, e)
+        logging.warning(
+            'template disks inventory failed for %s: %s',
+            sanitize_log_fragment(vmid),
+            sanitize_log_fragment(e),
+        )
         return _json_field_error(
-            f'Could not inventory disks for template {vmid}.',
-            template_vmid=str(e),
+            f'Could not inventory disks for template {sanitize_log_fragment(vmid, max_len=32)}.',
+            template_vmid=public_error_text(e, fallback='Disk inventory failed.'),
         )
 
 
