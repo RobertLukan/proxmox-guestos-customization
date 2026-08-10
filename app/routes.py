@@ -37,7 +37,7 @@ from app.provision_limits import (
 )
 from app.bulk_validate import validate_bulk_items
 from app.validators import ValidationError
-from app.util import public_error_text, sanitize_log_fragment
+from app.util import public_error_text
 from flask_login import login_user, logout_user, login_required, current_user
 import uuid
 import logging
@@ -565,13 +565,15 @@ def api_template_disks(vmid):
                 )
             return jsonify(inventory_vm_disks(vmid))
     except Exception as e:
+        # Log only safe scalars — CodeQL treats path params / exception text as
+        # user-controlled for py/log-injection even after string scrubbing.
         logging.warning(
-            'template disks inventory failed for %s: %s',
-            sanitize_log_fragment(vmid),
-            sanitize_log_fragment(e),
+            'template disks inventory failed for vmid=%d (%s)',
+            int(vmid),
+            type(e).__name__,
         )
         return _json_field_error(
-            f'Could not inventory disks for template {sanitize_log_fragment(vmid, max_len=32)}.',
+            f'Could not inventory disks for template {int(vmid)}.',
             template_vmid=public_error_text(e, fallback='Disk inventory failed.'),
         )
 

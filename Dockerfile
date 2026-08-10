@@ -7,8 +7,11 @@ WORKDIR /app
 
 # Install Python dependencies first for better layer caching.
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade 'pip>=26.1.2' \
+RUN pip install --no-cache-dir --upgrade 'pip>=26.1.2' 'setuptools>=83.0.0' \
     && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir --force-reinstall 'setuptools>=83.0.0' 'msgpack>=1.2.1' \
+    && rm -f /usr/local/lib/python*/ensurepip/_bundled/setuptools-*.whl \
+    && python -c "import setuptools, msgpack; assert setuptools.__version__ >= '83.0.0'; assert msgpack.version >= (1, 2, 1)" \
     && pip check
 
 # Copy the application code.
