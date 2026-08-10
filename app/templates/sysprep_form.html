@@ -134,7 +134,7 @@
             <label for="bridge" class="form-label">Bridge</label>
             <select name="bridge" id="bridge" class="form-select" data-required="true">
                 {% for bridge in bridges %}
-                <option value="{{ bridge.iface }}">{{ bridge.iface }}</option>
+                <option value="{{ bridge.iface }}"{% if bridge.iface == primary_bridge %} selected{% endif %}>{{ bridge.iface }}</option>
                 {% endfor %}
             </select>
             <div class="form-text">
@@ -186,6 +186,22 @@
                    placeholder="Optional under DHCP; recommended when joining a domain">
             <div class="invalid-feedback"></div>
         </div>
+        <div class="form-check mb-2" id="use_domain_profile_network_group">
+            <input type="checkbox" class="form-check-input" id="use_domain_profile_network">
+            <label class="form-check-label" for="use_domain_profile_network">Use domain profile for DNS/VLAN</label>
+            <div class="form-text">Prepopulates DNS and VLAN only. Does not join the domain.</div>
+        </div>
+        <div class="mb-3" id="domain_profile_group" hidden>
+            <label for="domain_profile" class="form-label">Domain Profile</label>
+            <select class="form-select" id="domain_profile" name="domain_profile">
+                <option value="">Select a profile</option>
+                {% for profile, details in domain_profiles.items() %}
+                <option value="{{ profile }}">{{ profile }}</option>
+                {% endfor %}
+            </select>
+            <div class="form-text">Fills blank DNS and VLAN from the profile. You can edit those fields afterward.</div>
+            <div class="invalid-feedback"></div>
+        </div>
         <div class="form-check mb-3" id="enable_ipv6_group">
             <input type="checkbox" class="form-check-input" id="enable_ipv6" name="enable_ipv6" value="true">
             <label class="form-check-label" for="enable_ipv6">Enable IPv6</label>
@@ -230,20 +246,13 @@
             <div class="invalid-feedback"></div>
         </div>
         <div id="domain_fields" hidden>
-            <div class="mb-3" id="domain_profile_group">
-                <label for="domain_profile" class="form-label">Domain Profile</label>
-                <select class="form-select" id="domain_profile" name="domain_profile">
-                    <option value="">Select a profile</option>
-                    {% for profile, details in domain_profiles.items() %}
-                    <option value="{{ profile }}">{{ profile }}</option>
-                    {% endfor %}
-                </select>
-                <div class="form-text">Fills DNS and VLAN from the profile when available. Required when using profile credentials. Credentials stay on the server.</div>
-                <div class="invalid-feedback"></div>
-            </div>
+            <p class="form-text" id="domain_profile_cred_hint">
+                Select a domain profile under Network to use profile credentials, or uncheck below and type them.
+            </p>
             <div class="form-check mb-3">
                 <input type="checkbox" class="form-check-input" id="use_domain_profile_credentials" checked>
                 <label class="form-check-label" for="use_domain_profile_credentials">Use Domain Profile Credentials</label>
+                <div class="form-text">Uses the same profile chosen under Network for DNS/VLAN. Credentials stay on the server.</div>
             </div>
             <div id="domain_credentials_fields" hidden>
                 <div class="mb-3">
@@ -347,9 +356,6 @@
     var form = document.getElementById('sysprep-form');
     var alertBox = document.getElementById('form-alert');
     var domainProfiles = {{ domain_profiles | tojson }};
-    var profileSelect = form.querySelector('#domain_profile');
-    var dnsEl = form.querySelector('#dns_servers');
-    var vlanEl = form.querySelector('#vlan');
     var provisionMode = form.querySelector('#provision_mode');
     var provisionModeGroup = form.querySelector('#provision_mode_group');
     var provisionModeHelp = form.querySelector('#provision_mode_help');
@@ -728,14 +734,12 @@
     }
 
     GuestOSForms.wireNetworkMode(form);
+    GuestOSForms.wireDomainProfileNetwork(form, domainProfiles);
     GuestOSForms.wireDomainJoin(form);
     GuestOSForms.wireManageDisks(form);
     GuestOSForms.wireIpv6(form);
     GuestOSForms.wireApplySpec(form);
     extraNicsApi = GuestOSForms.wireExtraNics(form);
-    profileSelect.addEventListener('change', function () {
-        GuestOSForms.applyDomainProfile(profileSelect, domainProfiles, dnsEl, vlanEl);
-    });
     if (provisionMode) {
         provisionMode.addEventListener('change', applyProvisionMode);
     }

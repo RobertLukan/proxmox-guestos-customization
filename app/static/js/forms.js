@@ -26,16 +26,64 @@
 
   function applyDomainProfile(selectEl, profiles, dnsEl, vlanEl) {
     var name = selectEl && selectEl.value;
-    if (name && profiles && profiles[name]) {
-      var p = profiles[name];
-      if (dnsEl && p.dns_servers !== undefined) dnsEl.value = p.dns_servers || '';
-      if (vlanEl && p.vlan !== undefined && p.vlan !== null && p.vlan !== '') {
-        vlanEl.value = p.vlan;
-      }
-    } else {
-      if (dnsEl) dnsEl.value = '';
-      if (vlanEl) vlanEl.value = '';
+    if (!(name && profiles && profiles[name])) {
+      return;
     }
+    var p = profiles[name];
+    // Fill blank fields only (matches server apply_domain_profile_network).
+    if (dnsEl && !(dnsEl.value || '').trim() && p.dns_servers) {
+      dnsEl.value = p.dns_servers;
+    }
+    if (
+      vlanEl &&
+      !(vlanEl.value || '').trim() &&
+      p.vlan !== undefined &&
+      p.vlan !== null &&
+      p.vlan !== ''
+    ) {
+      vlanEl.value = p.vlan;
+    }
+  }
+
+  function wireDomainProfileNetwork(form, profiles) {
+    var useNetCb = form.querySelector('#use_domain_profile_network');
+    var profileGroup = form.querySelector('#domain_profile_group');
+    var profileSelect = form.querySelector('#domain_profile');
+    var dnsEl = form.querySelector('#dns_servers');
+    var vlanEl = form.querySelector('#vlan');
+    var credHint = form.querySelector('#domain_profile_cred_hint');
+
+    function updateCredHint() {
+      if (!credHint) return;
+      var name = (profileSelect && profileSelect.value) || '';
+      if (name) {
+        credHint.textContent =
+          'Credentials will come from network profile “' + name + '” (server-side).';
+      } else {
+        credHint.textContent =
+          'Select a domain profile under Network to use profile credentials, or uncheck below and type them.';
+      }
+    }
+
+    function applyToggle() {
+      var on = !!(useNetCb && useNetCb.checked);
+      setSectionVisible(profileGroup, on);
+      if (!on && profileSelect) {
+        profileSelect.value = '';
+        profileSelect.removeAttribute('data-required');
+      }
+      updateCredHint();
+    }
+
+    if (useNetCb) useNetCb.addEventListener('change', applyToggle);
+    if (profileSelect) {
+      profileSelect.addEventListener('change', function () {
+        applyDomainProfile(profileSelect, profiles || {}, dnsEl, vlanEl);
+        updateCredHint();
+      });
+    }
+    applyToggle();
+    return { applyToggle: applyToggle, updateCredHint: updateCredHint };
   }
 
   function setSectionVisible(el, visible) {
@@ -76,6 +124,7 @@
     var useProfileCb = form.querySelector('#use_domain_profile_credentials');
     var credFields = form.querySelector('#domain_credentials_fields');
     var profileSelect = form.querySelector('#domain_profile');
+    var useNetCb = form.querySelector('#use_domain_profile_network');
     var manualCreds = form.querySelectorAll('#domain_name, #domain_username, #domain_password');
 
     function applyCreds() {
@@ -84,8 +133,16 @@
       setSectionVisible(credFields, joining && !useProfile);
       setDataRequired(Array.prototype.slice.call(manualCreds), joining && !useProfile);
       if (profileSelect) {
-        if (joining && useProfile) profileSelect.setAttribute('data-required', 'true');
-        else profileSelect.removeAttribute('data-required');
+        if (joining && useProfile) {
+          profileSelect.setAttribute('data-required', 'true');
+          // Ensure Network profile UI is visible when join needs a profile.
+          if (useNetCb && !useNetCb.checked) {
+            useNetCb.checked = true;
+            useNetCb.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        } else {
+          profileSelect.removeAttribute('data-required');
+        }
       }
     }
 
@@ -247,6 +304,15 @@
     setVal('#ipv6_prefix', payload.ipv6_prefix);
     setVal('#ipv6_gateway', payload.ipv6_gateway);
     setVal('#domain_profile', payload.domain_profile);
+    var useNetCb = form.querySelector('#use_domain_profile_network');
+    if (useNetCb) {
+      useNetCb.checked = !!(payload.domain_profile || '').toString().trim();
+      useNetCb.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    var profileSelect = form.querySelector('#domain_profile');
+    if (profileSelect && (payload.domain_profile || '').toString().trim()) {
+      profileSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    }
     setVal('#domain_ou', payload.domain_ou);
     setVal('#domain_name', payload.domain_name);
     var joinCb = form.querySelector('#join_domain_checkbox');
@@ -1004,10 +1070,20 @@
       }
       add('DNS', (form.querySelector('#dns_servers') || {}).value);
       add('VLAN', (form.querySelector('#vlan') || {}).value);
-      add('Domain profile', (form.querySelector('#domain_profile') || {}).value);
+      var profileName = (form.querySelector('#domain_profile') || {}).value;
+      if (profileName) add('Network profile', profileName);
     }
     var join = form.querySelector('#join_domain_checkbox');
     if (join) add('Join domain', join.checked ? 'Yes' : 'No');
+    if (join && join.checked) {
+      var useProf = form.querySelector('#use_domain_profile_credentials');
+      if (useProf) {
+        add(
+          'Domain credentials',
+          useProf.checked ? 'From network profile' : 'Manual'
+        );
+      }
+    }
     if (join && !join.checked) {
       add('Workgroup', (form.querySelector('#workgroup') || {}).value);
     }
@@ -1074,6 +1150,7 @@
     showFormAlert: showFormAlert,
     clearFormAlert: clearFormAlert,
     applyDomainProfile: applyDomainProfile,
+    wireDomainProfileNetwork: wireDomainProfileNetwork,
     wireNetworkMode: wireNetworkMode,
     wireDomainJoin: wireDomainJoin,
     wireManageDisks: wireManageDisks,

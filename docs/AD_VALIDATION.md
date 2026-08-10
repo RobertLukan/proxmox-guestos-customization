@@ -2,6 +2,10 @@
 
 GuestOS can join clones to AD from `setup.ps1` using credentials from `DOMAIN_PROFILES_JSON` (or form fields when profile credentials are disabled).
 
+A domain profile under **Network** is only a DNS/VLAN shortcut (blank fields filled
+from the profile). **Join domain** is a separate step and reuses that same profile
+for credentials when “Use Domain Profile Credentials” is checked.
+
 For the full **OS / edition** lab matrix (not only AD), see
 [VALIDATED_MATRIX.md](VALIDATED_MATRIX.md).
 
@@ -53,8 +57,11 @@ Override only with `--skip-ram-check` / `LAB_SMOKE_SKIP_RAM_CHECK=1`.
 1. Replace placeholder entries in `DOMAIN_PROFILES_JSON` with your AD domain, join account, DNS IPs, optional VLAN/OU.
 2. `python3 scripts/ad_join_validate.py --check-dns --require-real-ad` → must exit 0.
 3. From GuestOS (or PDM Customize), run Clone+Sysprep on a **disposable** template clone:
-   - Select the profile, enable Join domain, Use profile credentials.
-   - Prefer static IP/DNS that can reach the DC (or DHCP + profile DNS override).
+   - Under **Network**, enable **Use domain profile for DNS/VLAN** and pick the profile
+     (fills blank DNS/VLAN only — does **not** join AD by itself).
+   - On the Domain step, enable **Join domain** and **Use Domain Profile Credentials**
+     (reuses the same Network profile for join account/password).
+   - Prefer static IP/DNS that can reach the DC (or DHCP + profile DNS).
 4. After SUCCESS, confirm in the guest: domain membership + reboot completed.
 5. Keep this table updated when re-validating Server / Win11.
 

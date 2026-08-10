@@ -173,9 +173,9 @@ def _admit_resource_and_quota(payload, template_vmid, extra_items=1):
 def apply_domain_profile_network(data):
     """Apply DNS / VLAN from the selected domain profile (independent of join).
 
-    Selecting a profile is a network shortcut: it fills ``dns_servers`` and
-    ``vlan`` when those fields were left blank. Credentials are never applied
-    here — see ``resolve_domain_join_from_request``.
+    Selecting a profile is a network shortcut only: it fills ``dns_servers`` and
+    ``vlan`` when those fields were left blank. It does **not** imply domain
+    join. Credentials are never applied here — see ``resolve_domain_join_from_request``.
 
     Returns ``(True, None)`` on success, or ``(False, (response, status))`` when
     a non-empty profile name does not match a configured profile.
@@ -199,10 +199,12 @@ def apply_domain_profile_network(data):
 def resolve_domain_join_from_request(data):
     """Resolve domain-join fields on ``data`` server-side.
 
-    Always applies network defaults from the selected profile (DNS/VLAN) first.
+    Always applies network defaults from the selected profile (DNS/VLAN) first
+    when blanks; that step alone does not join the domain.
     When ``join_domain`` is set and ``use_domain_profile_credentials`` is true
     (the default), credentials and domain name are taken from ``DOMAIN_PROFILES``
-    — never from the request body.
+    — never from the request body. The UI picks the same profile under Network
+    for DNS/VLAN and reuses it for join credentials.
 
     Returns ``(True, None)`` on success, or ``(False, (response, status))`` when
     the named profile is missing.
@@ -224,7 +226,9 @@ def resolve_domain_join_from_request(data):
         profile = app.config.get('DOMAIN_PROFILES', {}).get(profile_name)
         if not profile:
             if not profile_name:
-                msg = 'Select a domain profile when using profile credentials.'
+                msg = (
+                    'Select a domain profile under Network when using profile credentials.'
+                )
             else:
                 msg = f'Unknown domain profile: {profile_name!r}'
             return False, _json_field_error(msg, domain_profile=msg)
@@ -592,6 +596,7 @@ def sysprep_form():
         'sysprep_form.html',
         template_vmid=template_vmid,
         bridges=bridges,
+        primary_bridge=app.config.get('PRIMARY_BRIDGE') or 'vmbr0',
         domain_profiles=sanitized_domain_profiles(),
         remote_id=remote_id,
         timezones=WINDOWS_TIMEZONES,

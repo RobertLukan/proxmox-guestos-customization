@@ -42,6 +42,22 @@ def test_profile_fills_dns_and_vlan_without_join(app):
     assert 'domain_password' not in data
 
 
+def test_profile_does_not_overwrite_existing_dns_vlan(app):
+    """Non-blank DNS/VLAN from the request win over profile defaults."""
+    flask_app.config['DOMAIN_PROFILES'] = PROFILES
+    data = {
+        'join_domain': False,
+        'domain_profile': 'Lab',
+        'dns_servers': '8.8.8.8',
+        'vlan': 42,
+    }
+    ok, err = resolve_domain_join_from_request(data)
+    assert ok and err is None
+    assert data['dns_servers'] == '8.8.8.8'
+    assert data['vlan'] == 42
+    assert data['join_domain'] is False
+
+
 def test_resolve_domain_join_from_profile(app):
     flask_app.config['DOMAIN_PROFILES'] = PROFILES
     data = {
@@ -97,6 +113,7 @@ def test_resolve_domain_join_requires_profile_when_using_profile_creds(app):
     assert status == 400
     body = response.get_json()
     assert 'domain_profile' in body.get('errors', {})
+    assert 'Network' in body['errors']['domain_profile']
 
 
 def test_resolve_domain_join_manual_credentials(app):

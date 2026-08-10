@@ -90,6 +90,18 @@
     <label class="form-label" for="dns_servers">DNS servers</label>
     <input class="form-control" id="dns_servers" name="dns_servers" value="{{ p.get('dns_servers') or '' }}">
   </div>
+  <div class="mb-3">
+    <label class="form-label" for="domain_profile">Domain profile (DNS/VLAN shortcut)</label>
+    <select class="form-select" id="domain_profile" name="domain_profile">
+      <option value="">—</option>
+      {% for name in domain_profiles.keys() %}
+      <option value="{{ name }}" {% if p.get('domain_profile') == name %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+    <div class="form-text">
+      Optional. Fills blank DNS and VLAN from the profile at deploy. Does not join the domain by itself.
+    </div>
+  </div>
   <div class="form-check mb-2">
     <input class="form-check-input" type="checkbox" id="enable_ipv6" name="enable_ipv6"
            {% if p.get('enable_ipv6') %}checked{% endif %}>
@@ -114,16 +126,7 @@
   <div class="form-check mb-2">
     <input class="form-check-input" type="checkbox" id="join_domain" name="join_domain"
            {% if p.get('join_domain') %}checked{% endif %}>
-    <label class="form-check-label" for="join_domain">Join domain (credentials from domain profile at deploy)</label>
-  </div>
-  <div class="mb-3">
-    <label class="form-label" for="domain_profile">Domain profile</label>
-    <select class="form-select" id="domain_profile" name="domain_profile">
-      <option value="">—</option>
-      {% for name in domain_profiles.keys() %}
-      <option value="{{ name }}" {% if p.get('domain_profile') == name %}selected{% endif %}>{{ name }}</option>
-      {% endfor %}
-    </select>
+    <label class="form-check-label" for="join_domain">Join domain (credentials from the profile above at deploy)</label>
   </div>
   <div class="mb-3">
     <label class="form-label" for="domain_ou">Domain OU</label>

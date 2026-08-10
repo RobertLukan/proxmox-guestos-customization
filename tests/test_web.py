@@ -163,11 +163,32 @@ def test_sysprep_form_wizard_includes_csrf_and_payload_fields(client, monkeypatc
     assert b'name="network_mode"' in html
     assert b'name="ip_address"' in html
     assert b'name="domain_profile"' in html
+    assert b'id="use_domain_profile_network"' in html
     assert b'id="join_domain_checkbox"' in html
     assert b'id="use_domain_profile_credentials"' in html
+    assert b'Prepopulates DNS and VLAN only' in html
     assert b'js/validate.js' in html
     assert b'js/wizard.js' in html
     assert b'wizard-panel' in html
+
+
+def test_sysprep_form_preselects_primary_bridge(client, app, monkeypatch):
+    app.config['PRIMARY_BRIDGE'] = 'vmbr4'
+    monkeypatch.setattr(
+        'app.routes.get_network_bridges',
+        lambda: [{'iface': 'vmbr0'}, {'iface': 'vmbr4'}, {'iface': 'vmbr8'}],
+    )
+    monkeypatch.setattr('app.routes.require_sysprep_template', lambda vmid, **kw: 'win11')
+    _login(client)
+    token = _csrf_token(client.get('/').data)
+    resp = client.post('/sysprep_form', data={
+        'template_vmid': '100',
+        'csrf_token': token,
+    })
+    assert resp.status_code == 200
+    html = resp.data.decode('utf-8')
+    assert 'value="vmbr4" selected' in html
+    assert 'value="vmbr0" selected' not in html
 
 
 def test_sysprep_existing_form_redirects_non_template(client, monkeypatch):

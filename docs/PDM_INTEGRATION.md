@@ -154,6 +154,10 @@ curl -fk -X POST "$GUESTOS_URL/start_sysprep_workflow" \
   }'
 ```
 
+`domain_profile` (optional) fills blank DNS/VLAN from `DOMAIN_PROFILES_JSON` and does
+**not** join AD by itself. Set `join_domain: true` (and usually
+`use_domain_profile_credentials: true`) to join using that same profile.
+
 ## Automated smoke tests
 
 ### CI (mocked workflow — always safe)
