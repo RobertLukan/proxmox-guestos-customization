@@ -30,6 +30,15 @@ function Test-GuestOsAlreadyDone {
     } catch {}
     return $false
 }
+function Test-GuestOsPendingReboot {
+    if (Test-Path -LiteralPath 'C:\ProgramData\GuestOS\setup.pending_reboot') { return $true }
+    if (Test-Path -LiteralPath 'C:\Windows\GuestOS\setup.pending_reboot') { return $true }
+    try {
+        $st = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\GuestOS' -Name SetupStatus -ErrorAction Stop).SetupStatus
+        if ([string]$st -eq 'pending_reboot') { return $true }
+    } catch {}
+    return $false
+}
 if (Test-GuestOsAlreadyDone) {
     Write-Output "setup.ps1: setup already completed -- skipping."
     try { Stop-Transcript | Out-Null } catch {}
@@ -63,7 +72,10 @@ function Test-GuestOsSetupLockStale {
     return ($ageMin -ge 15)
 }
 function Write-GuestOsSetupMarker {
-    param([ValidateSet('done','failed')][string]$Status, [string]$Detail = 'ok')
+    param(
+        [ValidateSet('done','failed','pending_reboot')][string]$Status,
+        [string]$Detail = 'ok'
+    )
     New-Item -ItemType Directory -Force -Path 'C:\ProgramData\GuestOS' | Out-Null
     New-Item -ItemType Directory -Force -Path 'C:\Windows\GuestOS' | Out-Null
     $reg = 'HKLM:\SOFTWARE\GuestOS'
@@ -78,10 +90,58 @@ function Write-GuestOsSetupMarker {
         $Detail | Set-Content -Path 'C:\Windows\GuestOS\setup.done' -Encoding ASCII
         Remove-Item -LiteralPath 'C:\ProgramData\GuestOS\setup.failed' -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath 'C:\Windows\GuestOS\setup.failed' -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath 'C:\ProgramData\GuestOS\setup.pending_reboot' -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath 'C:\Windows\GuestOS\setup.pending_reboot' -Force -ErrorAction SilentlyContinue
+    } elseif ($Status -eq 'pending_reboot') {
+        $Detail | Set-Content -Path 'C:\ProgramData\GuestOS\setup.pending_reboot' -Encoding ASCII
+        $Detail | Set-Content -Path 'C:\Windows\GuestOS\setup.pending_reboot' -Encoding ASCII
+        Remove-Item -LiteralPath 'C:\ProgramData\GuestOS\setup.done' -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath 'C:\Windows\GuestOS\setup.done' -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath 'C:\ProgramData\GuestOS\setup.failed' -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath 'C:\Windows\GuestOS\setup.failed' -Force -ErrorAction SilentlyContinue
     } else {
         $Detail | Set-Content -Path 'C:\ProgramData\GuestOS\setup.failed' -Encoding ASCII
         $Detail | Set-Content -Path 'C:\Windows\GuestOS\setup.failed' -Encoding ASCII
+        Remove-Item -LiteralPath 'C:\ProgramData\GuestOS\setup.pending_reboot' -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath 'C:\Windows\GuestOS\setup.pending_reboot' -Force -ErrorAction SilentlyContinue
     }
+}
+function Clear-GuestOsAutoLogon {
+    try {
+        $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+        Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value '0' -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $winlogon -Name AutoLogonCount -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $winlogon -Name DefaultPassword -ErrorAction SilentlyContinue
+    } catch {}
+}
+function Keep-GuestOsAutoLogonForReboot {
+    try {
+        $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+        Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value '1' -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $winlogon -Name AutoLogonCount -Value 1 -Type DWord -ErrorAction SilentlyContinue
+    } catch {}
+}
+function Scrub-GuestOsSetupArtifacts {
+    # Remove durable setup.ps1 (may contain domain_join_b64). Keep SetupPs1B64
+    # until final done so FirstLogon can re-run after pending_reboot.
+    try {
+        Remove-ItemProperty -Path 'HKLM:\SOFTWARE\GuestOS' -Name SetupPs1B64 -ErrorAction SilentlyContinue
+    } catch {}
+    Remove-Item -LiteralPath 'C:\GuestOS\setup.ps1' -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath 'C:\Windows\Temp\GuestOS-setup.ps1' -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$env:TEMP\GuestOS-setup.ps1" -Force -ErrorAction SilentlyContinue
+    if ($PSCommandPath) {
+        Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+    }
+}
+# After an intentional pagefile/domain reboot, finalize done and exit (no re-run).
+if (Test-GuestOsPendingReboot) {
+    Write-Output "setup.ps1: pending_reboot observed -- marking setup done."
+    Write-GuestOsSetupMarker -Status done -Detail 'ok-after-reboot'
+    Scrub-GuestOsSetupArtifacts
+    Clear-GuestOsAutoLogon
+    try { Stop-Transcript | Out-Null } catch {}
+    exit 0
 }
 if (Test-Path -LiteralPath $lockPath) {
     if (-not (Test-GuestOsSetupLockStale -Path $lockPath)) {
@@ -317,7 +377,27 @@ if ($pagefileLetter) {
             }
         }
         $minMb = [Math]::Min(2048, $maxMb)
+        # Disable automatic pagefile management, then pin a single path.
         Set-ItemProperty -Path $mm -Name 'PagingFiles' -Value @("$path $minMb $maxMb") -Type MultiString -ErrorAction Stop
+        try {
+            Set-ItemProperty -Path $mm -Name 'AutomaticManagedPagefile' -Value 0 -ErrorAction SilentlyContinue
+        } catch {}
+        # Remove leftover pagefile.sys from other fixed volumes (old template paging disk).
+        Get-Volume -ErrorAction SilentlyContinue | Where-Object {
+            $_.DriveLetter -and ($_.DriveType -eq 'Fixed') -and
+            ($_.DriveLetter.ToString().ToUpper() -ne $pagefileLetter.ToUpper())
+        } | ForEach-Object {
+            $other = ($_.DriveLetter.ToString().ToUpper() + ':\pagefile.sys')
+            if (Test-Path -LiteralPath $other) {
+                Write-Output "setup.ps1: Removing stale pagefile at $other"
+                try {
+                    attrib -s -h $other 2>$null
+                    Remove-Item -LiteralPath $other -Force -ErrorAction Stop
+                } catch {
+                    Write-Output "setup.ps1: Could not remove $other : $($_.Exception.Message)"
+                }
+            }
+        }
         Write-Output "setup.ps1: Pagefile set to $path $minMb-$maxMb (takes effect after reboot)."
     } catch {
         throw "Pagefile configuration failed: $($_.Exception.Message)"
@@ -508,16 +588,8 @@ Get-LocalUser | Where-Object { $keepLocalUsers -notcontains $_.Name } | ForEach-
     }
 }
 
-# One-shot AutoLogon from unattend -- clear so later reboots stay at the logon screen
-# and FirstLogonCommands do not re-fire after success.
-try {
-    $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
-    Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value '0' -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $winlogon -Name AutoLogonCount -Value 0 -Type DWord -ErrorAction SilentlyContinue
-    Remove-ItemProperty -Path $winlogon -Name DefaultPassword -ErrorAction SilentlyContinue
-} catch {}
-
-# Scrub plaintext admin password from answer files left on disk.
+# Scrub plaintext admin password from answer files left on disk (Winlogon
+# DefaultPassword remains until Clear-GuestOsAutoLogon after final done).
 Remove-Item -LiteralPath 'C:\Windows\System32\Sysprep\unattended.xml' -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath 'C:\Windows\Panther\unattend.xml' -Force -ErrorAction SilentlyContinue
 
@@ -555,29 +627,25 @@ for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
     }
 }
 
-# Scrub the credential-bearing script from disk regardless of outcome.
-Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-# Also remove durable copies that carried domain_join_b64 (registry + C:\GuestOS).
-try {
-    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\GuestOS' -Name SetupPs1B64 -ErrorAction SilentlyContinue
-} catch {}
-Remove-Item -LiteralPath 'C:\GuestOS\setup.ps1' -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath 'C:\Windows\Temp\GuestOS-setup.ps1' -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath "$env:TEMP\GuestOS-setup.ps1" -Force -ErrorAction SilentlyContinue
-
-# Mark complete before reboot so FirstLogonCommands re-entry is a no-op.
-Write-GuestOsSetupMarker -Status done -Detail 'ok'
-
+# Do not scrub SetupPs1B64 before an intentional reboot — FirstLogon must
+# re-extract setup.ps1 to mark done. Scrub only on final done paths.
 if ($joined) {
     Write-Output "setup.ps1: Restarting to finalize domain membership."
+    Keep-GuestOsAutoLogonForReboot
+    Write-GuestOsSetupMarker -Status pending_reboot -Detail 'domain-join'
     try { Stop-Transcript | Out-Null } catch {}
     shutdown /r /t 5
 } elseif ($pagefileLetter) {
     Write-Output "setup.ps1: Restarting so pagefile on ${pagefileLetter}: becomes active."
+    Keep-GuestOsAutoLogonForReboot
+    Write-GuestOsSetupMarker -Status pending_reboot -Detail 'pagefile'
     try { Stop-Transcript | Out-Null } catch {}
     shutdown /r /t 5
 } else {
     Write-Output "setup.ps1: Domain join FAILED after retries; leaving machine in workgroup."
+    Write-GuestOsSetupMarker -Status done -Detail 'domain-join-failed'
+    Scrub-GuestOsSetupArtifacts
+    Clear-GuestOsAutoLogon
     try { Stop-Transcript | Out-Null } catch {}
     Invoke-GuestOsLogoff
 }
@@ -598,23 +666,16 @@ if ($workgroup) {
     }
 }
 
-# Mark complete before reboot so FirstLogonCommands re-entry is a no-op.
-Write-GuestOsSetupMarker -Status done -Detail 'ok'
-
-# Scrub durable setup.ps1 copies (may still contain network/identity blobs).
-try {
-    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\GuestOS' -Name SetupPs1B64 -ErrorAction SilentlyContinue
-} catch {}
-Remove-Item -LiteralPath 'C:\GuestOS\setup.ps1' -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath 'C:\Windows\Temp\GuestOS-setup.ps1' -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath "$env:TEMP\GuestOS-setup.ps1" -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-
 if ($pagefileLetter) {
     Write-Output "setup.ps1: Restarting so pagefile on ${pagefileLetter}: becomes active."
+    Keep-GuestOsAutoLogonForReboot
+    Write-GuestOsSetupMarker -Status pending_reboot -Detail 'pagefile'
     try { Stop-Transcript | Out-Null } catch {}
     shutdown /r /t 5
 } else {
+    Write-GuestOsSetupMarker -Status done -Detail 'ok'
+    Scrub-GuestOsSetupArtifacts
+    Clear-GuestOsAutoLogon
     try { Stop-Transcript | Out-Null } catch {}
     Invoke-GuestOsLogoff
 }

@@ -13,11 +13,13 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 | Fail writing unattend / setup before Sysprep | QGA `file-write` ACL / agent overload | Worker log: `agent file-write` / Permission denied — see [QGA file writes](#qga-file-writes) |
 | Stuck ~88–92% after Sysprep | Shutdown wait missed / hung generalize | Console; agent bounce; orphaned clone VMID in task |
 | `verification failed` / `setup.done missing` | FirstLogon `setup.ps1` never finished | Guest `C:\ProgramData\GuestOS\` markers + transcript; on **Eval** Server check InstallPid / GVLK regression below |
+| Stuck ~98% on `pending reboot` | Pagefile/domain reboot never finalized `setup.done` | AutoLogon still enabled? `setup.pending_reboot` present; FirstLogon re-ran? |
 | Stuck ~98% waiting for `setup.ps1` after Sysprep | OOBE never reached FirstLogon (often Eval+GVLK) | Console: product-key / InstallPid `0xC004F015` → see Evaluation vs GVLK |
 | `setup.ps1 failed` | Network, disk serial, pagefile, domain join | `setup.failed` contents; guest event log |
 | DHCP verify fail after `setup.done` | No lease on expected NIC | Bridge/VLAN; DHCP server; MAC match |
 | Domain verify fail | Join or reboot incomplete | Creds/OU/DNS; `PartOfDomain` via QGA |
-| Disk verify fail / `pagefile_pending_reboot` | Volume/pagefile not ready | Serials; drive letters; reboot once then re-check |
+| Disk verify fail / `pagefile_pending_reboot` | Volume/pagefile not ready (legacy) | Prefer builds that wait for `setup.done` after pagefile reboot; check serials/letters |
+| Wrong data/pagefile roles on multi-disk template | Plan used bus order without `source_key` | Use disk planner; bind `source_key`; match sizes |
 
 ## Marker files (guest)
 
@@ -28,15 +30,16 @@ in unattend hung Sysprep in lab). FirstLogon extracts it to
 
 - `setup.done` — FirstLogon setup finished; required for SUCCESS
 - `setup.failed` — setup threw; verify fails with detail
+- `setup.pending_reboot` — pagefile or domain join scheduled a reboot; verify keeps waiting until `setup.done` after the next AutoLogon
 - `setup.lock` / transcript — concurrent run / debugging
 
-Also written: `HKLM\SOFTWARE\GuestOS` `SetupStatus=done|failed` (survives ProgramData cleanup).
+Also written: `HKLM\SOFTWARE\GuestOS` `SetupStatus=done|failed|pending_reboot` (survives ProgramData cleanup).
 
-**Credential scrub (2.6.7+):** After setup completes (domain or workgroup path),
+**Credential scrub:** After setup reaches **final** `done` (including the post-reboot finalize),
 `setup.ps1` removes `SetupPs1B64`, `C:\GuestOS\setup.ps1`, and Temp
 `GuestOS-setup.ps1` copies so domain-join credentials are not left on disk.
+While `pending_reboot` is set, `SetupPs1B64` is kept so FirstLogon can re-run once.
 Markers (`setup.done`) remain for verify.
-
 **Do not run `setup.ps1` from SetupComplete.cmd** — that path runs during specialize and
 specialize cleanup can delete `ProgramData\GuestOS` after the script finishes, which
 drops `setup.done` while leaving IP/disks applied. FirstLogonCommands is the only runner.

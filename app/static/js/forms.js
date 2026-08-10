@@ -227,7 +227,14 @@
     setVal('#locale', payload.locale);
     setVal('#workgroup', payload.workgroup);
     setVal('#cores', payload.cores);
-    setVal('#ram', payload.ram);
+    if (payload.ram !== undefined && payload.ram !== null && payload.ram !== '') {
+      var ramMb = Number(payload.ram);
+      if (!isNaN(ramMb) && ramMb > 0) {
+        setVal('#ram_gb', Math.max(1, Math.round(ramMb / 1024)));
+      }
+    } else if (payload.ram_gb !== undefined) {
+      setVal('#ram_gb', payload.ram_gb);
+    }
     setVal('#bridge', payload.bridge);
     setVal('#vlan', payload.vlan);
     setVal('#network_mode', payload.network_mode);
@@ -268,22 +275,378 @@
   function wireManageDisks(form) {
     var manageCb = form.querySelector('#manage_disks_checkbox');
     var diskFields = form.querySelector('#disk_fields');
-    var pagefileCb = form.querySelector('#ensure_pagefile_disk');
-    var dataCb = form.querySelector('#ensure_data_disk');
-    var pagefileFields = form.querySelector('#pagefile_disk_fields');
-    var dataFields = form.querySelector('#data_disk_fields');
+    var statusEl = form.querySelector('#disk_planner_status');
+    var bodyEl = form.querySelector('#disk_planner_body');
+    var swapBtn = form.querySelector('#disk_planner_swap');
+    var addPfBtn = form.querySelector('#disk_planner_add_pagefile');
+    var addDataBtn = form.querySelector('#disk_planner_add_data');
+    var reloadBtn = form.querySelector('#disk_planner_reload');
+    var templateInput = form.querySelector('[name="template_vmid"]');
+    var remoteInput = form.querySelector('[name="remote_id"]');
 
-    function apply() {
+    var state = {
+      loaded: false,
+      loading: false,
+      inventory: [],
+      rows: [], // { kind:'boot'|'existing'|'new', key, currentGb, role, targetGb, letter, selected }
+    };
+    form._diskPlanner = state;
+
+    function setStatus(msg) {
+      if (statusEl) statusEl.textContent = msg || '';
+    }
+
+    function defaultLetter(role, used) {
+      var prefer = role === 'pagefile' ? 'P' : 'D';
+      if (used.indexOf(prefer) === -1) return prefer;
+      var alphabet = 'DEFGHIJKLMNOPQRSTUVWXYZ';
+      for (var i = 0; i < alphabet.length; i++) {
+        if (used.indexOf(alphabet[i]) === -1) return alphabet[i];
+      }
+      return prefer;
+    }
+
+    function suggestRoles(disks) {
+      var secondaries = disks.filter(function (d) { return !d.is_boot; })
+        .slice()
+        .sort(function (a, b) {
+          return (a.size_gb || 0) - (b.size_gb || 0);
+        });
+      var map = {};
+      if (secondaries.length === 1) {
+        map[secondaries[0].key] = 'data';
+      } else if (secondaries.length >= 2) {
+        map[secondaries[0].key] = 'pagefile';
+        map[secondaries[secondaries.length - 1].key] = 'data';
+      }
+      return map;
+    }
+
+    function rebuildRowsFromInventory(invDisks) {
+      var suggest = suggestRoles(invDisks);
+      var usedLetters = [];
+      state.rows = invDisks.map(function (d) {
+        if (d.is_boot) {
+          return {
+            kind: 'boot',
+            key: d.key,
+            currentGb: d.size_gb || 0,
+            role: 'os',
+            targetGb: d.size_gb || 0,
+            letter: 'C',
+            selected: false,
+            serial: d.serial || '',
+          };
+        }
+        var role = suggest[d.key] || 'leave';
+        var letter = '';
+        if (role === 'pagefile' || role === 'data') {
+          letter = defaultLetter(role, usedLetters);
+          usedLetters.push(letter);
+        }
+        return {
+          kind: 'existing',
+          key: d.key,
+          currentGb: d.size_gb || 0,
+          role: role,
+          targetGb: d.size_gb || 0,
+          letter: letter,
+          selected: false,
+          serial: d.serial || '',
+        };
+      });
+    }
+
+    function readDomIntoState() {
+      if (!bodyEl) return;
+      var trs = bodyEl.querySelectorAll('tr[data-planner-idx]');
+      trs.forEach(function (tr) {
+        var idx = parseInt(tr.getAttribute('data-planner-idx'), 10);
+        var row = state.rows[idx];
+        if (!row) return;
+        var roleEl = tr.querySelector('.planner-role');
+        var targetEl = tr.querySelector('.planner-target');
+        var letterEl = tr.querySelector('.planner-letter');
+        var selEl = tr.querySelector('.planner-select');
+        if (roleEl && row.kind !== 'boot') row.role = roleEl.value;
+        if (targetEl) {
+          var t = parseInt(targetEl.value, 10);
+          if (!isNaN(t)) row.targetGb = t;
+        }
+        if (letterEl && row.kind !== 'boot') {
+          row.letter = (letterEl.value || '').toUpperCase().slice(0, 1);
+        }
+        if (selEl) row.selected = !!selEl.checked;
+      });
+    }
+
+    function render() {
+      if (!bodyEl) return;
+      var html = [];
+      state.rows.forEach(function (row, idx) {
+        var currentLabel = row.currentGb ? (row.currentGb + ' GB') : '—';
+        var keyLabel = row.kind === 'new' ? '(new)' : row.key;
+        var serialBit = row.serial ? (' <span class="text-muted">serial=' + row.serial + '</span>') : '';
+        if (row.kind === 'boot') {
+          html.push(
+            '<tr data-planner-idx="' + idx + '">' +
+            '<td></td>' +
+            '<td><code>' + keyLabel + '</code>' + serialBit + '</td>' +
+            '<td>' + currentLabel + '</td>' +
+            '<td>OS (boot)</td>' +
+            '<td><input type="number" class="form-control form-control-sm planner-target" min="' +
+              (row.currentGb || 1) + '" value="' + (row.targetGb || row.currentGb || '') +
+              '" title="Grow OS to GB (min = current)"></td>' +
+            '<td>C</td></tr>'
+          );
+          return;
+        }
+        var roleOpts = [
+          ['leave', 'Leave as-is'],
+          ['data', 'Data'],
+          ['pagefile', 'Pagefile'],
+        ].map(function (opt) {
+          return '<option value="' + opt[0] + '"' +
+            (row.role === opt[0] ? ' selected' : '') + '>' + opt[1] + '</option>';
+        }).join('');
+        var disabledSize = row.role === 'leave' ? ' disabled' : '';
+        var minSz = row.kind === 'new' ? 1 : (row.currentGb || 1);
+        html.push(
+          '<tr data-planner-idx="' + idx + '">' +
+          '<td><input type="checkbox" class="form-check-input planner-select"' +
+            (row.selected ? ' checked' : '') +
+            (row.kind === 'new' ? ' disabled' : '') + '></td>' +
+          '<td><code>' + keyLabel + '</code>' + serialBit +
+            (row.kind === 'new'
+              ? ' <button type="button" class="btn btn-link btn-sm planner-remove p-0">remove</button>'
+              : '') +
+            '</td>' +
+          '<td>' + currentLabel + '</td>' +
+          '<td><select class="form-select form-select-sm planner-role">' + roleOpts + '</select></td>' +
+          '<td><input type="number" class="form-control form-control-sm planner-target" min="' +
+            minSz + '" value="' + (row.targetGb || minSz) + '"' + disabledSize + '></td>' +
+          '<td><input type="text" class="form-control form-control-sm planner-letter" maxlength="1" value="' +
+            (row.letter || '') + '"' + disabledSize + '></td></tr>'
+        );
+      });
+      bodyEl.innerHTML = html.join('');
+      updateSwapEnabled();
+    }
+
+    function updateSwapEnabled() {
+      if (!swapBtn) return;
+      var selected = state.rows.filter(function (r) {
+        return r.kind === 'existing' && r.selected;
+      });
+      swapBtn.disabled = selected.length !== 2;
+    }
+
+    function ensureRoleLetters() {
+      var used = [];
+      state.rows.forEach(function (row) {
+        if (row.role === 'data' || row.role === 'pagefile') {
+          if (!row.letter || used.indexOf(row.letter) !== -1) {
+            row.letter = defaultLetter(row.role, used);
+          }
+          used.push(row.letter);
+        }
+      });
+    }
+
+    async function loadInventory() {
+      if (!templateInput || !templateInput.value) {
+        setStatus('No template selected.');
+        return;
+      }
+      if (state.loading) return;
+      state.loading = true;
+      setStatus('Loading template disks…');
+      try {
+        var qs = new URLSearchParams();
+        if (remoteInput && remoteInput.value) qs.set('remote_id', remoteInput.value);
+        var url = '/api/templates/' + encodeURIComponent(templateInput.value) + '/disks';
+        if (qs.toString()) url += '?' + qs.toString();
+        var res = await fetch(url, { headers: { Accept: 'application/json' } });
+        var body = {};
+        try { body = await res.json(); } catch (e) { body = {}; }
+        if (!res.ok) {
+          setStatus(body.error || 'Could not load template disks.');
+          state.loaded = false;
+          return;
+        }
+        state.inventory = body.disks || [];
+        rebuildRowsFromInventory(state.inventory);
+        ensureRoleLetters();
+        state.loaded = true;
+        setStatus(
+          'Template disks loaded. Assign roles, grow sizes if needed, then continue. ' +
+          'GuestOS never shrinks disks.'
+        );
+        render();
+      } catch (e) {
+        setStatus('Could not load template disks.');
+        state.loaded = false;
+      } finally {
+        state.loading = false;
+      }
+    }
+
+    function onBodyChange(ev) {
+      var tr = ev.target.closest('tr[data-planner-idx]');
+      if (!tr) return;
+      var idx = parseInt(tr.getAttribute('data-planner-idx'), 10);
+      var row = state.rows[idx];
+      if (!row) return;
+      if (ev.target.classList.contains('planner-remove')) {
+        state.rows.splice(idx, 1);
+        render();
+        return;
+      }
+      readDomIntoState();
+      if (ev.target.classList.contains('planner-role')) {
+        if (row.role === 'leave') {
+          row.letter = '';
+        } else {
+          ensureRoleLetters();
+          if (!row.targetGb || row.targetGb < (row.currentGb || 1)) {
+            row.targetGb = row.currentGb || row.targetGb || 16;
+          }
+        }
+        // Enforce at most one pagefile.
+        if (row.role === 'pagefile') {
+          state.rows.forEach(function (r, i) {
+            if (i !== idx && r.role === 'pagefile') {
+              r.role = 'leave';
+              r.letter = '';
+            }
+          });
+        }
+        ensureRoleLetters();
+        render();
+      }
+      updateSwapEnabled();
+    }
+
+    function addNewDisk(role) {
+      readDomIntoState();
+      var hasPf = state.rows.some(function (r) { return r.role === 'pagefile'; });
+      if (role === 'pagefile' && hasPf) {
+        setStatus('Only one pagefile disk is allowed; change the existing one or leave it.');
+        return;
+      }
+      var used = state.rows
+        .filter(function (r) { return r.letter; })
+        .map(function (r) { return r.letter; });
+      var size = role === 'pagefile' ? 16 : 50;
+      state.rows.push({
+        kind: 'new',
+        key: '',
+        currentGb: 0,
+        role: role,
+        targetGb: size,
+        letter: defaultLetter(role, used),
+        selected: false,
+        serial: '',
+      });
+      render();
+    }
+
+    function swapSelected() {
+      readDomIntoState();
+      var idxs = [];
+      state.rows.forEach(function (r, i) {
+        if (r.kind === 'existing' && r.selected) idxs.push(i);
+      });
+      if (idxs.length !== 2) return;
+      var a = state.rows[idxs[0]];
+      var b = state.rows[idxs[1]];
+      var tmpRole = a.role;
+      var tmpLetter = a.letter;
+      a.role = b.role;
+      a.letter = b.letter;
+      b.role = tmpRole;
+      b.letter = tmpLetter;
+      a.selected = false;
+      b.selected = false;
+      ensureRoleLetters();
+      render();
+    }
+
+    function applyVisibility() {
       var on = manageCb && manageCb.checked;
       setSectionVisible(diskFields, on);
-      setSectionVisible(pagefileFields, on && (!pagefileCb || pagefileCb.checked));
-      setSectionVisible(dataFields, on && (!dataCb || dataCb.checked));
+      if (on && !state.loaded && !state.loading) {
+        loadInventory();
+      }
     }
-    if (manageCb) manageCb.addEventListener('change', apply);
-    if (pagefileCb) pagefileCb.addEventListener('change', apply);
-    if (dataCb) dataCb.addEventListener('change', apply);
-    apply();
-    return apply;
+
+    if (bodyEl) {
+      bodyEl.addEventListener('change', onBodyChange);
+      bodyEl.addEventListener('click', function (ev) {
+        if (ev.target.classList.contains('planner-remove')) onBodyChange(ev);
+      });
+    }
+    if (swapBtn) swapBtn.addEventListener('click', swapSelected);
+    if (addPfBtn) addPfBtn.addEventListener('click', function () { addNewDisk('pagefile'); });
+    if (addDataBtn) addDataBtn.addEventListener('click', function () { addNewDisk('data'); });
+    if (reloadBtn) {
+      reloadBtn.addEventListener('click', function () {
+        state.loaded = false;
+        loadInventory();
+      });
+    }
+    if (manageCb) manageCb.addEventListener('change', applyVisibility);
+    applyVisibility();
+    return { apply: applyVisibility, loadInventory: loadInventory, getState: function () { return state; } };
+  }
+
+  function collectDiskPlanFromPlanner(form) {
+    var state = form._diskPlanner;
+    if (!state || !state.rows || !state.rows.length) return null;
+    // Sync latest DOM values.
+    var bodyEl = form.querySelector('#disk_planner_body');
+    if (bodyEl) {
+      bodyEl.querySelectorAll('tr[data-planner-idx]').forEach(function (tr) {
+        var idx = parseInt(tr.getAttribute('data-planner-idx'), 10);
+        var row = state.rows[idx];
+        if (!row) return;
+        var roleEl = tr.querySelector('.planner-role');
+        var targetEl = tr.querySelector('.planner-target');
+        var letterEl = tr.querySelector('.planner-letter');
+        if (roleEl && row.kind !== 'boot') row.role = roleEl.value;
+        if (targetEl) {
+          var t = parseInt(targetEl.value, 10);
+          if (!isNaN(t)) row.targetGb = t;
+        }
+        if (letterEl && row.kind !== 'boot') {
+          row.letter = (letterEl.value || '').toUpperCase().slice(0, 1);
+        }
+      });
+    }
+    var disks = [];
+    var boot = state.rows.filter(function (r) { return r.kind === 'boot'; })[0];
+    var osEntry = { role: 'os' };
+    if (boot) {
+      osEntry.source_key = boot.key;
+      if (boot.targetGb && boot.currentGb && boot.targetGb > boot.currentGb) {
+        osEntry.grow_to_gb = boot.targetGb;
+      }
+    }
+    disks.push(osEntry);
+    state.rows.forEach(function (row) {
+      if (row.kind === 'boot') return;
+      if (row.role !== 'data' && row.role !== 'pagefile') return;
+      var entry = {
+        role: row.role,
+        size_gb: parseInt(row.targetGb, 10) || 1,
+        drive_letter: row.letter || (row.role === 'pagefile' ? 'P' : 'D'),
+      };
+      if (row.kind === 'existing' && row.key) entry.source_key = row.key;
+      if (row.role === 'pagefile') entry.ensure_pagefile = true;
+      if (row.role === 'data') entry.label = 'Data';
+      disks.push(entry);
+    });
+    return disks;
   }
 
   function collectSysprepPayload(form) {
@@ -305,6 +668,14 @@
     }
     if (joinDomain) {
       data.workgroup = '';
+    }
+
+    // UI collects RAM in GB; API / Proxmox expect MB.
+    var ramGbRaw = data.ram_gb;
+    delete data.ram_gb;
+    var ramGb = parseFloat(ramGbRaw);
+    if (!isNaN(ramGb) && ramGb > 0) {
+      data.ram = Math.round(ramGb * 1024);
     }
 
     var applySpec = form.querySelector('#apply_spec');
@@ -340,32 +711,13 @@
     delete data.data_size_gb;
     delete data.data_drive_letter;
     if (manageDisks) {
-      var disks = [{ role: 'os' }];
-      var grow = (form.querySelector('#os_grow_to_gb') || {}).value;
-      if (grow) disks[0].grow_to_gb = parseInt(grow, 10);
-      if ((form.querySelector('#ensure_pagefile_disk') || {}).checked) {
-        disks.push({
-          role: 'pagefile',
-          size_gb: parseInt((form.querySelector('#pagefile_size_gb') || {}).value || '16', 10),
-          drive_letter: ((form.querySelector('#pagefile_drive_letter') || {}).value || 'P'),
-          ensure_pagefile: true,
-        });
-      }
-      if ((form.querySelector('#ensure_data_disk') || {}).checked) {
-        disks.push({
-          role: 'data',
-          size_gb: parseInt((form.querySelector('#data_size_gb') || {}).value || '50', 10),
-          drive_letter: ((form.querySelector('#data_drive_letter') || {}).value || 'D'),
-          label: 'Data',
-        });
-      }
-      data.disks = disks;
+      var disks = collectDiskPlanFromPlanner(form);
+      data.disks = disks && disks.length ? disks : [{ role: 'os' }];
     } else {
       data.disks = [];
     }
     return data;
   }
-
   function isUsableHostIPv4(ip) {
     var parts = String(ip || '').trim().split('.');
     if (parts.length !== 4) return false;
@@ -521,20 +873,16 @@
   function estimateRequestedDiskGb(form) {
     var manage = !!(form.querySelector('#manage_disks_checkbox') || {}).checked;
     if (!manage) return 0;
+    var disks = collectDiskPlanFromPlanner(form);
+    if (!disks || !disks.length) return 0;
     var total = 0;
-    var grow = (form.querySelector('#os_grow_to_gb') || {}).value;
-    if (grow) {
-      var g = parseInt(grow, 10);
-      if (!isNaN(g)) total += g;
-    }
-    if ((form.querySelector('#ensure_pagefile_disk') || {}).checked) {
-      var pf = parseInt((form.querySelector('#pagefile_size_gb') || {}).value || '16', 10);
-      if (!isNaN(pf)) total += pf;
-    }
-    if ((form.querySelector('#ensure_data_disk') || {}).checked) {
-      var data = parseInt((form.querySelector('#data_size_gb') || {}).value || '50', 10);
-      if (!isNaN(data)) total += data;
-    }
+    disks.forEach(function (d) {
+      if (d.role === 'os') {
+        if (d.grow_to_gb) total += parseInt(d.grow_to_gb, 10) || 0;
+      } else if (d.size_gb) {
+        total += parseInt(d.size_gb, 10) || 0;
+      }
+    });
     return total;
   }
 
@@ -640,8 +988,8 @@
     if (remote && remote.value) add('Remote', remote.value);
     var cores = form.querySelector('#cores');
     if (cores) add('CPU cores', cores.value);
-    var ram = form.querySelector('#ram');
-    if (ram) add('RAM (MB)', ram.value);
+    var ram = form.querySelector('#ram_gb');
+    if (ram) add('RAM', ram.value + ' GB');
     var bridge = form.querySelector('#bridge');
     if (bridge) add('Bridge', bridge.value);
     if (!isBulk) {
@@ -678,23 +1026,22 @@
     if (manageDisks) {
       add('Configure disks', manageDisks.checked ? 'Yes' : 'No');
       if (manageDisks.checked) {
-        add('Grow OS (GB)', (form.querySelector('#os_grow_to_gb') || {}).value);
-        if ((form.querySelector('#ensure_pagefile_disk') || {}).checked) {
-          add(
-            'Pagefile disk',
-            ((form.querySelector('#pagefile_size_gb') || {}).value || '') +
-              'G → ' +
-              ((form.querySelector('#pagefile_drive_letter') || {}).value || 'P')
-          );
-        }
-        if ((form.querySelector('#ensure_data_disk') || {}).checked) {
-          add(
-            'Data disk',
-            ((form.querySelector('#data_size_gb') || {}).value || '') +
-              'G → ' +
-              ((form.querySelector('#data_drive_letter') || {}).value || 'D')
-          );
-        }
+        var plan = collectDiskPlanFromPlanner(form) || [];
+        plan.forEach(function (d) {
+          if (d.role === 'os') {
+            add(
+              'OS disk',
+              (d.source_key ? d.source_key + ' ' : '') +
+                (d.grow_to_gb ? ('grow to ' + d.grow_to_gb + 'G') : 'keep size')
+            );
+          } else {
+            add(
+              d.role + ' disk',
+              (d.source_key ? d.source_key + ' → ' : 'new → ') +
+                d.size_gb + 'G ' + (d.drive_letter || '') + ':'
+            );
+          }
+        });
       }
     }
     target.innerHTML = htmlRows.join('');

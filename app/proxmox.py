@@ -342,18 +342,29 @@ def get_template_vms():
     return templates
 
 def get_network_bridges():
+    """Return Linux bridges / SDN VNets visible on the Proxmox cluster.
+
+    Bridges are collected from every node, then **deduplicated by ``iface``**
+    (one entry per name). GuestOS assumes identically named bridges exist on
+    every node where clones may land — the UI shows a single set, not a
+    per-host list.
+    """
     proxmox = get_proxmox_api()
     if not proxmox:
         return []
-    bridges = []
+    by_iface = {}
     nodes = proxmox.nodes.get()
     for node in nodes:
         node_name = node['node']
         networks = proxmox.nodes(node_name).network.get()
         for network in networks:
-            if network.get('type') == 'bridge':
-                bridges.append(network)
-    return bridges
+            if network.get('type') != 'bridge':
+                continue
+            iface = network.get('iface')
+            if not iface or iface in by_iface:
+                continue
+            by_iface[iface] = network
+    return [by_iface[k] for k in sorted(by_iface.keys())]
 
 def _get_vm_node(vmid):
     proxmox = get_proxmox_api()
@@ -854,6 +865,79 @@ def _resize_disk_to_gb(proxmox, node, vmid, disk_key, current_gb, target_gb):
     return True
 
 
+def _pick_non_boot_disk(non_boot, item):
+    """Select an unused non-boot disk for a plan entry.
+
+    Preference: ``source_key`` → matching serial → size best-fit → first unused.
+    Mutates ``non_boot`` by removing the chosen disk. Returns the disk or None.
+    """
+    source_key = (item.get('source_key') or '').strip().lower()
+    serial = str(item.get('serial') or '')
+    size_gb = int(item.get('size_gb') or 0)
+
+    if source_key:
+        for i, candidate in enumerate(non_boot):
+            if str(candidate.get('key') or '').lower() == source_key:
+                return non_boot.pop(i)
+
+    for i, candidate in enumerate(non_boot):
+        if str(candidate.get('serial') or '') == serial:
+            return non_boot.pop(i)
+
+    if size_gb > 0:
+        exact = [
+            (i, c) for i, c in enumerate(non_boot)
+            if c.get('size_gb') is not None and int(c['size_gb']) == size_gb
+        ]
+        if exact:
+            # Prefer lowest bus index among exact matches.
+            exact.sort(key=lambda t: (t[1].get('bus') or '', t[1].get('index') or 0))
+            return non_boot.pop(exact[0][0])
+
+        fitting = [
+            (i, c) for i, c in enumerate(non_boot)
+            if c.get('size_gb') is not None and int(c['size_gb']) >= size_gb
+        ]
+        if fitting:
+            # Smallest surplus (best fit), then lowest bus index.
+            fitting.sort(
+                key=lambda t: (
+                    int(t[1]['size_gb']) - size_gb,
+                    t[1].get('bus') or '',
+                    t[1].get('index') or 0,
+                )
+            )
+            return non_boot.pop(fitting[0][0])
+
+    if non_boot:
+        return non_boot.pop(0)
+    return None
+
+
+def inventory_vm_disks(vmid):
+    """Return a JSON-friendly disk inventory for the template planner UI/API.
+
+    Includes bus disks only (no CD-ROM / EFI / TPM). Marks the boot disk.
+    """
+    boot = get_boot_disk_spec(vmid)
+    disks = []
+    for d in boot['disks']:
+        disks.append({
+            'key': d['key'],
+            'bus': d['bus'],
+            'index': d['index'],
+            'size_gb': d.get('size_gb'),
+            'serial': d.get('serial') or None,
+            'storage': d.get('storage'),
+            'is_boot': d['key'] == boot['key'],
+        })
+    return {
+        'vmid': int(vmid),
+        'boot_key': boot['key'],
+        'disks': disks,
+    }
+
+
 def reconcile_vm_disks(vmid, disks_plan):
     """Attach/grow disks per plan. Returns guest_plan list for setup.ps1 / verify.
 
@@ -863,6 +947,9 @@ def reconcile_vm_disks(vmid, disks_plan):
     never reused. Bus indices for new attaches are tracked in-memory so a stale
     ``list_vm_disks`` refresh cannot reassign ``scsi1`` and push the previous
     volume to ``unusedN`` (Proxmox replaces the slot).
+
+    Non-boot reuse order: plan ``source_key`` → serial → size best-fit → first
+    unused → attach new.
     """
     from app.disks import COPYABLE_DISK_OPTS  # local import avoids cycles
 
@@ -882,8 +969,8 @@ def reconcile_vm_disks(vmid, disks_plan):
         used_indices.add(n)
         return f'{bus}{n}'
 
-    # Map existing non-boot disks for reuse (serial match, else ascending index).
-    # Never treat firmware volumes as candidates (they are not in ``disks``).
+    # Map existing non-boot disks for reuse. Never treat firmware volumes as
+    # candidates (they are not in ``disks``).
     non_boot = [d for d in disks if d['key'] != boot['key']]
 
     for item in disks_plan:
@@ -911,15 +998,7 @@ def reconcile_vm_disks(vmid, disks_plan):
             })
             continue
 
-        # Prefer an unused existing disk that already carries this serial, else
-        # next unused non-boot disk by ascending index (legacy templates).
-        matched = None
-        for i, candidate in enumerate(non_boot):
-            if str(candidate.get('serial') or '') == str(serial):
-                matched = non_boot.pop(i)
-                break
-        if matched is None and non_boot:
-            matched = non_boot.pop(0)
+        matched = _pick_non_boot_disk(non_boot, item)
 
         size_gb = int(item['size_gb'])
         if matched:
@@ -965,7 +1044,6 @@ def reconcile_vm_disks(vmid, disks_plan):
         })
 
     return guest_plan
-
 
 def power_on_vm(vmid):
     """Powers on a VM."""

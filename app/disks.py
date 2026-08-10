@@ -8,6 +8,8 @@ from app.validators import ValidationError
 
 DISK_ROLES = frozenset({'os', 'data', 'pagefile'})
 DRIVE_LETTER_RE = re.compile(r'^[A-Za-z]$')
+# Proxmox bus disk keys the planner may bind (clone keeps the same slot names).
+SOURCE_KEY_RE = re.compile(r'^(scsi|virtio|sata|ide)\d+$')
 
 # Proxmox disk option keys safe to copy from the boot disk onto new volumes.
 COPYABLE_DISK_OPTS = frozenset({
@@ -62,18 +64,17 @@ def prepare_disk_plan(data):
 
     raw = data.get('disks')
     if raw in (None, '', []):
-        # Sensible default plan when the checkbox is on but the list is empty.
-        raw = [
-            {'role': 'os'},
-            {'role': 'pagefile', 'size_gb': 16, 'drive_letter': 'P', 'ensure_pagefile': True},
-            {'role': 'data', 'size_gb': 50, 'drive_letter': 'D', 'label': 'Data'},
-        ]
+        raise ValidationError(
+            'disks plan is required when manage_disks is enabled '
+            '(include role=os plus any data/pagefile entries).'
+        )
 
     if not isinstance(raw, list):
         raise ValidationError('disks must be a list of disk plan entries.')
 
     normalized = []
     letters_seen = set()
+    source_keys_seen = set()
     os_count = 0
     pagefile_count = 0
 
@@ -94,6 +95,19 @@ def prepare_disk_plan(data):
             ),
             'label': (str(entry.get('label') or '').strip() or None),
         }
+
+        source_key = entry.get('source_key')
+        if source_key not in (None, ''):
+            sk = str(source_key).strip().lower()
+            if not SOURCE_KEY_RE.match(sk):
+                raise ValidationError(
+                    f'disks[{i}].source_key must be a bus disk key '
+                    f'(scsiN / virtioN / sataN / ideN).'
+                )
+            if sk in source_keys_seen:
+                raise ValidationError(f'Duplicate source_key {sk}.')
+            source_keys_seen.add(sk)
+            item['source_key'] = sk
 
         if role == 'os':
             os_count += 1

@@ -27,6 +27,9 @@ VL 2019, …) share the same code path — community test reports wanted.
 ## Network readiness
 
 - Clones attach to `PRIMARY_BRIDGE` (or the bridge chosen in the wizard).
+- The wizard lists **one set of unique bridge names** from the cluster (not a
+  per-host dump). Keep bridge / SDN VNet names **identical on every node**
+  where clones may land so the chosen bridge exists on the target host.
 - **Proxmox SDN:** after you create a VNet and click Apply, it appears as a
   Linux bridge with that VNet’s name. Set `PRIMARY_BRIDGE` / wizard bridge to
   the **VNet name**. Leave GuestOS **VLAN** empty unless the VNet is
@@ -57,6 +60,14 @@ customize time. It is **not** available for Win11 (flat disk layout) — the Dis
 wizard step is hidden for `windows11` templates and the API rejects
 `manage_disks=true` for non-Server families.
 
+The UI **disk planner** inventories the template (`GET /api/templates/<vmid>/disks`),
+shows bus keys and current sizes, and lets the admin assign each secondary as
+**Data**, **Pagefile**, or **Leave as-is**, swap roles, and grow target sizes
+(never shrink). The submitted `disks[]` plan may include `source_key` (e.g.
+`scsi2`) so reconcile binds the chosen slot on the clone. Matching order:
+`source_key` → serial → size best-fit → attach new. There is **no** silent
+server-side 16/50 GB default — the job must send an explicit plan.
+
 The template must be recognized as **Windows Server** via **name or tags**, for example:
 
 - Name contains: `server2019`, `server2022`, `server2025`, `win2019`, `ws2022`, …
@@ -69,9 +80,9 @@ not in the PDM Customize button.
 
 **EFI / TPM:** UEFI templates may include `efidisk0` and optionally `tpmstate0`.
 Those firmware volumes are **not** treated as OS/data/pagefile disks and are
-left alone. Configure disks only allocates new `scsi`/`virtio`/… bus slots for
-pagefile/data (or reuses existing non-boot bus disks with matching serials).
-
+left alone. Configure disks allocates new `scsi`/`virtio`/… bus slots for
+pagefile/data when needed, or reuses existing non-boot disks via the planner
+`source_key` / serial / size match.
 ## What GuestOS does on the clone
 
 1. Clone the template and power on; wait for a stable guest agent.

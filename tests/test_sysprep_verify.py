@@ -64,6 +64,42 @@ def test_verify_requires_setup_done(monkeypatch):
     assert 'setup.done missing' in summary
 
 
+def test_verify_waits_through_pending_reboot(monkeypatch):
+    interfaces = {
+        'result': [{
+            'ip-addresses': [
+                {'ip-address-type': 'ipv4', 'ip-address': '10.0.0.9'},
+            ],
+        }],
+    }
+    calls = {'n': 0}
+
+    def _marker(_vmid):
+        calls['n'] += 1
+        if calls['n'] < 3:
+            return ('pending_reboot', 'pagefile')
+        return ('done', 'ok-after-reboot')
+
+    _patch_verify_deps(monkeypatch, interfaces, marker=('done', 'ok'))
+    monkeypatch.setattr(sv, '_guest_setup_marker', _marker)
+    summary, ok = ca._verify_sysprep_result(
+        126, 'LABTEST01', expected_ip=None, timeout=60, expect_setup_reboot=True,
+    )
+    assert ok is True
+    assert calls['n'] >= 3
+    assert 'setup.done=ok' in summary
+
+
+def test_verify_fails_if_stuck_pending_reboot(monkeypatch):
+    interfaces = {'result': []}
+    _patch_verify_deps(monkeypatch, interfaces, marker=('pending_reboot', 'pagefile'))
+    summary, ok = ca._verify_sysprep_result(
+        126, 'LABTEST01', expected_ip=None, timeout=15, expect_setup_reboot=True,
+    )
+    assert ok is False
+    assert 'pending reboot' in summary
+
+
 def test_verify_fails_on_setup_failed(monkeypatch):
     interfaces = {'result': []}
     _patch_verify_deps(monkeypatch, interfaces, marker=('failed', 'disk boom'))

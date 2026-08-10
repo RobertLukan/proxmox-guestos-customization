@@ -90,9 +90,9 @@
             <div class="invalid-feedback"></div>
         </div>
         <div class="mb-3">
-            <label for="ram" class="form-label">RAM (MB)</label>
-            <input type="number" name="ram" id="ram" class="form-control" value="4096" min="512" max="65536" data-required="true">
-            <div class="form-text" id="ram_ceiling_help">Max 65536 MB (64 GB) unless limited further by template family.</div>
+            <label for="ram_gb" class="form-label">RAM (GB)</label>
+            <input type="number" name="ram_gb" id="ram_gb" class="form-control" value="4" min="1" max="64" step="1" data-required="true">
+            <div class="form-text" id="ram_ceiling_help">Max 64 GB unless limited further by template family. Sent to Proxmox as MB (GB × 1024).</div>
             <div class="text-danger small" id="ram_ceiling_warn" hidden></div>
             <div class="invalid-feedback"></div>
         </div>
@@ -137,6 +137,12 @@
                 <option value="{{ bridge.iface }}">{{ bridge.iface }}</option>
                 {% endfor %}
             </select>
+            <div class="form-text">
+                One set of bridges is listed (unique names across the cluster).
+                Bridge names must be <strong>identical on every Proxmox host</strong>
+                where clones may run; otherwise a selected bridge may be missing
+                on the target node.
+            </div>
             <div class="invalid-feedback"></div>
         </div>
         <div class="mb-3" id="vlan_group">
@@ -278,38 +284,44 @@
         </div>
         <div id="disk_fields" hidden>
             <p class="form-text">
-                When enabled, GuestOS inventories template disks, attaches any missing
-                data/pagefile disks on the <strong>same storage</strong> as the boot disk
-                (with the same aio/discard/cache options), brings offline disks online,
-                extends undersized volumes, and can place the Windows pagefile on a
-                dedicated volume.
+                GuestOS inventories this template’s disks below. Assign each secondary
+                disk as <strong>Data</strong>, <strong>Pagefile</strong>, or
+                <strong>Leave as-is</strong>. You may swap roles, grow target sizes
+                (never shrink), or attach a new data/pagefile disk on the boot disk’s
+                storage. New volumes inherit aio/discard/cache from the OS disk.
             </p>
-            <div class="mb-3">
-                <label for="os_grow_to_gb" class="form-label">Grow OS disk to (GB, optional)</label>
-                <input type="number" class="form-control" id="os_grow_to_gb" name="os_grow_to_gb" min="1" placeholder="Leave blank to keep template size">
-                <div class="form-text" id="disk_ceiling_help">Total requested disks (OS grow + data + pagefile) are capped per OS family.</div>
-                <div class="text-danger small" id="disk_ceiling_warn" hidden></div>
+            <div id="disk_planner_status" class="form-text mb-2">Loading template disks…</div>
+            <div class="table-responsive mb-3">
+                <table class="table table-sm align-middle" id="disk_planner_table">
+                    <thead>
+                        <tr>
+                            <th scope="col"></th>
+                            <th scope="col">Disk</th>
+                            <th scope="col">Current</th>
+                            <th scope="col">Role</th>
+                            <th scope="col">Target GB</th>
+                            <th scope="col">Letter</th>
+                        </tr>
+                    </thead>
+                    <tbody id="disk_planner_body"></tbody>
+                </table>
             </div>
-            <div class="form-check mb-3">
-                <input type="checkbox" class="form-check-input" id="ensure_pagefile_disk" checked>
-                <label class="form-check-label" for="ensure_pagefile_disk">Ensure pagefile disk</label>
+            <div class="mb-3 d-flex flex-wrap gap-2">
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="disk_planner_swap" disabled>
+                    Swap roles on selected
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-primary" id="disk_planner_add_pagefile">
+                    Add new pagefile disk
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-primary" id="disk_planner_add_data">
+                    Add new data disk
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="disk_planner_reload">
+                    Reload inventory
+                </button>
             </div>
-            <div id="pagefile_disk_fields" class="mb-3">
-                <label for="pagefile_size_gb" class="form-label">Pagefile disk size (GB)</label>
-                <input type="number" class="form-control" id="pagefile_size_gb" name="pagefile_size_gb" value="16" min="1">
-                <label for="pagefile_drive_letter" class="form-label mt-2">Pagefile drive letter</label>
-                <input type="text" class="form-control" id="pagefile_drive_letter" name="pagefile_drive_letter" value="P" maxlength="1">
-            </div>
-            <div class="form-check mb-3">
-                <input type="checkbox" class="form-check-input" id="ensure_data_disk" checked>
-                <label class="form-check-label" for="ensure_data_disk">Ensure data disk</label>
-            </div>
-            <div id="data_disk_fields" class="mb-3">
-                <label for="data_size_gb" class="form-label">Data disk size (GB)</label>
-                <input type="number" class="form-control" id="data_size_gb" name="data_size_gb" value="50" min="1">
-                <label for="data_drive_letter" class="form-label mt-2">Data drive letter</label>
-                <input type="text" class="form-control" id="data_drive_letter" name="data_drive_letter" value="D" maxlength="1">
-            </div>
+            <div class="text-danger small" id="disk_ceiling_warn" hidden></div>
+            <div class="form-text" id="disk_ceiling_help">Total requested disks (OS grow + data + pagefile) are capped per OS family.</div>
         </div>
         <p class="form-text mb-0">Leave unchecked to keep today’s Sysprep-only behavior (no disk changes).</p>
         </div>
@@ -366,7 +378,7 @@
     var bulkDiskSumInfo = document.getElementById('bulk_disk_sum_info');
     var bulkCsvWarn = document.getElementById('bulk_csv_warn');
     var coresInput = form.querySelector('#cores');
-    var ramInput = form.querySelector('#ram');
+    var ramInput = form.querySelector('#ram_gb');
     var coresHelp = document.getElementById('cores_ceiling_help');
     var ramHelp = document.getElementById('ram_ceiling_help');
     var diskHelp = document.getElementById('disk_ceiling_help');
@@ -383,6 +395,11 @@
     var manageDisksCheckbox = form.querySelector('#manage_disks_checkbox');
     var adminHintDefault =
         'Additional VMs or larger resources must be configured directly in Proxmox VE by an administrator.';
+
+    function ramGbCeiling(limits) {
+        if (!limits || !limits.max_ram_mb) return 64;
+        return Math.max(1, Math.floor(Number(limits.max_ram_mb) / 1024));
+    }
 
     function setFieldWarn(el, warnEl, message) {
         if (!el || !warnEl) return;
@@ -413,19 +430,20 @@
         } else {
             setFieldWarn(coresInput, coresWarn, '');
         }
-        var ramVal = parseInt((ramInput && ramInput.value) || '0', 10);
-        if (ramInput && !isNaN(ramVal) && ramVal > provisionLimits.max_ram_mb) {
+        var ramGb = parseFloat((ramInput && ramInput.value) || '0');
+        var maxGb = ramGbCeiling(provisionLimits);
+        if (ramInput && !isNaN(ramGb) && ramGb > maxGb) {
             setFieldWarn(
                 ramInput,
                 ramWarn,
                 'Over limit for ' + provisionLimits.family +
-                    ': max ' + provisionLimits.max_ram_mb + ' MB RAM. ' + hint
+                    ': max ' + maxGb + ' GB RAM. ' + hint
             );
             ok = false;
         } else {
             setFieldWarn(ramInput, ramWarn, '');
         }
-        var diskEl = form.querySelector('#os_grow_to_gb');
+        var diskEl = form.querySelector('#disk_planner_table') || form.querySelector('#manage_disks_checkbox');
         var diskGb = window.GuestOSForms
             ? GuestOSForms.estimateRequestedDiskGb(form)
             : 0;
@@ -559,14 +577,15 @@
             coresInput.max = String(limits.max_cores);
         }
         if (ramInput) {
-            ramInput.max = String(limits.max_ram_mb);
+            ramInput.max = String(ramGbCeiling(limits));
         }
         if (coresHelp) {
             coresHelp.textContent = 'Ceiling for ' + limits.family + ': max ' + limits.max_cores + ' cores.';
         }
         if (ramHelp) {
             ramHelp.textContent =
-                'Ceiling for ' + limits.family + ': max ' + limits.max_ram_mb + ' MB RAM.';
+                'Ceiling for ' + limits.family + ': max ' + ramGbCeiling(limits) +
+                ' GB RAM (sent to Proxmox as MB = GB × 1024).';
         }
         if (diskHelp) {
             diskHelp.textContent =
@@ -576,7 +595,7 @@
         if (limitsInfo) {
             limitsInfo.textContent =
                 'Limits (' + limits.family + '): ' +
-                limits.max_cores + ' cores / ' + limits.max_ram_mb + ' MB RAM / ' +
+                limits.max_cores + ' cores / ' + ramGbCeiling(limits) + ' GB RAM / ' +
                 limits.max_disk_gb + ' GB disks · daily ' +
                 limits.daily_used + '/' + limits.daily_max +
                 (bulkAllowed
@@ -733,13 +752,15 @@
     if (bulkRows) {
         bulkRows.addEventListener('input', updateBulkRemaining);
     }
-    ['#manage_disks_checkbox', '#ensure_pagefile_disk', '#ensure_data_disk',
-     '#os_grow_to_gb', '#pagefile_size_gb', '#data_size_gb'].forEach(function (sel) {
+    ['#manage_disks_checkbox'].forEach(function (sel) {
         var el = form.querySelector(sel);
         if (el) el.addEventListener('change', updateBulkDiskSum);
-        if (el) el.addEventListener('input', updateBulkDiskSum);
     });
-    if (coresInput) {
+    var plannerBody = form.querySelector('#disk_planner_body');
+    if (plannerBody) {
+        plannerBody.addEventListener('change', updateBulkDiskSum);
+        plannerBody.addEventListener('input', updateBulkDiskSum);
+    }    if (coresInput) {
         coresInput.addEventListener('input', validateResourceCeilings);
         coresInput.addEventListener('change', validateResourceCeilings);
     }

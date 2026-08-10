@@ -323,3 +323,42 @@ def test_clone_vm_retries_on_vmid_collision(monkeypatch):
     assert result['vmid'] == 125
     assert calls['clone'] == 2
     assert calls['nextid'] == 2
+
+
+def test_get_network_bridges_dedupes_iface_across_nodes(monkeypatch):
+    class _Network:
+        def __init__(self, entries):
+            self._entries = entries
+
+        def get(self):
+            return list(self._entries)
+
+    class _Node:
+        def __init__(self, entries):
+            self.network = _Network(entries)
+
+    class _Nodes:
+        def get(self):
+            return [{'node': 'pve1'}, {'node': 'pve2'}]
+
+        def __call__(self, name):
+            if name == 'pve1':
+                return _Node([
+                    {'type': 'bridge', 'iface': 'vmbr0'},
+                    {'type': 'bridge', 'iface': 'vmbr1'},
+                    {'type': 'eth', 'iface': 'eth0'},
+                ])
+            return _Node([
+                {'type': 'bridge', 'iface': 'vmbr0'},
+                {'type': 'bridge', 'iface': 'vmbr1'},
+                {'type': 'bridge', 'iface': 'vnet-lab'},
+            ])
+
+    class _Px:
+        def __init__(self):
+            self.nodes = _Nodes()
+
+    monkeypatch.setattr(pm, 'get_proxmox_api', lambda: _Px())
+    bridges = pm.get_network_bridges()
+    ifaces = [b['iface'] for b in bridges]
+    assert ifaces == ['vmbr0', 'vmbr1', 'vnet-lab']

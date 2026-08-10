@@ -11,6 +11,7 @@ from app.proxmox import (
     classify_windows_guest_family,
     mark_vm_customization_failed,
     power_off_vm,
+    inventory_vm_disks,
 )
 from app.celery_app import sysprep_workflow_task
 from app.models import Task, User, BatchRequest, CustomizationSpec
@@ -532,6 +533,39 @@ def api_provision_limits():
         snap['warning'] = 'Could not query provisioning limits; showing defaults.'
         return jsonify(snap)
     return jsonify(provision_limits_snapshot(family='win11', template_vmid=None))
+
+
+@app.route('/api/templates/<int:vmid>/disks', methods=['GET', 'OPTIONS'])
+@login_or_api_token_required
+def api_template_disks(vmid):
+    """Inventory bus disks on a template for the Configure disks planner."""
+    if request.method == 'OPTIONS':
+        return ('', 204)
+    remote_id = (request.args.get('remote_id') or '').strip() or None
+    data = {'template_vmid': vmid}
+    if remote_id:
+        data['remote_id'] = remote_id
+    ok, err = resolve_pve_remote(data, _json_field_error)
+    if not ok:
+        return err
+    try:
+        pve_override = attach_pve_override(data)
+    except ValueError as e:
+        return _json_field_error(str(e), remote_id=str(e))
+    try:
+        with use_pve_override(pve_override):
+            if not is_proxmox_template(vmid):
+                return _json_field_error(
+                    f'VM {vmid} is not a Proxmox template.',
+                    template_vmid=f'VM {vmid} is not a template.',
+                )
+            return jsonify(inventory_vm_disks(vmid))
+    except Exception as e:
+        logging.warning('template disks inventory failed for %s: %s', vmid, e)
+        return _json_field_error(
+            f'Could not inventory disks for template {vmid}.',
+            template_vmid=str(e),
+        )
 
 
 @app.route('/workflow/<task_id>')
@@ -1149,15 +1183,19 @@ def _spec_payload_from_form(form):
         'domain_name': form.get('domain_name') or '',
     }
     cores = form.get('cores')
-    ram = form.get('ram')
+    ram_gb = form.get('ram_gb') or form.get('ram')
     if cores:
         try:
             payload['cores'] = int(cores)
         except ValueError:
             pass
-    if ram:
+    if ram_gb:
         try:
-            payload['ram'] = int(ram)
+            # Specs HTML form collects GB; legacy field name ``ram`` may still be MB.
+            if form.get('ram_gb') not in (None, ''):
+                payload['ram'] = int(round(float(ram_gb) * 1024))
+            else:
+                payload['ram'] = int(ram_gb)
         except ValueError:
             pass
     return sanitize_spec_payload(payload)

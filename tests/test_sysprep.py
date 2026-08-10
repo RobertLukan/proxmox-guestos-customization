@@ -257,7 +257,12 @@ def test_setup_ps1_resets_recycle_bin_on_data_volumes():
     with flask_app.app_context():
         _validate_sysprep_network(data)
         _xml, ps1, _cmd = _render_sysprep_files(data)
-    ps1 = ps1.decode()
+    if isinstance(ps1, bytes):
+        ps1 = ps1.decode()
+    assert 'Reset-GuestOsRecycleBin' in ps1
+    assert 'pending_reboot' in ps1
+    assert 'Keep-GuestOsAutoLogonForReboot' in ps1
+    assert 'Removing stale pagefile' in ps1
     assert 'function Reset-GuestOsRecycleBin' in ps1
     assert "Remove-Item -LiteralPath $path -Recurse -Force" in ps1
     assert 'Reset-GuestOsRecycleBin -Letter $Letter' in ps1

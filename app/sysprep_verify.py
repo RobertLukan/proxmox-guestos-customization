@@ -134,6 +134,9 @@ def _guest_setup_marker(vmid):
         return 'failed', _reg_value('SetupDetail')
     if status == 'done':
         return 'done', _reg_value('SetupDetail') or 'ok'
+    if status == 'pending_reboot':
+        # Intentional pagefile/domain reboot — keep waiting for final done.
+        return 'pending_reboot', _reg_value('SetupDetail') or 'pending'
 
     cmd = (
         'cmd.exe /c '
@@ -145,6 +148,10 @@ def _guest_setup_marker(vmid):
         '(echo DONE& type C:\\ProgramData\\GuestOS\\setup.done) '
         'else if exist C:\\Windows\\GuestOS\\setup.done '
         '(echo DONE& type C:\\Windows\\GuestOS\\setup.done) '
+        'else if exist C:\\ProgramData\\GuestOS\\setup.pending_reboot '
+        '(echo PENDING& type C:\\ProgramData\\GuestOS\\setup.pending_reboot) '
+        'else if exist C:\\Windows\\GuestOS\\setup.pending_reboot '
+        '(echo PENDING& type C:\\Windows\\GuestOS\\setup.pending_reboot) '
         'else (echo MISSING)'
     )
     try:
@@ -161,24 +168,30 @@ def _guest_setup_marker(vmid):
         return 'failed', detail
     if head.startswith('DONE'):
         return 'done', detail
+    if head.startswith('PENDING'):
+        return 'pending_reboot', detail
     return None, None
 
 
 def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
                            expected_domain=None, expected_ipv6=None,
-                           timeout=None, on_progress=None):
+                           timeout=None, on_progress=None,
+                           expect_setup_reboot=False):
     """Best-effort post-sysprep verification via the QEMU guest agent.
 
     Returns ``(summary, ok)``. ``ok`` is False when setup.ps1 never completed
     (``setup.done`` missing / ``setup.failed`` present), a required static IP
     never appears, the hostname does not match, or an expected domain join is
     not observed. When ``expected_ipv6`` is set, that address must also appear.
+
+    ``expect_setup_reboot`` extends the wait when setup.ps1 will reboot for
+    pagefile and/or domain join (``pending_reboot`` → ``done``).
     """
     # Always wait for FirstLogon setup.ps1 — specialize hostname alone is not enough.
-    # Domain join triggers an extra reboot after Add-Computer — allow more time.
+    # Domain join / pagefile trigger an extra reboot after setup — allow more time.
     if timeout is None:
-        if expected_domain:
-            timeout = 1200
+        if expected_domain or expect_setup_reboot:
+            timeout = 1500
         elif expected_ip or expected_ipv6:
             timeout = 900
         else:
@@ -199,16 +212,25 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
     setup_state = None
     setup_detail = None
     for i in range(polls):
-        _progress(f"Waiting for guest setup.ps1 ({i + 1}/{polls})...")
         setup_state, setup_detail = _guest_setup_marker(vmid)
-        if setup_state in ('done', 'failed'):
+        if setup_state == 'pending_reboot':
+            _progress(
+                f"Guest setup pending reboot ({setup_detail or 'pagefile/domain'}) "
+                f"({i + 1}/{polls})..."
+            )
+        elif setup_state in ('done', 'failed'):
+            _progress(f"Waiting for guest setup.ps1 ({i + 1}/{polls})...")
             break
+        else:
+            _progress(f"Waiting for guest setup.ps1 ({i + 1}/{polls})...")
         if i + 1 < polls:
             time.sleep(poll)
 
     if setup_state == 'failed':
         detail = f" ({setup_detail})" if setup_detail else ''
         return f"setup.ps1 failed{detail}", False
+    if setup_state == 'pending_reboot':
+        return "setup.ps1 pending reboot never reached setup.done", False
     if setup_state != 'done':
         return "setup.ps1 did not complete (setup.done missing)", False
 

@@ -487,6 +487,11 @@ components:
                 type: boolean
               reformat:
                 type: boolean
+              source_key:
+                type: string
+                description: >
+                  Optional Proxmox bus key on the template/clone (e.g. scsi1).
+                  Preferred match when reusing existing disks.
         fast_waits:
           type: boolean
           description: >

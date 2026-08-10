@@ -63,17 +63,19 @@ Same opt-in pattern as domain join. Default **off**. When `manage_disks` is true
 {
   "manage_disks": true,
   "disks": [
-    { "role": "os", "grow_to_gb": 80 },
-    { "role": "pagefile", "size_gb": 16, "drive_letter": "P", "ensure_pagefile": true },
-    { "role": "data", "size_gb": 100, "drive_letter": "D", "label": "Data" }
+    { "role": "os", "source_key": "scsi0", "grow_to_gb": 80 },
+    { "role": "pagefile", "size_gb": 16, "drive_letter": "P", "ensure_pagefile": true, "source_key": "scsi2" },
+    { "role": "data", "size_gb": 40, "drive_letter": "D", "label": "Data", "source_key": "scsi1" }
   ]
 }
 ```
 
-New disks are created on the **boot disk’s storage** with the boot disk’s Proxmox
-options (`aio`, `discard`, `cache`, …). Existing template disks are reused
-(online/extend) instead of duplicated. Post-Sysprep verify checks volumes and
-pagefile placement when requested.
+`disks` is **required** when `manage_disks` is true (no silent 16/50 default).
+Optional `source_key` binds a clone bus slot (from `GET /api/templates/<vmid>/disks`).
+Reuse order: `source_key` → serial → size best-fit → attach new. New disks use the
+**boot disk’s storage** and Proxmox options (`aio`, `discard`, `cache`, …).
+Post-Sysprep verify waits through pagefile/domain `pending_reboot` before
+checking volumes.
 
 **Policy:** disk reconcile runs only for **Windows Server** templates
 (matched by template **name** or **tags**, e.g. `windowsserver2019|2022|2025`,

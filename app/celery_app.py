@@ -402,6 +402,11 @@ def sysprep_verify_task(self, task_id, vmid, data):
                 update_task_progress(task_id, 98, "Verifying hostname and network via guest agent...")
                 expected_ip = None if data.get('use_dhcp') else data.get('ip_address')
                 expected_ipv6 = data.get('ipv6_address') if data.get('enable_ipv6') else None
+                expect_setup_reboot = bool(data.get('join_domain'))
+                if data.get('manage_disks') and data.get('disk_guest_plan'):
+                    expect_setup_reboot = expect_setup_reboot or any(
+                        d.get('ensure_pagefile') for d in (data.get('disk_guest_plan') or [])
+                    )
                 verify_summary, verify_ok = _verify_sysprep_result(
                     vmid,
                     data.get('hostname'),
@@ -409,6 +414,7 @@ def sysprep_verify_task(self, task_id, vmid, data):
                     expected_domain=data.get('domain_name') if data.get('join_domain') else None,
                     expected_ipv6=expected_ipv6,
                     on_progress=lambda msg: update_task_progress(task_id, 98, msg),
+                    expect_setup_reboot=expect_setup_reboot,
                 )
                 if data.get('manage_disks') and data.get('disk_guest_plan'):
                     disk_summary, disk_ok = _verify_disks(

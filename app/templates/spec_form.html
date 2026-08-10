@@ -41,9 +41,10 @@
              value="{{ p.get('cores') or '' }}">
     </div>
     <div class="col-md-4 mb-3">
-      <label class="form-label" for="ram">RAM MB (optional)</label>
-      <input class="form-control" type="number" id="ram" name="ram" min="512"
-             value="{{ p.get('ram') or '' }}">
+      <label class="form-label" for="ram_gb">RAM GB (optional)</label>
+      <input class="form-control" type="number" id="ram_gb" name="ram_gb" min="1" max="64" step="1"
+             value="{% if p.get('ram') %}{{ (p.get('ram') / 1024)|int }}{% endif %}">
+      <div class="form-text">Stored as MB for Proxmox (GB × 1024).</div>
     </div>
     <div class="col-md-4 mb-3">
       <label class="form-label" for="workgroup">Workgroup</label>
