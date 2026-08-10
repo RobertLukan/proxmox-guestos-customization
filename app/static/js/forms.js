@@ -24,24 +24,27 @@
     el.className = 'alert alert-danger';
   }
 
-  function applyDomainProfile(selectEl, profiles, dnsEl, vlanEl) {
+  function applyDomainProfile(selectEl, profiles, dnsEl, vlanEl, opts) {
     var name = selectEl && selectEl.value;
+    opts = opts || {};
+    var overwrite = !!opts.overwrite;
     if (!(name && profiles && profiles[name])) {
       return;
     }
     var p = profiles[name];
-    // Fill blank fields only (matches server apply_domain_profile_network).
-    if (dnsEl && !(dnsEl.value || '').trim() && p.dns_servers) {
-      dnsEl.value = p.dns_servers;
+    // UI profile picks overwrite DNS/VLAN; fill-blank is for specs / silent apply.
+    if (dnsEl && p.dns_servers !== undefined && p.dns_servers !== null) {
+      if (overwrite || !(dnsEl.value || '').trim()) {
+        dnsEl.value = p.dns_servers || '';
+      }
     }
-    if (
-      vlanEl &&
-      !(vlanEl.value || '').trim() &&
-      p.vlan !== undefined &&
-      p.vlan !== null &&
-      p.vlan !== ''
-    ) {
-      vlanEl.value = p.vlan;
+    if (vlanEl) {
+      var hasVlan = p.vlan !== undefined && p.vlan !== null && p.vlan !== '';
+      if (hasVlan && (overwrite || !(vlanEl.value || '').trim())) {
+        vlanEl.value = p.vlan;
+      } else if (overwrite && !hasVlan) {
+        vlanEl.value = '';
+      }
     }
   }
 
@@ -52,6 +55,7 @@
     var dnsEl = form.querySelector('#dns_servers');
     var vlanEl = form.querySelector('#vlan');
     var credHint = form.querySelector('#domain_profile_cred_hint');
+    form._guestosDomainProfiles = profiles || {};
 
     function updateCredHint() {
       if (!credHint) return;
@@ -65,25 +69,52 @@
       }
     }
 
-    function applyToggle() {
+    function setDnsVlanLocked(locked) {
+      [dnsEl, vlanEl].forEach(function (el) {
+        if (!el) return;
+        // readOnly (not disabled) so FormData / payload collection still includes values.
+        el.readOnly = !!locked;
+        el.tabIndex = locked ? -1 : 0;
+        if (locked) {
+          el.classList.add('bg-light');
+          el.setAttribute('aria-readonly', 'true');
+        } else {
+          el.classList.remove('bg-light');
+          el.removeAttribute('aria-readonly');
+        }
+      });
+    }
+
+    function syncProfileNetwork() {
       var on = !!(useNetCb && useNetCb.checked);
       setSectionVisible(profileGroup, on);
       if (!on && profileSelect) {
         profileSelect.value = '';
         profileSelect.removeAttribute('data-required');
       }
+      if (on && profileSelect && profileSelect.value) {
+        applyDomainProfile(profileSelect, profiles || {}, dnsEl, vlanEl, {
+          overwrite: true,
+        });
+      }
+      // Lock DNS/VLAN whenever profile mode is on (values come from the profile).
+      setDnsVlanLocked(on);
       updateCredHint();
     }
 
-    if (useNetCb) useNetCb.addEventListener('change', applyToggle);
+    if (useNetCb) useNetCb.addEventListener('change', syncProfileNetwork);
     if (profileSelect) {
       profileSelect.addEventListener('change', function () {
-        applyDomainProfile(profileSelect, profiles || {}, dnsEl, vlanEl);
+        if (useNetCb && useNetCb.checked) {
+          applyDomainProfile(profileSelect, profiles || {}, dnsEl, vlanEl, {
+            overwrite: true,
+          });
+        }
         updateCredHint();
       });
     }
-    applyToggle();
-    return { applyToggle: applyToggle, updateCredHint: updateCredHint };
+    syncProfileNetwork();
+    return { applyToggle: syncProfileNetwork, updateCredHint: updateCredHint };
   }
 
   function setSectionVisible(el, visible) {
@@ -310,8 +341,18 @@
       useNetCb.dispatchEvent(new Event('change', { bubbles: true }));
     }
     var profileSelect = form.querySelector('#domain_profile');
+    var dnsEl = form.querySelector('#dns_servers');
+    var vlanEl = form.querySelector('#vlan');
+    // Spec may only store domain_profile; fill blank DNS/VLAN without clobbering
+    // explicit values already applied from the payload.
     if (profileSelect && (payload.domain_profile || '').toString().trim()) {
-      profileSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      applyDomainProfile(
+        profileSelect,
+        form._guestosDomainProfiles || {},
+        dnsEl,
+        vlanEl,
+        { overwrite: false }
+      );
     }
     setVal('#domain_ou', payload.domain_ou);
     setVal('#domain_name', payload.domain_name);

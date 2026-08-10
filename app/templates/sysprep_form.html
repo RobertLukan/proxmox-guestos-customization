@@ -130,6 +130,22 @@
 
     <div class="wizard-panel" data-step="1" hidden>
         <h2 class="step-title">Network</h2>
+        <div class="form-check mb-2" id="use_domain_profile_network_group">
+            <input type="checkbox" class="form-check-input" id="use_domain_profile_network">
+            <label class="form-check-label" for="use_domain_profile_network">Use domain profile for DNS/VLAN</label>
+            <div class="form-text">Locks DNS and VLAN to the selected profile. Does not join the domain.</div>
+        </div>
+        <div class="mb-3" id="domain_profile_group" hidden>
+            <label for="domain_profile" class="form-label">Domain Profile</label>
+            <select class="form-select" id="domain_profile" name="domain_profile">
+                <option value="">Select a profile</option>
+                {% for profile, details in domain_profiles.items() %}
+                <option value="{{ profile }}">{{ profile }}</option>
+                {% endfor %}
+            </select>
+            <div class="form-text">Applies this profile’s DNS and VLAN. Uncheck above to edit those fields manually.</div>
+            <div class="invalid-feedback"></div>
+        </div>
         <div class="mb-3">
             <label for="bridge" class="form-label">Bridge</label>
             <select name="bridge" id="bridge" class="form-select" data-required="true">
@@ -184,22 +200,6 @@
             <label for="dns_servers" class="form-label">DNS Servers (comma-separated)</label>
             <input type="text" name="dns_servers" id="dns_servers" class="form-control" data-validate="dns_list"
                    placeholder="Optional under DHCP; recommended when joining a domain">
-            <div class="invalid-feedback"></div>
-        </div>
-        <div class="form-check mb-2" id="use_domain_profile_network_group">
-            <input type="checkbox" class="form-check-input" id="use_domain_profile_network">
-            <label class="form-check-label" for="use_domain_profile_network">Use domain profile for DNS/VLAN</label>
-            <div class="form-text">Prepopulates DNS and VLAN only. Does not join the domain.</div>
-        </div>
-        <div class="mb-3" id="domain_profile_group" hidden>
-            <label for="domain_profile" class="form-label">Domain Profile</label>
-            <select class="form-select" id="domain_profile" name="domain_profile">
-                <option value="">Select a profile</option>
-                {% for profile, details in domain_profiles.items() %}
-                <option value="{{ profile }}">{{ profile }}</option>
-                {% endfor %}
-            </select>
-            <div class="form-text">Fills blank DNS and VLAN from the profile. You can edit those fields afterward.</div>
             <div class="invalid-feedback"></div>
         </div>
         <div class="form-check mb-3" id="enable_ipv6_group">

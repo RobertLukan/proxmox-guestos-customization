@@ -166,7 +166,7 @@ def test_sysprep_form_wizard_includes_csrf_and_payload_fields(client, monkeypatc
     assert b'id="use_domain_profile_network"' in html
     assert b'id="join_domain_checkbox"' in html
     assert b'id="use_domain_profile_credentials"' in html
-    assert b'Prepopulates DNS and VLAN only' in html
+    assert b'Locks DNS and VLAN to the selected profile' in html
     assert b'js/validate.js' in html
     assert b'js/wizard.js' in html
     assert b'wizard-panel' in html
