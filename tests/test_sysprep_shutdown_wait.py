@@ -1,4 +1,6 @@
-"""Tests for post-sysprep shutdown / reboot detection."""
+"""Tests for post-sysprep shutdown / reboot detection and Panther log probe."""
+
+import pytest
 
 import app.celery_app as ca
 import app.sysprep_power as sp
@@ -58,7 +60,7 @@ def test_wait_returns_stopped(monkeypatch):
     monkeypatch.setattr(sp, '_get_vm_node', lambda vmid: 'node1')
     monkeypatch.setattr(sp.time, 'sleep', lambda _s: None)
 
-    assert ca._wait_for_sysprep_shutdown(125, timeout=30, poll=1) == 'stopped'
+    assert ca._wait_for_sysprep_shutdown(125, timeout=30, poll=1, log_probe_every=0) == 'stopped'
 
 
 def test_wait_returns_running_after_missed_stop(monkeypatch):
@@ -85,7 +87,7 @@ def test_wait_returns_running_after_missed_stop(monkeypatch):
     # agent_down_for=0 makes the sustained-outage flag trip as soon as agent drops;
     # the next poll with agent up returns 'running'.
     outcome = ca._wait_for_sysprep_shutdown(
-        125, timeout=60, poll=1, agent_down_for=0,
+        125, timeout=60, poll=1, agent_down_for=0, log_probe_every=0,
     )
     assert outcome == 'running'
 
@@ -95,6 +97,7 @@ def test_wait_timeout_when_never_stops(monkeypatch):
     monkeypatch.setattr(sp, 'get_proxmox_api', lambda: fake)
     monkeypatch.setattr(sp, '_get_vm_node', lambda vmid: 'node1')
     monkeypatch.setattr(sp.time, 'sleep', lambda _s: None)
+    monkeypatch.setattr(sp, 'probe_sysprep_panther_failure', lambda _vmid: None)
 
     # Freeze deadline by making time.time advance past timeout quickly.
     start = {'t': 1000.0}
@@ -105,7 +108,7 @@ def test_wait_timeout_when_never_stops(monkeypatch):
 
     monkeypatch.setattr(sp.time, 'time', _time)
 
-    assert ca._wait_for_sysprep_shutdown(125, timeout=30, poll=1) is None
+    assert ca._wait_for_sysprep_shutdown(125, timeout=30, poll=1, log_probe_every=0) is None
 
 
 def test_wait_for_vm_stopped_ignores_reboot_path(monkeypatch):
@@ -131,5 +134,71 @@ def test_wait_for_vm_stopped_ignores_reboot_path(monkeypatch):
     monkeypatch.setattr(sp, '_get_vm_node', lambda vmid: 'node1')
     monkeypatch.setattr(sp.time, 'sleep', _sleep)
     monkeypatch.setattr(sp.time, 'time', _time)
+    monkeypatch.setattr(sp, 'probe_sysprep_panther_failure', lambda _vmid: None)
 
     assert ca._wait_for_vm_stopped(125, timeout=30) is False
+
+
+_COPILOT_SETUPACT = """
+Info  [0x0f0080] SYSPRP ActionPlatform::LaunchModule: Executing method 'SysprepGeneralizeValidate' from C:\\Windows\\System32\\AppxSysprep.dll
+Error [0x0f0082] SYSPRP ActionPlatform::LaunchModule: Failure occurred while executing 'SysprepGeneralizeValidate' from C:\\Windows\\System32\\AppxSysprep.dll; dwRet = 0x80073cf2
+Error               Package Microsoft.Copilot_... is installed for a user, but not provisioned for all users. This package will not function properly in the sysprep image.
+Error               Failed to remove apps for the current user
+Error               Exit code of RemoveAllApps thread was 0x80073cf2.
+Error [0x0f0070] SYSPRP runDllGetErrorString: Failed to get error string
+Error in validating the actions from actionFiles\\Generalize.xml
+"""
+
+
+def test_match_sysprep_failure_copilot():
+    hit = sp._match_sysprep_failure(_COPILOT_SETUPACT)
+    assert hit is not None
+    line, _pat = hit
+    assert (
+        'sysprep image' in line.lower()
+        or 'RemoveAllApps' in line
+        or 'SysprepGeneralizeValidate' in line
+        or 'validating the actions' in line.lower()
+    )
+
+
+def test_match_sysprep_failure_clean_log():
+    assert sp._match_sysprep_failure('Info SYSPRP starting generalize\nInfo OK') is None
+
+
+def test_probe_sysprep_panther_failure_from_setupact(monkeypatch):
+    def _tail(vmid, path, lines=80):
+        if 'setuperr' in path.lower():
+            return ''
+        return _COPILOT_SETUPACT
+
+    monkeypatch.setattr(sp, '_read_guest_log_tail', _tail)
+    msg = sp.probe_sysprep_panther_failure(125)
+    assert msg
+    assert 'Sysprep failed in guest' in msg
+    assert 'setupact.log' in msg
+
+
+def test_wait_raises_on_panther_failure(monkeypatch):
+    fake = _FakeProxmox()
+    monkeypatch.setattr(sp, 'get_proxmox_api', lambda: fake)
+    monkeypatch.setattr(sp, '_get_vm_node', lambda vmid: 'node1')
+    monkeypatch.setattr(sp.time, 'sleep', lambda _s: None)
+    monkeypatch.setattr(
+        sp,
+        'probe_sysprep_panther_failure',
+        lambda _vmid: 'Sysprep failed in guest (setupact.log): Copilot package',
+    )
+
+    start = {'t': 1000.0}
+
+    def _time():
+        # Stay under timeout for a few iterations so probe can run.
+        start['t'] += 1
+        return start['t']
+
+    monkeypatch.setattr(sp.time, 'time', _time)
+
+    with pytest.raises(sp.SysprepGuestFailed) as ei:
+        ca._wait_for_sysprep_shutdown(125, timeout=60, poll=1, log_probe_every=1)
+    assert 'Copilot' in str(ei.value)

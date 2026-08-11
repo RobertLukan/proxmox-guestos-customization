@@ -10,8 +10,9 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 |---------|--------------|--------------|
 | Task `FAILURE` early (“Invalid sysprep input”) | Bad hostname/IP/domain/`manage_disks` | Task message; Server name/tag for disks |
 | Stuck ~60–85% “Waiting for QEMU Guest Agent” | Guest agent / first-boot loop | Console on clone; QGA package; template health |
-| Fail writing unattend / setup before Sysprep | QGA `file-write` ACL / agent overload | Worker log: `agent file-write` / Permission denied — see [QGA file writes](#qga-file-writes) |
 | Stuck ~88–92% after Sysprep | Shutdown wait missed / hung generalize | Console; agent bounce; orphaned clone VMID in task |
+| Task `FAILURE` `sysprep_guest_failed` | Sysprep validate failed in guest (AppX/Copilot/unattend) | Task message includes Panther log excerpt; fix template AppX then re-clone |
+| Fail writing unattend / setup before Sysprep | QGA `file-write` ACL / agent overload | Worker log: `agent file-write` / Permission denied — see [QGA file writes](#qga-file-writes) |
 | `verification failed` / `setup.done missing` | FirstLogon `setup.ps1` never finished | Guest `C:\ProgramData\GuestOS\` markers + transcript; on **Eval** Server check InstallPid / GVLK regression below |
 | Stuck ~98% on `pending reboot` | Pagefile/domain reboot never finalized `setup.done` | AutoLogon still enabled? `setup.pending_reboot` present; FirstLogon re-ran? |
 | Stuck ~98% waiting for `setup.ps1` after Sysprep | OOBE never reached FirstLogon (often Eval+GVLK) | Console: product-key / InstallPid `0xC004F015` → see Evaluation vs GVLK |

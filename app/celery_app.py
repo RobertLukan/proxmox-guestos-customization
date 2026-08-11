@@ -42,6 +42,7 @@ from app.sysprep_power import (
     _wait_for_vm_stopped,
     _wait_for_sysprep_shutdown,
     _complete_sysprep_power_cycle,
+    SysprepGuestFailed,
 )
 import base64
 import json
@@ -63,6 +64,7 @@ __all__ = [
     '_wait_for_sysprep_shutdown',
     '_wait_for_vm_stopped',
     '_guest_agent_responsive',
+    'SysprepGuestFailed',
     '_validate_sysprep_network',
     '_prepare_domain_join',
     '_render_sysprep_files',
@@ -342,9 +344,21 @@ def sysprep_workflow_task(self, task_id, data):
                 )
                 run_shutdown_command_in_guest(new_vmid, sysprep_command)
 
-                if not _complete_sysprep_power_cycle(
-                    task_id, new_vmid, progress_base=92, agent_stable_for=agent_stable
-                ):
+                try:
+                    power_ok = _complete_sysprep_power_cycle(
+                        task_id, new_vmid, progress_base=92, agent_stable_for=agent_stable
+                    )
+                except SysprepGuestFailed as e:
+                    _fail_sysprep_task(
+                        task_id,
+                        str(e),
+                        vmid=new_vmid,
+                        hostname=hostname,
+                        error_code='sysprep_guest_failed',
+                        data=data,
+                    )
+                    return
+                if not power_ok:
                     _fail_sysprep_task(
                         task_id,
                         "Timed out waiting for the VM to shut down (or reboot) after Sysprep.",
