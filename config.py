@@ -182,6 +182,28 @@ try:
 except ValueError:
     SERVER_MAX_DISK_GB = 2048
 try:
+    LINUX_MAX_CORES = max(1, int(os.environ.get('LINUX_MAX_CORES') or '16'))
+except ValueError:
+    LINUX_MAX_CORES = 16
+try:
+    LINUX_MAX_RAM_MB = max(512, int(os.environ.get('LINUX_MAX_RAM_MB') or '65536'))
+except ValueError:
+    LINUX_MAX_RAM_MB = 65536
+try:
+    LINUX_MAX_DISK_GB = max(1, int(os.environ.get('LINUX_MAX_DISK_GB') or '2048'))
+except ValueError:
+    LINUX_MAX_DISK_GB = 2048
+# Optional snippets storage id for advanced Linux cicustom (e.g. local).
+GUESTOS_SNIPPETS_STORAGE = (os.environ.get('GUESTOS_SNIPPETS_STORAGE') or '').strip()
+try:
+    LINUX_BOOT_SETTLE_SECONDS = max(0, int(os.environ.get('LINUX_BOOT_SETTLE_SECONDS') or '45'))
+except ValueError:
+    LINUX_BOOT_SETTLE_SECONDS = 45
+try:
+    LINUX_AGENT_STABLE_SECONDS = max(0, int(os.environ.get('LINUX_AGENT_STABLE_SECONDS') or '20'))
+except ValueError:
+    LINUX_AGENT_STABLE_SECONDS = 20
+try:
     STORAGE_WARN_PCT = float(os.environ.get('STORAGE_WARN_PCT') or '65')
 except ValueError:
     STORAGE_WARN_PCT = 65.0

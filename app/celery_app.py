@@ -1,4 +1,6 @@
-"""Celery tasks for GuestOS Sysprep workflows."""
+"""Celery tasks for GuestOS Sysprep and Linux cloud-init workflows."""
+import logging
+
 from app import celery, app, db
 from app.models import Task, _utcnow
 from app.proxmox import (
@@ -11,12 +13,18 @@ from app.proxmox import (
     get_vm_nic_macs,
     use_pve_override,
     require_windows_guest,
+    require_linux_guest,
     is_windows_server_template,
     reconcile_vm_disks,
+    apply_cloudinit_config,
+    freeze_linux_cloudinit,
     set_lifecycle_tag,
     mark_vm_customization_failed,
 )
 from app.disks import prepare_disk_plan
+from app.linux_cloudinit import prepare_linux_payload, clone_nic_list
+from app.linux_disks import reconcile_linux_vm_disks
+from app.linux_verify import verify_linux_result
 from app.remotes import attach_pve_override
 from app.task_secrets import load_task_secrets, scrub_workflow_secrets
 from app.util import as_bool as _as_bool
@@ -54,6 +62,8 @@ __all__ = [
     'update_task_progress',
     'sysprep_workflow_task',
     'sysprep_existing_vm_task',
+    'linux_cloudinit_workflow_task',
+    'linux_verify_task',
     '_verify_sysprep_result',
     '_verify_disks',
     '_parse_domain_membership',
@@ -71,6 +81,7 @@ __all__ = [
     '_write_sysprep_files',
     '_ensure_server_product_key',
     '_sysprep_wait_timings',
+    '_linux_wait_timings',
     'sysprep_verify_task',
     '_fail_sysprep_task',
     '_abandon_cancelled_clone',
@@ -104,6 +115,31 @@ def _sysprep_wait_timings(data=None):
         agent_stable = int(agent) if agent is not None else _AGENT_STABLE_DEFAULT
     except (TypeError, ValueError):
         agent_stable = _AGENT_STABLE_DEFAULT
+    return max(0, boot_settle), max(0, agent_stable)
+
+
+_LINUX_BOOT_SETTLE_DEFAULT = 45
+_LINUX_AGENT_STABLE_DEFAULT = 20
+_LINUX_BOOT_SETTLE_FAST = 5
+_LINUX_AGENT_STABLE_FAST = 5
+
+
+def _linux_wait_timings(data=None):
+    """Return (boot_settle_seconds, agent_stable_seconds) for cloud-init clones."""
+    data = data or {}
+    allow_fast = bool(app.config.get('TESTING')) or bool(app.config.get('ALLOW_FAST_WAITS'))
+    if _as_bool(data.get('fast_waits')) and allow_fast:
+        return _LINUX_BOOT_SETTLE_FAST, _LINUX_AGENT_STABLE_FAST
+    boot = app.config.get('LINUX_BOOT_SETTLE_SECONDS')
+    agent = app.config.get('LINUX_AGENT_STABLE_SECONDS')
+    try:
+        boot_settle = int(boot) if boot is not None else _LINUX_BOOT_SETTLE_DEFAULT
+    except (TypeError, ValueError):
+        boot_settle = _LINUX_BOOT_SETTLE_DEFAULT
+    try:
+        agent_stable = int(agent) if agent is not None else _LINUX_AGENT_STABLE_DEFAULT
+    except (TypeError, ValueError):
+        agent_stable = _LINUX_AGENT_STABLE_DEFAULT
     return max(0, boot_settle), max(0, agent_stable)
 
 
@@ -222,6 +258,8 @@ def sysprep_workflow_task(self, task_id, data):
                     require_windows_guest(data['template_vmid'])
                     _validate_sysprep_network(data)
                     _prepare_domain_join(data)
+                    from app.domain_preflight import check_domain_join_preflight
+                    check_domain_join_preflight(data)
                     if _as_bool(data.get('manage_disks')):
                         if not is_windows_server_template(data['template_vmid']):
                             raise ValidationError(
@@ -342,7 +380,15 @@ def sysprep_workflow_task(self, task_id, data):
                     r'/generalize /oobe /shutdown '
                     r'/unattend:C:\Windows\System32\Sysprep\unattended.xml"'
                 )
+                logging.info(
+                    'VM %s [sysprep]: starting sysprep.exe /generalize /oobe /shutdown',
+                    new_vmid,
+                )
                 run_shutdown_command_in_guest(new_vmid, sysprep_command)
+                logging.info(
+                    'VM %s [sysprep]: sysprep command accepted by guest agent',
+                    new_vmid,
+                )
 
                 try:
                     power_ok = _complete_sysprep_power_cycle(
@@ -492,3 +538,221 @@ def sysprep_existing_vm_task(self, task_id, data):
             )
             task.error_code = 'inplace_disabled'
             db.session.commit()
+
+
+@celery.task(bind=True)
+def linux_cloudinit_workflow_task(self, task_id, data):
+    """Clone a Linux template, apply Proxmox cloud-init, verify via QGA."""
+    with app.app_context():
+        new_vmid = None
+        data = dict(data or {})
+        data['os_family'] = 'linux'
+        hostname = data.get('hostname')
+        try:
+            load_task_secrets(task_id, data)
+            try:
+                pve_override = attach_pve_override(data)
+            except ValueError as e:
+                _fail_sysprep_task(task_id, str(e), hostname=hostname, error_code='remote', data=data)
+                return
+
+            with use_pve_override(pve_override):
+                try:
+                    require_linux_guest(data['template_vmid'])
+                    prepare_linux_payload(data)
+                    from app.provision_limits import validate_resource_caps, check_storage_for_template
+                    validate_resource_caps(data, 'linux')
+                    check_storage_for_template(data['template_vmid'])
+                except ValidationError as e:
+                    _fail_sysprep_task(
+                        task_id,
+                        f"Invalid Linux customize input: {e}",
+                        hostname=hostname,
+                        error_code='validation',
+                        data=data,
+                    )
+                    return
+                except ValueError as e:
+                    _fail_sysprep_task(
+                        task_id, str(e), hostname=hostname, error_code='validation', data=data
+                    )
+                    return
+
+                if _task_cancelled(task_id):
+                    return
+                update_task_progress(task_id, 10, "Cloning Linux VM...")
+                clone_result = clone_vm(
+                    data['template_vmid'],
+                    data['hostname'],
+                    data['cores'],
+                    data['ram'],
+                    data['bridge'],
+                    data.get('vlan'),
+                    nics=clone_nic_list(data),
+                    os_family='linux',
+                )
+                new_vmid = clone_result['vmid']
+                update_task_progress(
+                    task_id,
+                    30,
+                    f"VM cloned successfully. New VMID: {new_vmid}",
+                    result_vmid=new_vmid,
+                )
+
+                if data.get('manage_disks') and data.get('disks'):
+                    set_lifecycle_tag(new_vmid, 'lifecycle-customizing')
+                    update_task_progress(task_id, 40, "Reconciling Linux disks on Proxmox...")
+                    guest_plan = reconcile_linux_vm_disks(new_vmid, data['disks'])
+                    data['disk_guest_plan'] = guest_plan
+                else:
+                    data['disk_guest_plan'] = []
+
+                if _task_cancelled(task_id):
+                    _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
+                    return
+
+                set_lifecycle_tag(new_vmid, 'lifecycle-customizing')
+                update_task_progress(task_id, 50, "Applying cloud-init network and user...")
+                apply_cloudinit_config(
+                    new_vmid,
+                    nics=data.get('nics'),
+                    nameservers=data.get('dns_list') or data.get('dns_servers'),
+                    searchdomain=data.get('searchdomain'),
+                    ciuser=data.get('ciuser'),
+                    sshkeys=data.get('sshkeys'),
+                    cipassword=data.get('cipassword'),
+                )
+
+                if _task_cancelled(task_id):
+                    _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
+                    return
+
+                set_lifecycle_tag(new_vmid, 'lifecycle-booting')
+                update_task_progress(task_id, 60, "Powering on VM...")
+                power_on_vm(new_vmid)
+                boot_settle, agent_stable = _linux_wait_timings(data)
+                if boot_settle:
+                    update_task_progress(
+                        task_id,
+                        65,
+                        f"Waiting {boot_settle}s for cloud-init boot...",
+                    )
+                    time.sleep(boot_settle)
+
+                if _task_cancelled(task_id):
+                    _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
+                    return
+
+                update_task_progress(task_id, 75, "Waiting for QEMU Guest Agent...")
+                wait_for_guest_agent(
+                    new_vmid,
+                    timeout=900,
+                    stable_for=agent_stable,
+                    on_progress=lambda msg: update_task_progress(task_id, 75, msg),
+                )
+                update_task_progress(task_id, 85, "QEMU Guest Agent is ready.")
+
+                if _task_cancelled(task_id):
+                    _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
+                    return
+
+                set_lifecycle_tag(new_vmid, 'lifecycle-verifying')
+                update_task_progress(task_id, 90, "Queued for Linux verification...")
+                scrub_workflow_secrets(data)
+                linux_verify_task.apply_async(
+                    args=(task_id, new_vmid, data),
+                    queue='verify_queue',
+                )
+                return
+
+        except Exception as e:
+            app.logger.error(f"Linux task {task_id} failed: {e}", exc_info=True)
+            _fail_sysprep_task(
+                task_id,
+                f"An error occurred: {e}",
+                vmid=new_vmid,
+                hostname=hostname,
+                error_code='exception',
+                data=data,
+            )
+
+
+@celery.task(bind=True)
+def linux_verify_task(self, task_id, vmid, data):
+    with app.app_context():
+        data = dict(data or {})
+        hostname = data.get('hostname')
+        if _task_cancelled(task_id):
+            _abandon_cancelled_clone(task_id, vmid=vmid, hostname=hostname, data=data)
+            return
+        try:
+            try:
+                pve_override = attach_pve_override(data)
+            except ValueError as e:
+                _fail_sysprep_task(
+                    task_id, str(e), vmid=vmid, hostname=hostname, error_code='remote', data=data
+                )
+                return
+
+            with use_pve_override(pve_override):
+                set_lifecycle_tag(vmid, 'lifecycle-verifying')
+                update_task_progress(task_id, 95, "Verifying Linux hostname and network...")
+                verify_summary, verify_ok = verify_linux_result(
+                    vmid,
+                    data,
+                    timeout=600,
+                    on_progress=lambda msg: update_task_progress(task_id, 95, msg),
+                )
+
+                task = Task.query.get(task_id)
+                if not task:
+                    return
+                if task.status == 'CANCELLED':
+                    _abandon_cancelled_clone(task_id, vmid=vmid, hostname=hostname, data=data)
+                    return
+                if verify_ok:
+                    extra = ''
+                    if _as_bool(data.get('detach_cloudinit_after_ready')):
+                        update_task_progress(
+                            task_id,
+                            98,
+                            "Powering off, detaching Cloud-Init, powering on...",
+                        )
+                        try:
+                            result = freeze_linux_cloudinit(vmid, clear_ci_fields=True)
+                            drives = ','.join(result.get('detached_drives') or []) or 'none'
+                            extra = f'; froze cloud-init ({drives})'
+                        except Exception as e:  # noqa: BLE001
+                            app.logger.warning(
+                                "Cloud-init freeze failed for VM %s: %s",
+                                vmid, type(e).__name__,
+                            )
+                            extra = f'; cloud-init freeze failed ({type(e).__name__})'
+                    set_lifecycle_tag(vmid, 'lifecycle-ready')
+                    task.status = 'SUCCESS'
+                    task.progress = 100
+                    task.message = (
+                        f"Linux cloud-init workflow for {data.get('hostname')} completed. "
+                        f"Verify: {verify_summary}{extra}"
+                    )
+                    db.session.commit()
+                else:
+                    _fail_sysprep_task(
+                        task_id,
+                        f"Linux customize finished but verification failed for "
+                        f"{data.get('hostname')}: {verify_summary}",
+                        vmid=vmid,
+                        hostname=hostname,
+                        error_code='verify',
+                        data=data,
+                    )
+        except Exception as e:
+            app.logger.error(f"Linux verify task {task_id} failed: {e}", exc_info=True)
+            _fail_sysprep_task(
+                task_id,
+                f"An error occurred during Linux verify phase: {e}",
+                vmid=vmid,
+                hostname=hostname,
+                error_code='verify_exception',
+                data=data,
+            )

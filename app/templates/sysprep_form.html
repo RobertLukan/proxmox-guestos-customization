@@ -76,9 +76,12 @@
                 <div class="invalid-feedback"></div>
             </div>
             <div class="mb-3" id="bulk_dns_group">
-                <label for="bulk_dns_servers" class="form-label">DNS Servers (comma-separated)</label>
-                <input type="text" id="bulk_dns_servers" class="form-control" data-validate="dns_list" placeholder="10.0.0.10,10.0.0.11">
-                <div class="form-text">Use this in bulk mode instead of Domain Profile DNS fill.</div>
+                <label for="bulk_dns_servers" class="form-label">DNS Servers (optional)</label>
+                <input type="text" id="bulk_dns_servers" class="form-control" data-validate="dns_list" placeholder="Leave blank for DHCP DNS">
+                <div class="form-text">
+                    Optional. Leave blank to use DHCP-provided DNS; set explicitly for AD/DC override
+                    (VLAN remains per CSV row: <code>hostname[,vlan]</code> or <code>hostname,ip/prefix[,vlan]</code>).
+                </div>
                 <div class="invalid-feedback"></div>
             </div>
         </div>
@@ -252,7 +255,22 @@
             <div class="form-check mb-3">
                 <input type="checkbox" class="form-check-input" id="use_domain_profile_credentials" checked>
                 <label class="form-check-label" for="use_domain_profile_credentials">Use Domain Profile Credentials</label>
-                <div class="form-text">Uses the same profile chosen under Network for DNS/VLAN. Credentials stay on the server.</div>
+                <div class="form-text" id="domain_profile_cred_help">
+                    Uses the same profile chosen under Network for DNS/VLAN. Credentials stay on the server.
+                </div>
+            </div>
+            <div class="mb-3" id="domain_profile_join_group" hidden>
+                <label for="domain_profile_join" class="form-label">Domain Profile</label>
+                <select class="form-select" id="domain_profile_join">
+                    <option value="">Select a profile</option>
+                    {% for profile, details in domain_profiles.items() %}
+                    <option value="{{ profile }}">{{ profile }}</option>
+                    {% endfor %}
+                </select>
+                <div class="form-text">
+                    Credentials only. DNS is optional on Basics (DHCP when blank); VLAN comes from each CSV row.
+                </div>
+                <div class="invalid-feedback"></div>
             </div>
             <div id="domain_credentials_fields" hidden>
                 <div class="mb-3">
@@ -691,6 +709,28 @@
             bulkDnsGroup.hidden = !isBulk;
             bulkDnsGroup.style.display = isBulk ? '' : 'none';
         }
+        var useNetGroup = form.querySelector('#use_domain_profile_network_group');
+        var useNetCb = form.querySelector('#use_domain_profile_network');
+        if (useNetGroup) {
+            useNetGroup.hidden = isBulk;
+            useNetGroup.style.display = isBulk ? 'none' : '';
+        }
+        if (isBulk && useNetCb && useNetCb.checked) {
+            useNetCb.checked = false;
+            useNetCb.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        // Network profile select is only for single-customize DNS/VLAN shortcut;
+        // bulk uses Domain-step #domain_profile_join for credentials.
+        var netProfileGroup = form.querySelector('#domain_profile_group');
+        if (isBulk && netProfileGroup) {
+            netProfileGroup.hidden = true;
+            netProfileGroup.style.display = 'none';
+        } else if (!isBulk && useNetCb) {
+            useNetCb.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        if (domainJoinApi && domainJoinApi.applyCreds) {
+            domainJoinApi.applyCreds();
+        }
         if (bulkGateway) {
             if (isBulkStatic) bulkGateway.setAttribute('data-required', 'true');
             else bulkGateway.removeAttribute('data-required');
@@ -735,7 +775,7 @@
 
     GuestOSForms.wireNetworkMode(form);
     GuestOSForms.wireDomainProfileNetwork(form, domainProfiles);
-    GuestOSForms.wireDomainJoin(form);
+    var domainJoinApi = GuestOSForms.wireDomainJoin(form);
     GuestOSForms.wireManageDisks(form);
     GuestOSForms.wireIpv6(form);
     GuestOSForms.wireApplySpec(form);

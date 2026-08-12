@@ -1,0 +1,313 @@
+{% extends "base.html" %}
+{% block title %}New Linux VM (cloud-init){% endblock %}
+{% block content %}
+<h1>New Linux VM with cloud-init</h1>
+<p class="page-lead">
+    Clone from template {{ template_vmid }} and apply Proxmox cloud-init
+    (hostname, network, optional SSH user). Guest agent must be installed on the template.
+</p>
+<div id="form-alert" class="alert alert-danger" role="alert" hidden></div>
+
+<form id="linux-form" novalidate>
+    <input type="hidden" name="template_vmid" value="{{ template_vmid }}">
+    {% if remote_id %}
+    <input type="hidden" name="remote_id" id="remote_id" value="{{ remote_id }}">
+    {% endif %}
+
+    <div class="mb-3">
+        <label for="hostname" class="form-label">Hostname</label>
+        <input type="text" name="hostname" id="hostname" class="form-control" maxlength="63" required>
+        <div class="form-text">1–63 chars, letters/digits/hyphen (RFC 1123 label).</div>
+    </div>
+    <div class="row">
+        <div class="col-md-6 mb-3">
+            <label for="cores" class="form-label">vCPUs</label>
+            <input type="number" name="cores" id="cores" class="form-control" min="1" max="16" value="2" required>
+        </div>
+        <div class="col-md-6 mb-3">
+            <label for="ram_gb" class="form-label">RAM (GB)</label>
+            <input type="number" name="ram_gb" id="ram_gb" class="form-control" min="1" max="64" value="4" required>
+        </div>
+    </div>
+
+    <h2 class="h5 mt-4">Network (NIC 0)</h2>
+    <div class="mb-3">
+        <label for="bridge" class="form-label">Bridge</label>
+        <select name="bridge" id="bridge" class="form-select">
+            {% for b in bridges %}
+            <option value="{{ b.iface }}" {% if b.iface == primary_bridge %}selected{% endif %}>{{ b.iface }}</option>
+            {% else %}
+            <option value="{{ primary_bridge }}">{{ primary_bridge }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="mb-3">
+        <label for="vlan" class="form-label">VLAN (optional)</label>
+        <input type="number" name="vlan" id="vlan" class="form-control" min="1" max="4094">
+    </div>
+    <div class="mb-3">
+        <label for="network_mode" class="form-label">IPv4 mode</label>
+        <select name="network_mode" id="network_mode" class="form-select">
+            <option value="static" selected>Static</option>
+            <option value="dhcp">DHCP</option>
+        </select>
+        <div class="form-text">Lab tip: use static if DHCP is unreliable on the guest bridge.</div>
+    </div>
+    <div id="static-fields">
+        <div class="mb-3">
+            <label for="ip_address" class="form-label">IPv4 address</label>
+            <input type="text" name="ip_address" id="ip_address" class="form-control" placeholder="192.168.123.50">
+        </div>
+        <div class="mb-3">
+            <label for="netmask" class="form-label">Prefix length</label>
+            <input type="number" name="netmask" id="netmask" class="form-control" min="0" max="32" value="24">
+        </div>
+        <div class="mb-3">
+            <label for="gateway" class="form-label">Gateway</label>
+            <input type="text" name="gateway" id="gateway" class="form-control" placeholder="192.168.123.1">
+        </div>
+    </div>
+    <div class="mb-3">
+        <label for="dns_servers" class="form-label">DNS servers (comma-separated)</label>
+        <input type="text" name="dns_servers" id="dns_servers" class="form-control" placeholder="192.168.123.191,8.8.8.8">
+    </div>
+    <div class="mb-3">
+        <label for="searchdomain" class="form-label">Search domain (optional)</label>
+        <input type="text" name="searchdomain" id="searchdomain" class="form-control">
+    </div>
+
+    <div class="form-check mb-3" id="enable_ipv6_group">
+        <input type="checkbox" class="form-check-input" id="enable_ipv6" name="enable_ipv6" value="true">
+        <label class="form-check-label" for="enable_ipv6">Enable IPv6</label>
+        <div class="form-text">Optional. When unchecked, only IPv4 is configured on NIC 0.</div>
+    </div>
+    <div id="ipv6_fields" hidden>
+        <div class="mb-3">
+            <label for="ipv6_mode" class="form-label">IPv6 mode</label>
+            <select name="ipv6_mode" id="ipv6_mode" class="form-select">
+                <option value="static" selected>Static</option>
+                <option value="dhcp">DHCPv6</option>
+            </select>
+        </div>
+        <div id="ipv6_static_fields">
+            <div class="mb-3">
+                <label for="ipv6_address" class="form-label">IPv6 address</label>
+                <input type="text" name="ipv6_address" id="ipv6_address" class="form-control" placeholder="fd00::10">
+            </div>
+            <div class="mb-3">
+                <label for="ipv6_prefix" class="form-label">IPv6 prefix length</label>
+                <input type="number" name="ipv6_prefix" id="ipv6_prefix" class="form-control" value="64" min="1" max="128">
+            </div>
+            <div class="mb-3">
+                <label for="ipv6_gateway" class="form-label">IPv6 gateway (optional)</label>
+                <input type="text" name="ipv6_gateway" id="ipv6_gateway" class="form-control" placeholder="fd00::1">
+            </div>
+        </div>
+    </div>
+
+    <div id="extra_nics_section" class="mt-4">
+        <h3 class="h6">Additional NICs</h3>
+        <p class="form-text">Up to 4 NICs total. Extra NICs use the same bridge list as NIC 0.</p>
+        <div id="extra_nics_list"></div>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="add_nic_btn">Add NIC</button>
+    </div>
+
+    <h2 class="h5 mt-4">Cloud-init user</h2>
+    <div class="mb-3">
+        <label for="ciuser" class="form-label">Username</label>
+        <input type="text" name="ciuser" id="ciuser" class="form-control" value="ubuntu" placeholder="ubuntu">
+    </div>
+    <div class="mb-3">
+        <label for="cipassword" class="form-label">Password (optional)</label>
+        <input type="password" name="cipassword" id="cipassword" class="form-control" autocomplete="new-password">
+        <div class="form-text">Prefer SSH keys when possible. Password is stashed off the Celery payload.</div>
+    </div>
+    <div class="mb-3">
+        <label for="sshkeys" class="form-label">SSH public key(s)</label>
+        <textarea name="sshkeys" id="sshkeys" class="form-control" rows="3" placeholder="ssh-ed25519 AAAA… comment"></textarea>
+    </div>
+
+    <h2 class="h5 mt-4">Disk</h2>
+    <div class="mb-3">
+        <label for="os_disk_gb" class="form-label">OS disk size (GB, optional)</label>
+        <input type="number" name="os_disk_gb" id="os_disk_gb" class="form-control" min="4" max="2048" placeholder="Leave blank to keep template size">
+        <div class="form-text">Grows the boot disk before first boot. Cloud-init growpart expands <code>/</code> inside the guest.</div>
+    </div>
+
+    <h2 class="h5 mt-4">After customize</h2>
+    <div class="form-check mb-3">
+        <input type="checkbox" class="form-check-input" id="detach_cloudinit_after_ready" name="detach_cloudinit_after_ready">
+        <label class="form-check-label" for="detach_cloudinit_after_ready">
+            Detach Cloud-Init drive after success (freeze guest config)
+        </label>
+        <div class="form-text">
+            After verify: power off → remove Cloud-Init CDROM → power on.
+            Hostname/network/user stay on disk; Proxmox will not re-apply cloud-init.
+            Leave unchecked for templates or if you may re-customize from GuestOS.
+        </div>
+    </div>
+
+    <div class="d-grid gap-2 mt-4">
+        <button type="submit" class="btn btn-primary" id="submit-btn">Clone + cloud-init customize</button>
+        <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Back</a>
+    </div>
+</form>
+
+<script src="{{ url_for('static', filename='js/forms.js') }}"></script>
+<script>
+(function () {
+    const form = document.getElementById('linux-form');
+    const alertEl = document.getElementById('form-alert');
+    const modeEl = document.getElementById('network_mode');
+    const staticFields = document.getElementById('static-fields');
+    const submitBtn = document.getElementById('submit-btn');
+    const ipv6ModeEl = document.getElementById('ipv6_mode');
+    const ipv6Static = document.getElementById('ipv6_static_fields');
+    const MAX_NICS = 4;
+
+    GuestOSForms.wireIpv6(form);
+    GuestOSForms.wireExtraNics(form);
+
+    function toggleStatic() {
+        staticFields.hidden = modeEl.value === 'dhcp';
+    }
+    function toggleIpv6Static() {
+        if (!ipv6ModeEl || !ipv6Static) return;
+        ipv6Static.hidden = ipv6ModeEl.value === 'dhcp';
+    }
+    modeEl.addEventListener('change', toggleStatic);
+    if (ipv6ModeEl) ipv6ModeEl.addEventListener('change', toggleIpv6Static);
+    toggleStatic();
+    toggleIpv6Static();
+
+    // Cap at 4 NICs total (primary + extras).
+    const addBtn = document.getElementById('add_nic_btn');
+    if (addBtn) {
+        addBtn.addEventListener('click', function () {
+            setTimeout(function () {
+                const extras = form.querySelectorAll('.extra-nic');
+                if (extras.length > MAX_NICS - 1) {
+                    extras[extras.length - 1].remove();
+                    showError('Maximum ' + MAX_NICS + ' NICs.');
+                }
+            }, 0);
+        });
+    }
+
+    function showError(msg) {
+        alertEl.hidden = false;
+        alertEl.textContent = msg || 'Request failed.';
+    }
+
+    function mapExtraNic(raw) {
+        const nic = {
+            bridge: raw.bridge || '',
+            network_mode: raw.network_mode || 'dhcp',
+            enable_ipv6: !!raw.enable_ipv6,
+        };
+        if (raw.vlan) nic.vlan = parseInt(raw.vlan, 10);
+        if (nic.network_mode === 'static') {
+            nic.ip_address = raw.ip_address || '';
+            nic.netmask = parseInt(raw.netmask_cidr || raw.netmask || '24', 10);
+            nic.gateway = raw.gateway || '';
+        }
+        if (nic.enable_ipv6) {
+            nic.ipv6_mode = 'static';
+            nic.ipv6_address = raw.ipv6_address || '';
+            nic.ipv6_prefix = parseInt(raw.ipv6_prefix || '64', 10);
+            nic.ipv6_gateway = raw.ipv6_gateway || '';
+        }
+        return nic;
+    }
+
+    form.addEventListener('submit', async function (ev) {
+        ev.preventDefault();
+        alertEl.hidden = true;
+        submitBtn.disabled = true;
+        const ramGb = parseInt(document.getElementById('ram_gb').value, 10) || 4;
+        const enableIpv6 = document.getElementById('enable_ipv6').checked;
+        const primary = {
+            bridge: document.getElementById('bridge').value,
+            network_mode: modeEl.value,
+            enable_ipv6: enableIpv6,
+        };
+        const vlan = document.getElementById('vlan').value;
+        if (vlan) primary.vlan = parseInt(vlan, 10);
+        if (modeEl.value === 'static') {
+            primary.ip_address = document.getElementById('ip_address').value.trim();
+            primary.netmask = parseInt(document.getElementById('netmask').value, 10);
+            primary.gateway = document.getElementById('gateway').value.trim();
+        }
+        if (enableIpv6) {
+            primary.ipv6_mode = ipv6ModeEl.value || 'static';
+            if (primary.ipv6_mode === 'static') {
+                primary.ipv6_address = document.getElementById('ipv6_address').value.trim();
+                primary.ipv6_prefix = parseInt(document.getElementById('ipv6_prefix').value, 10) || 64;
+                primary.ipv6_gateway = document.getElementById('ipv6_gateway').value.trim();
+            }
+        }
+
+        const mappedExtras = GuestOSForms.collectExtraNics(form).map(mapExtraNic);
+
+        const body = {
+            template_vmid: {{ template_vmid | int }},
+            hostname: document.getElementById('hostname').value.trim(),
+            cores: parseInt(document.getElementById('cores').value, 10),
+            ram: ramGb * 1024,
+            bridge: primary.bridge,
+            network_mode: primary.network_mode,
+            nics: [primary].concat(mappedExtras).slice(0, MAX_NICS),
+            dns_servers: document.getElementById('dns_servers').value.trim(),
+            searchdomain: document.getElementById('searchdomain').value.trim() || null,
+            ciuser: document.getElementById('ciuser').value.trim() || null,
+            cipassword: document.getElementById('cipassword').value || null,
+            sshkeys: document.getElementById('sshkeys').value.trim() || null,
+            manage_disks: false,
+            os_family: 'linux',
+            detach_cloudinit_after_ready: document.getElementById('detach_cloudinit_after_ready').checked,
+        };
+        // Mirror primary onto top-level for verify/ledger (API also does this).
+        if (primary.vlan) body.vlan = primary.vlan;
+        if (primary.network_mode === 'static') {
+            body.ip_address = primary.ip_address;
+            body.netmask = primary.netmask;
+            body.gateway = primary.gateway;
+        }
+        if (enableIpv6) {
+            body.enable_ipv6 = true;
+            body.ipv6_mode = primary.ipv6_mode;
+            if (primary.ipv6_mode === 'static') {
+                body.ipv6_address = primary.ipv6_address;
+                body.ipv6_prefix = primary.ipv6_prefix;
+                body.ipv6_gateway = primary.ipv6_gateway;
+            }
+        }
+        const osDisk = document.getElementById('os_disk_gb').value;
+        if (osDisk) body.os_disk_gb = parseInt(osDisk, 10);
+        const remote = document.getElementById('remote_id');
+        if (remote && remote.value) body.remote_id = remote.value;
+
+        try {
+            const resp = await fetch('{{ url_for("start_linux_cloudinit_workflow") }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': '{{ csrf_token() }}',
+                },
+                body: JSON.stringify(body),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                showError(data.error || ('HTTP ' + resp.status));
+                submitBtn.disabled = false;
+                return;
+            }
+            window.location = '{{ url_for("workflow", task_id="") }}' + encodeURIComponent(data.task_id);
+        } catch (e) {
+            showError(String(e));
+            submitBtn.disabled = false;
+        }
+    });
+})();
+</script>
+{% endblock %}

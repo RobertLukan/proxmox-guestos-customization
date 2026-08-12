@@ -106,6 +106,7 @@ def test_index_uses_base_layout_with_csrf_meta(client, monkeypatch):
         'app.routes.get_template_vms',
         lambda: [{'vmid': 100, 'name': 'Win11-Template'}],
     )
+    monkeypatch.setattr('app.routes.get_linux_template_vms', lambda: [])
     _login(client)
     resp = client.get('/')
     assert resp.status_code == 200
@@ -131,6 +132,7 @@ def test_select_template_sysprep_later_redirects_to_sysprep_form(client, monkeyp
         'app.routes.get_template_vms',
         lambda: [{'vmid': 100, 'name': 'Win11-Template'}],
     )
+    monkeypatch.setattr('app.routes.get_linux_template_vms', lambda: [])
     _login(client)
     token = _csrf_token(client.get('/').data)
     resp = client.post('/select', data={
@@ -149,6 +151,7 @@ def test_select_template_rejects_non_sysprep_template(client, monkeypatch):
         'app.routes.get_template_vms',
         lambda: [{'vmid': 100, 'name': 'Win11-Template'}],
     )
+    monkeypatch.setattr('app.routes.get_linux_template_vms', lambda: [])
     def _reject(vmid, **_kw):
         raise ValueError(f'VM {vmid} is not a Windows guest (ostype="l26").')
     monkeypatch.setattr('app.routes.require_sysprep_template', _reject)
@@ -192,6 +195,9 @@ def test_sysprep_form_wizard_includes_csrf_and_payload_fields(client, monkeypatc
     assert b'name="ip_address"' in html
     assert b'name="domain_profile"' in html
     assert b'id="use_domain_profile_network"' in html
+    assert b'id="domain_profile_join"' in html
+    assert b'id="bulk_dns_servers"' in html
+    assert b'Leave blank for DHCP DNS' in html
     assert b'id="join_domain_checkbox"' in html
     assert b'id="use_domain_profile_credentials"' in html
     assert b'Locks DNS and VLAN to the selected profile' in html
@@ -225,6 +231,7 @@ def test_sysprep_existing_form_redirects_non_template(client, monkeypatch):
         'app.routes.get_template_vms',
         lambda: [{'vmid': 100, 'name': 'Win11-Template'}],
     )
+    monkeypatch.setattr('app.routes.get_linux_template_vms', lambda: [])
     _login(client)
     resp = client.get('/sysprep_existing_vm_form/121', follow_redirects=True)
     assert resp.status_code == 200

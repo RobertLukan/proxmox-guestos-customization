@@ -113,7 +113,44 @@ def test_resolve_domain_join_requires_profile_when_using_profile_creds(app):
     assert status == 400
     body = response.get_json()
     assert 'domain_profile' in body.get('errors', {})
-    assert 'Network' in body['errors']['domain_profile']
+    assert 'domain profile' in body['errors']['domain_profile'].lower()
+
+
+def test_resolve_bulk_skips_profile_dns_vlan(app):
+    """Bulk: profile credentials without applying profile DNS/VLAN (DHCP/CSV own network)."""
+    flask_app.config['DOMAIN_PROFILES'] = PROFILES
+    data = {
+        'join_domain': True,
+        'use_domain_profile_credentials': True,
+        'domain_profile': 'Lab',
+        'dns_servers': '',
+        'vlan': '',
+        'domain_ou': '',
+    }
+    ok, err = resolve_domain_join_from_request(data, apply_network=False)
+    assert ok and err is None
+    assert data['domain_name'] == 'lab.example.com'
+    assert data['domain_username'] == 'svc-join@lab.example.com'
+    assert data['domain_password'] == 's3cret!'
+    assert data['dns_servers'] == ''
+    assert data['vlan'] == ''
+    assert data['domain_ou'] == 'OU=Servers,DC=lab,DC=example,DC=com'
+
+
+def test_resolve_bulk_keeps_explicit_dns(app):
+    flask_app.config['DOMAIN_PROFILES'] = PROFILES
+    data = {
+        'join_domain': True,
+        'use_domain_profile_credentials': True,
+        'domain_profile': 'Lab',
+        'dns_servers': '192.168.123.191',
+        'vlan': '',
+    }
+    ok, err = resolve_domain_join_from_request(data, apply_network=False)
+    assert ok and err is None
+    assert data['dns_servers'] == '192.168.123.191'
+    assert data['vlan'] == ''
+    assert data['domain_password'] == 's3cret!'
 
 
 def test_resolve_domain_join_manual_credentials(app):

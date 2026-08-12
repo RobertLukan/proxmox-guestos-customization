@@ -2,23 +2,29 @@
 
 GuestOS can join clones to AD from `setup.ps1` using credentials from `DOMAIN_PROFILES_JSON` (or form fields when profile credentials are disabled).
 
-A domain profile under **Network** is only a DNS/VLAN shortcut (blank fields filled
-from the profile). **Join domain** is a separate step and reuses that same profile
-for credentials when “Use Domain Profile Credentials” is checked.
+A domain profile under **Network** (single Customize) is only a DNS/VLAN shortcut
+(blank fields filled from the profile). **Join domain** is a separate step and
+reuses that same profile for credentials when “Use Domain Profile Credentials” is
+checked.
+
+**Bulk Win11** does not use the Network profile DNS/VLAN shortcut: DNS is optional
+on Basics (blank → DHCP DNS), VLAN comes from each CSV row, and a Domain-step
+profile select is used for join credentials only.
 
 For the full **OS / edition** lab matrix (not only AD), see
 [VALIDATED_MATRIX.md](VALIDATED_MATRIX.md).
 
-## Lab status (2026-08-02)
+## Lab status (2026-08-12 — GuestOS 2.7.1)
 
 | Check | Result |
 |-------|--------|
 | Profile JSON loads | OK (2 profiles in lab `.env`) |
 | Profile shape (domain, user, password) | OK |
 | Placeholder detection | Lab may still have placeholders — replace before production |
-| Live Sysprep+join on **Windows Server 2019** (Eval) | **OK** (confirmed after Eval/GVLK fix in 2.6.3) |
-| Live Sysprep+join + disks on **Windows Server 2022** (VL) | **OK** (confirmed; GVLK path) |
-| Live Sysprep+join on **Windows 11** (no disks) | **OK** (confirmed; verify uses PowerShell CIM — WMIC removed on Win11) |
+| Live Sysprep+join on **Windows Server 2019** (Eval) + disks | **OK** (reconfirmed 2.7.1) |
+| Live Sysprep+join + disks on **Windows Server 2022** (VL) | **OK** (reconfirmed 2.7.1) |
+| Live Sysprep+join on **Windows 11** (no disks) | **OK** (reconfirmed 2.7.1) |
+| Domain reachability preflight (TCP 53/88/389) | **OK** (blocks admit when DC ports closed) |
 
 Dry-run command used:
 
@@ -57,11 +63,14 @@ Override only with `--skip-ram-check` / `LAB_SMOKE_SKIP_RAM_CHECK=1`.
 1. Replace placeholder entries in `DOMAIN_PROFILES_JSON` with your AD domain, join account, DNS IPs, optional VLAN/OU.
 2. `python3 scripts/ad_join_validate.py --check-dns --require-real-ad` → must exit 0.
 3. From GuestOS (or PDM Customize), run Clone+Sysprep on a **disposable** template clone:
-   - Under **Network**, enable **Use domain profile for DNS/VLAN** and pick the profile
-     (fills blank DNS/VLAN only — does **not** join AD by itself).
-   - On the Domain step, enable **Join domain** and **Use Domain Profile Credentials**
-     (reuses the same Network profile for join account/password).
-   - Prefer static IP/DNS that can reach the DC (or DHCP + profile DNS).
+   - **Single Customize:** Under **Network**, enable **Use domain profile for DNS/VLAN**
+     and pick the profile (fills blank DNS/VLAN only — does **not** join AD by itself).
+     On the Domain step, enable **Join domain** and **Use Domain Profile Credentials**.
+   - **Bulk Win11:** On Basics set optional DNS (or leave blank for DHCP) and CSV rows
+     with optional VLAN; on Domain pick the profile for credentials only (no Network
+     DNS/VLAN profile control).
+   - Prefer DNS that can reach the DC (explicit list, profile DNS on single Customize,
+     or DHCP that hands out the DC).
 4. After SUCCESS, confirm in the guest: domain membership + reboot completed.
 5. Keep this table updated when re-validating Server / Win11.
 

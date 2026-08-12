@@ -10,6 +10,8 @@ import re
 
 # NetBIOS computer names: 1-15 chars, letters/digits/hyphen.
 HOSTNAME_RE = re.compile(r"^[A-Za-z0-9-]{1,15}$")
+# Linux / RFC 1123 hostname label (first label): 1-63 chars.
+LINUX_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$")
 # DNS/AD domain names: one or more dot-separated labels (e.g. corp.example.com).
 DOMAIN_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
@@ -59,6 +61,18 @@ def validate_hostname(value):
         raise ValidationError(
             f"Invalid hostname (1-15 chars, letters/digits/hyphen only): {value!r}"
         )
+    return label
+
+
+def validate_linux_hostname(value):
+    """Return a validated Linux hostname (first DNS label, RFC 1123) or raise."""
+    label = str(value).strip().split(".")[0].lower()
+    if not label or len(label) > 63 or not LINUX_HOSTNAME_RE.match(label):
+        raise ValidationError(
+            f"Invalid Linux hostname (1-63 chars, letters/digits/hyphen): {value!r}"
+        )
+    if label.startswith('-') or label.endswith('-'):
+        raise ValidationError(f"Invalid Linux hostname: {value!r}")
     return label
 
 

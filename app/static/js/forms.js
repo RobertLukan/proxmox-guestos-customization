@@ -89,7 +89,16 @@
       var on = !!(useNetCb && useNetCb.checked);
       setSectionVisible(profileGroup, on);
       if (!on && profileSelect) {
-        profileSelect.value = '';
+        var joining = form.querySelector('#join_domain_checkbox');
+        var useCreds = form.querySelector('#use_domain_profile_credentials');
+        var provisionMode = form.querySelector('#provision_mode');
+        var bulk = provisionMode && provisionMode.value === 'bulk';
+        var keepForJoin =
+          bulk ||
+          (joining && joining.checked && (!useCreds || useCreds.checked));
+        if (!keepForJoin) {
+          profileSelect.value = '';
+        }
         profileSelect.removeAttribute('data-required');
       }
       if (on && profileSelect && profileSelect.value) {
@@ -155,25 +164,74 @@
     var useProfileCb = form.querySelector('#use_domain_profile_credentials');
     var credFields = form.querySelector('#domain_credentials_fields');
     var profileSelect = form.querySelector('#domain_profile');
+    var profileJoinSelect = form.querySelector('#domain_profile_join');
+    var profileJoinGroup = form.querySelector('#domain_profile_join_group');
     var useNetCb = form.querySelector('#use_domain_profile_network');
+    var useNetGroup = form.querySelector('#use_domain_profile_network_group');
+    var credHint = form.querySelector('#domain_profile_cred_hint');
+    var credHelp = form.querySelector('#domain_profile_cred_help');
     var manualCreds = form.querySelectorAll('#domain_name, #domain_username, #domain_password');
+    var syncingProfile = false;
+
+    function isBulkMode() {
+      var mode = form.querySelector('#provision_mode');
+      return !!(mode && mode.value === 'bulk');
+    }
+
+    function syncProfileSelects(source) {
+      if (syncingProfile) return;
+      syncingProfile = true;
+      try {
+        var val = (source && source.value) || '';
+        if (profileSelect && source !== profileSelect) profileSelect.value = val;
+        if (profileJoinSelect && source !== profileJoinSelect) profileJoinSelect.value = val;
+      } finally {
+        syncingProfile = false;
+      }
+    }
 
     function applyCreds() {
       var joining = joinCb && joinCb.checked;
       var useProfile = !useProfileCb || useProfileCb.checked;
+      var bulk = isBulkMode();
       setSectionVisible(credFields, joining && !useProfile);
       setDataRequired(Array.prototype.slice.call(manualCreds), joining && !useProfile);
+      setSectionVisible(profileJoinGroup, bulk && joining && useProfile);
+      if (profileJoinSelect) {
+        if (bulk && joining && useProfile) {
+          profileJoinSelect.setAttribute('data-required', 'true');
+        } else {
+          profileJoinSelect.removeAttribute('data-required');
+          if (window.GuestOSValidate) GuestOSValidate.clearValidation(profileJoinSelect);
+        }
+      }
       if (profileSelect) {
         if (joining && useProfile) {
           profileSelect.setAttribute('data-required', 'true');
-          // Ensure Network profile UI is visible when join needs a profile.
-          if (useNetCb && !useNetCb.checked) {
+          // Single customize: ensure Network profile UI is visible when join needs a profile.
+          // Bulk: DNS/VLAN come from Basics/CSV — do not enable the Network DNS/VLAN shortcut.
+          if (!bulk && useNetCb && !useNetCb.checked) {
             useNetCb.checked = true;
             useNetCb.dispatchEvent(new Event('change', { bubbles: true }));
           }
         } else {
           profileSelect.removeAttribute('data-required');
         }
+      }
+      if (credHint) {
+        if (bulk) {
+          credHint.textContent = useProfile
+            ? 'Pick a domain profile below for join credentials. DNS is optional on Basics (DHCP when blank).'
+            : 'Enter domain credentials below, or check “Use Domain Profile Credentials”.';
+        } else if (useProfile) {
+          credHint.textContent =
+            'Select a domain profile under Network to use profile credentials, or uncheck below and type them.';
+        }
+      }
+      if (credHelp) {
+        credHelp.textContent = bulk
+          ? 'Uses the selected profile for join credentials only (server-side). Does not set DNS or VLAN.'
+          : 'Uses the same profile chosen under Network for DNS/VLAN. Credentials stay on the server.';
       }
     }
 
@@ -186,8 +244,26 @@
 
     if (joinCb) joinCb.addEventListener('change', applyJoin);
     if (useProfileCb) useProfileCb.addEventListener('change', applyCreds);
+    if (profileJoinSelect) {
+      profileJoinSelect.addEventListener('change', function () {
+        syncProfileSelects(profileJoinSelect);
+        if (profileSelect) {
+          profileSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+    }
+    if (profileSelect) {
+      profileSelect.addEventListener('change', function () {
+        syncProfileSelects(profileSelect);
+      });
+    }
     applyJoin();
-    return { applyJoin: applyJoin, applyCreds: applyCreds };
+    return {
+      applyJoin: applyJoin,
+      applyCreds: applyCreds,
+      isBulkMode: isBulkMode,
+      useNetGroup: useNetGroup,
+    };
   }
 
   function wireIpv6(form) {
@@ -757,11 +833,20 @@
   }
 
   function collectSysprepPayload(form) {
+    // Bulk Domain-step profile select has no name=; sync into #domain_profile for FormData.
+    var profileJoin = form.querySelector('#domain_profile_join');
+    var profileNet = form.querySelector('#domain_profile');
+    if (profileJoin && profileNet && (profileJoin.value || '').trim()) {
+      profileNet.value = profileJoin.value;
+    }
     var data = Object.fromEntries(new FormData(form).entries());
     var joinDomain = !!(form.querySelector('#join_domain_checkbox') || {}).checked;
     var useProfileCreds = !!(form.querySelector('#use_domain_profile_credentials') || {}).checked;
     data.join_domain = joinDomain;
     data.use_domain_profile_credentials = useProfileCreds;
+    if (profileNet && (profileNet.value || '').trim()) {
+      data.domain_profile = profileNet.value.trim();
+    }
     data.enable_ipv6 = !!(form.querySelector('#enable_ipv6') || {}).checked;
     if (!data.enable_ipv6) {
       data.ipv6_address = '';
@@ -1197,6 +1282,7 @@
     wireManageDisks: wireManageDisks,
     wireIpv6: wireIpv6,
     wireExtraNics: wireExtraNics,
+    collectExtraNics: collectExtraNics,
     wireApplySpec: wireApplySpec,
     applySpecPayload: applySpecPayload,
     collectSysprepPayload: collectSysprepPayload,

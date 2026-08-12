@@ -57,7 +57,9 @@ services:
       test:
         [
           "CMD-SHELL",
-          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/api/health', timeout=3)\"",
+          # Liveness only — /api/health returns 503 when Celery workers are down,
+          # which deadlocks depends_on: workers need a healthy web first.
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/api/version', timeout=3)\"",
         ]
       interval: 10s
       timeout: 5s

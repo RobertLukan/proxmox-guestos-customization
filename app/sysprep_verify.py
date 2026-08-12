@@ -173,6 +173,12 @@ def _guest_setup_marker(vmid):
     return None, None
 
 
+def _is_domain_join_failed_marker(setup_detail):
+    """True when setup.ps1 recorded a soft domain-join failure."""
+    detail = str(setup_detail or '').strip().lower()
+    return detail == 'domain-join-failed' or detail.startswith('domain-join-failed')
+
+
 def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
                            expected_domain=None, expected_ipv6=None,
                            timeout=None, on_progress=None,
@@ -186,6 +192,9 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
 
     ``expect_setup_reboot`` extends the wait when setup.ps1 will reboot for
     pagefile and/or domain join (``pending_reboot`` → ``done``).
+
+    When setup marks ``domain-join-failed``, domain polling is shortened and the
+    summary includes an explicit WARNING so operators see join failure quickly.
     """
     # Always wait for FirstLogon setup.ps1 — specialize hostname alone is not enough.
     # Domain join / pagefile trigger an extra reboot after setup — allow more time.
@@ -234,6 +243,14 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
     if setup_state != 'done':
         return "setup.ps1 did not complete (setup.done missing)", False
 
+    join_failed_soft = bool(
+        expected_domain and _is_domain_join_failed_marker(setup_detail)
+    )
+    if join_failed_soft:
+        _progress(
+            "WARNING: guest marked domain-join-failed — skipping long domain wait."
+        )
+
     # Hostname is set in the specialize pass; refresh after setup / possible reboot.
     actual_hostname = None
     try:
@@ -249,7 +266,11 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
     domain_name = None
     part_of_domain = None
     # After setup.done, network/domain should settle quickly; keep a short poll.
-    net_polls = max(1, min(polls, 40 if expected_domain else 20))
+    # Soft domain-join failure: only briefly re-check IP — do not burn 40 polls.
+    if join_failed_soft:
+        net_polls = 3
+    else:
+        net_polls = max(1, min(polls, 40 if expected_domain else 20))
     for i in range(net_polls):
         try:
             mode = f"static {expected_ip}" if expected_ip else "DHCP"
@@ -288,7 +309,7 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
                         break
 
             domain_ready = True
-            if expected_domain:
+            if expected_domain and not join_failed_soft:
                 _progress(
                     f"Checking domain membership ({expected_domain}) "
                     f"({i + 1}/{net_polls})..."
@@ -297,11 +318,21 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
                 domain_ready = bool(
                     part_of_domain and _domains_match(domain_name, expected_domain)
                 )
+            elif expected_domain and join_failed_soft and i == 0:
+                # One cheap membership read for the summary (not a wait loop).
+                try:
+                    domain_name, part_of_domain = _read_domain_membership(vmid)
+                except Exception:  # noqa: BLE001
+                    domain_name, part_of_domain = None, False
 
             ip_ready = (found_ip is not None) if expected_ip else bool(found_ip)
             ipv6_ready = (found_ipv6 is not None) if expected_ipv6 else True
             if expected_ip or expected_domain or expected_ipv6:
-                if ip_ready and domain_ready and ipv6_ready:
+                if join_failed_soft:
+                    # Domain already known failed; stop once IP/IPv6 settled or polls end.
+                    if (not expected_ip or ip_ready) and ipv6_ready:
+                        break
+                elif ip_ready and domain_ready and ipv6_ready:
                     break
             elif found_ip:
                 break
@@ -311,7 +342,7 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
             time.sleep(poll)
 
     # Refresh hostname after possible domain-join reboot.
-    if expected_domain:
+    if expected_domain and not join_failed_soft:
         try:
             out = run_command_in_guest(vmid, 'cmd.exe /c hostname')
             if out:
@@ -355,12 +386,19 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
 
     domain_ok = True
     if expected_domain:
-        if part_of_domain and _domains_match(domain_name, expected_domain):
+        if join_failed_soft:
+            parts.append(
+                f"WARNING: domain join failed (guest setup marked domain-join-failed); "
+                f"domain[{expected_domain}]: not joined "
+                f"(workgroup/domain={domain_name or 'WORKGROUP'})"
+            )
+            domain_ok = False
+        elif part_of_domain and _domains_match(domain_name, expected_domain):
             parts.append(f"domain[{expected_domain}]: joined ({domain_name})")
             domain_ok = True
         elif part_of_domain is False:
             parts.append(
-                f"domain[{expected_domain}]: not joined "
+                f"WARNING: domain join failed; domain[{expected_domain}]: not joined "
                 f"(workgroup/domain={domain_name or '?'})"
             )
             domain_ok = False
@@ -370,7 +408,7 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
             domain_ok = True
         else:
             parts.append(
-                f"domain[{expected_domain}]: unknown "
+                f"WARNING: domain join failed; domain[{expected_domain}]: unknown "
                 f"(read Domain={domain_name or '?'}, PartOfDomain={part_of_domain})"
             )
             domain_ok = False

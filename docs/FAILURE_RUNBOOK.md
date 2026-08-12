@@ -10,7 +10,7 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 |---------|--------------|--------------|
 | Task `FAILURE` early (“Invalid sysprep input”) | Bad hostname/IP/domain/`manage_disks` | Task message; Server name/tag for disks |
 | Stuck ~60–85% “Waiting for QEMU Guest Agent” | Guest agent / first-boot loop | Console on clone; QGA package; template health |
-| Stuck ~88–92% after Sysprep | Shutdown wait missed / hung generalize | Console; agent bounce; orphaned clone VMID in task |
+| Stuck ~88–92% after Sysprep | Shutdown wait missed / hung generalize | Console; agent bounce; orphaned clone VMID in task; worker logs `[sysprep]:` + Panther probe lines |
 | Task `FAILURE` `sysprep_guest_failed` | Sysprep validate failed in guest (AppX/Copilot/unattend) | Task message includes Panther log excerpt; fix template AppX then re-clone |
 | Fail writing unattend / setup before Sysprep | QGA `file-write` ACL / agent overload | Worker log: `agent file-write` / Permission denied — see [QGA file writes](#qga-file-writes) |
 | `verification failed` / `setup.done missing` | FirstLogon `setup.ps1` never finished | Guest `C:\ProgramData\GuestOS\` markers + transcript; on **Eval** Server check InstallPid / GVLK regression below |
@@ -18,7 +18,8 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 | Stuck ~98% waiting for `setup.ps1` after Sysprep | OOBE never reached FirstLogon (often Eval+GVLK) | Console: product-key / InstallPid `0xC004F015` → see Evaluation vs GVLK |
 | `setup.ps1 failed` | Network, disk serial, pagefile, domain join | `setup.failed` contents; guest event log |
 | DHCP verify fail after `setup.done` | No lease on expected NIC | Bridge/VLAN; DHCP server; MAC match |
-| Domain verify fail | Join or reboot incomplete | Creds/OU/DNS; `PartOfDomain` via QGA |
+| Domain verify fail / `WARNING: domain join failed` | Join failed (DC down, bad creds/DNS) or slow | Guest marker `domain-join-failed` shortens verify; check DC/DNS preflight; `PartOfDomain` via QGA |
+| Admit fails: DC/DNS unreachable | `join_domain` preflight (TCP 53/88/389) | Power on DC; fix `dns_servers` / routing before clone |
 | Disk verify fail / `pagefile_pending_reboot` | Volume/pagefile not ready (legacy) | Prefer builds that wait for `setup.done` after pagefile reboot; check serials/letters |
 | Wrong data/pagefile roles on multi-disk template | Plan used bus order without `source_key` | Use disk planner; bind `source_key`; match sizes |
 
@@ -30,9 +31,12 @@ in unattend hung Sysprep in lab). FirstLogon extracts it to
 `C:\Windows\Temp\GuestOS-setup.ps1`. Markers:
 
 - `setup.done` — FirstLogon setup finished; required for SUCCESS
+- `setup.done` with detail `domain-join-failed` — OS/network setup finished but AD join failed (soft); verify emits **WARNING** and skips the long domain wait
 - `setup.failed` — setup threw; verify fails with detail
 - `setup.pending_reboot` — pagefile or domain join scheduled a reboot; verify keeps waiting until `setup.done` after the next AutoLogon
 - `setup.lock` / transcript — concurrent run / debugging
+
+**Domain-join preflight:** When `join_domain` is true, admit/worker probe configured `dns_servers` (and resolved `domain_name`) on TCP 53/88/389 before clone so a powered-off DC fails fast instead of after Sysprep.
 
 Also written: `HKLM\SOFTWARE\GuestOS` `SetupStatus=done|failed|pending_reboot` (survives ProgramData cleanup).
 
@@ -48,6 +52,10 @@ specialize cleanup can delete `ProgramData\GuestOS` after the script finishes, w
 drops `setup.done` while leaving IP/disks applied. FirstLogonCommands is the only runner.
 
 ## Agent hang
+
+Worker Compose logs should show Sysprep phase lines tagged ``[sysprep]:``
+(command issued, still running, Panther probe OK/failure, stopped/power-on).
+Task API progress alone previously looked silent in ``docker compose logs``.
 
 1. Open the clone console (VMID on the task / PDM GuestOS tab).
 2. Confirm QEMU Guest Agent is running inside Windows.

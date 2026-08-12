@@ -23,7 +23,7 @@ def _cfg(key, default):
 
 
 def family_caps(family):
-    """Return max cores / RAM MB / disk GB for ``win11`` or ``server``."""
+    """Return max cores / RAM MB / disk GB for ``win11``, ``server``, or ``linux``."""
     fam = (family or 'win11').strip().lower()
     if fam == 'server':
         return {
@@ -31,6 +31,13 @@ def family_caps(family):
             'max_cores': int(_cfg('SERVER_MAX_CORES', 16)),
             'max_ram_mb': int(_cfg('SERVER_MAX_RAM_MB', 65536)),
             'max_disk_gb': int(_cfg('SERVER_MAX_DISK_GB', 2048)),
+        }
+    if fam == 'linux':
+        return {
+            'family': 'linux',
+            'max_cores': int(_cfg('LINUX_MAX_CORES', 16)),
+            'max_ram_mb': int(_cfg('LINUX_MAX_RAM_MB', 65536)),
+            'max_disk_gb': int(_cfg('LINUX_MAX_DISK_GB', 2048)),
         }
     return {
         'family': 'win11',
@@ -41,7 +48,7 @@ def family_caps(family):
 
 
 def requested_disk_gb(payload):
-    """Sum requested disk GB from a sysprep payload (manage_disks plan only)."""
+    """Sum requested disk GB from a sysprep/linux payload (manage_disks plan)."""
     if not _as_bool((payload or {}).get('manage_disks'), False):
         return 0
     disks = (payload or {}).get('disks') or []
@@ -66,7 +73,12 @@ def requested_disk_gb(payload):
 def validate_resource_caps(payload, family):
     """Raise ValidationError when cores/RAM/disks exceed family ceilings."""
     caps = family_caps(family)
-    label = 'Windows Server' if caps['family'] == 'server' else 'Windows 11'
+    if caps['family'] == 'server':
+        label = 'Windows Server'
+    elif caps['family'] == 'linux':
+        label = 'Linux'
+    else:
+        label = 'Windows 11'
 
     try:
         cores = int((payload or {}).get('cores'))

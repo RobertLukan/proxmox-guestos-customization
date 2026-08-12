@@ -15,11 +15,12 @@ from app import app
 
 _log = logging.getLogger(__name__)
 
-_SECRET_KEYS = ('administrator_password', 'domain_password')
+_SECRET_KEYS = ('administrator_password', 'domain_password', 'cipassword')
 _VERIFY_SCRUB_KEYS = (
     'administrator_password',
     'domain_password',
     'domain_join_b64',
+    'cipassword',
 )
 _TTL_SECONDS = 6 * 3600  # covers long Sysprep + verify windows
 

@@ -191,9 +191,16 @@ def _wait_for_sysprep_shutdown(
 
     def _progress(msg):
         nonlocal last_msg
-        if on_progress and msg != last_msg:
+        if msg != last_msg:
             last_msg = msg
-            on_progress(msg)
+            logging.info('VM %s [sysprep]: %s', vmid, msg)
+            if on_progress:
+                on_progress(msg)
+
+    logging.info(
+        'VM %s [sysprep]: waiting for shutdown/reboot (timeout=%ss, Panther probe every %ss)',
+        vmid, timeout, log_interval or 'off',
+    )
 
     while time.time() < deadline:
         status = proxmox.nodes(node).qemu(vmid).status.current.get().get('status')
@@ -227,8 +234,13 @@ def _wait_for_sysprep_shutdown(
                 last_log_probe = now
                 failure = probe_sysprep_panther_failure(vmid)
                 if failure:
+                    logging.warning('VM %s [sysprep]: Panther failure detected', vmid)
                     _progress(failure.split('\n', 1)[0])
                     raise SysprepGuestFailed(failure)
+                logging.info(
+                    'VM %s [sysprep]: Panther probe OK (no hard failure in setuperr/setupact)',
+                    vmid,
+                )
             _progress("Sysprep still running in guest (agent up)...")
 
         time.sleep(poll)
@@ -258,6 +270,11 @@ def _complete_sysprep_power_cycle(task_id, vmid, progress_base=88, agent_stable_
     def _on_progress(msg):
         update_task_progress(task_id, progress_base, msg)
 
+    logging.info(
+        'VM %s [sysprep]: issued; waiting for shut down or reboot into OOBE '
+        '(task %s)',
+        vmid, task_id,
+    )
     update_task_progress(
         task_id,
         progress_base,
@@ -269,9 +286,13 @@ def _complete_sysprep_power_cycle(task_id, vmid, progress_base=88, agent_stable_
         on_progress=_on_progress,
     )
     if outcome is None:
+        logging.warning(
+            'VM %s [sysprep]: timed out waiting for shutdown/reboot', vmid,
+        )
         return False
 
     if outcome == 'stopped':
+        logging.info('VM %s [sysprep]: observed stopped; powering on', vmid)
         update_task_progress(
             task_id,
             min(progress_base + 4, 94),
@@ -279,6 +300,10 @@ def _complete_sysprep_power_cycle(task_id, vmid, progress_base=88, agent_stable_
         )
         power_on_vm(vmid)
     else:
+        logging.info(
+            'VM %s [sysprep]: still running after agent outage (missed stop window)',
+            vmid,
+        )
         update_task_progress(
             task_id,
             min(progress_base + 4, 94),

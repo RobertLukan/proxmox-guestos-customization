@@ -11,7 +11,6 @@ and [AD_VALIDATION.md](AD_VALIDATION.md).
 
 | ID | Item | Why | How to verify |
 |----|------|-----|----------------|
-| `ntp-dc-resync` | **NTP / domain time after join** | DC (lab VM 103) had wrong UTC + Pacific TZ; members looked “wrong” on CEST while following NT5DS. `setup.ps1` now best-effort `w32tm /resync /force` after `Add-Computer`. | Fix DC timezone + real NTP first. Then one AD-join smoke (2019 or 2022 or Win11). On guest: `w32tm /query /status`, compare UTC to PVE host / phone. Guest local time should match wall clock in GuestOS timezone. |
 | `ntp-pve-localtime` | Proxmox `localtime=1` on Windows templates | RTC semantics for Windows guests; currently unset on lab templates. | After setting on template(s), re-clone smoke once and confirm no clock jump vs domain. |
 
 ## Done (recent rounds)
@@ -24,10 +23,11 @@ and [AD_VALIDATION.md](AD_VALIDATION.md).
 | `win11-domain-nodisk` | Win11 join without disks | 2026-08-02 — `W11S190319` SUCCESS |
 | `recycle-bin-reset` | `$RECYCLE.BIN` reset after data volume setup | Code added 2026-08-02; live confirm on next disk smoke (optional note in verify) |
 | `lab-ram-preflight` | Refuse lab smoke if PVE free RAM &lt; guests + 4 GiB reserve | 2026-08-02 — `scripts/lab_smoke_preflight.py` wired into all `lab_*_smoke.py` |
+| `linux-static-detach` | Linux static IP + detach cloud-init + OS disk resize | 2026-08-11 — guestos-lab `192.168.123.197` VMID 123 SUCCESS (static `192.168.123.200`; froze cloud-init `ide0`) |
+| `linux-multinic` | Linux 2-NIC (v4 + v6) smoke | 2026-08-11 — guestos-lab `192.168.123.197` VMID 124 SUCCESS (static `192.168.123.201`; IPv6 `fd00::20`) |
 
 ## Suggested next smoke sequence (when ready)
 
-1. Confirm DC clock/TZ/NTP fixed (`w32tm /query /status` on DC → not LOCL; TZ correct).
-2. One AD smoke and check guest time (**`ntp-dc-resync`**).
-3. Optionally re-check Recycle Bin on D:/E: after disk smoke.
-4. Update this file: move open → done with host/VMID/date.
+1. Optionally set Proxmox `localtime=1` on Windows templates and re-check (**`ntp-pve-localtime`**).
+2. Optionally re-check Recycle Bin on D:/E: after disk smoke.
+3. Update this file: move open → done with host/VMID/date.

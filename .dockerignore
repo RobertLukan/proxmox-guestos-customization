@@ -1,4 +1,5 @@
 venv/
+.venv*/
 vendor/
 **/__pycache__/
 *.pyc
@@ -10,5 +11,10 @@ vendor/
 instance/
 screenshots/
 tests/
+tmp/
 *.md
+*.tar
 .github/
+.coverage
+.pytest_cache/
+

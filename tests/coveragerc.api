@@ -7,4 +7,5 @@ omit =
     app/proxmox.py
     app/sysprep_verify.py
     app/sysprep_power.py
+    app/linux_verify.py
     app/launch_token.py

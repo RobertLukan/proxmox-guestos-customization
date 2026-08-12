@@ -214,4 +214,51 @@ def test_verify_domain_unknown_fails_when_expected(monkeypatch):
         1, 'HOST1', expected_ip='10.0.0.5', expected_domain='lab.test', timeout=30,
     )
     assert ok is False
+    assert 'WARNING: domain join failed' in summary
     assert 'domain[lab.test]: unknown' in summary
+
+
+def test_verify_domain_join_failed_marker_short_wait_and_warning(monkeypatch):
+    """Soft domain-join-failed: WARNING in summary and only a few net polls."""
+    interfaces = {
+        'result': [{
+            'ip-addresses': [
+                {'ip-address-type': 'ipv4', 'ip-address': '192.168.123.50'},
+            ],
+        }],
+    }
+    progress = []
+
+    def _cmd(_vmid, command, **_kw):
+        if 'hostname' in command:
+            return 'WINJOINFAIL\n'
+        if 'ConvertTo-Json' in command or 'Win32_ComputerSystem' in command:
+            return '{"Domain":"WORKGROUP","PartOfDomain":false}\n'
+        raise AssertionError(command)
+
+    _patch_verify_deps(
+        monkeypatch, interfaces, cmd_fn=_cmd, marker=('done', 'domain-join-failed'),
+    )
+
+    summary, ok = ca._verify_sysprep_result(
+        126,
+        'WINJOINFAIL',
+        expected_ip='192.168.123.50',
+        expected_domain='lab.test',
+        timeout=600,  # would normally allow many domain polls
+        on_progress=progress.append,
+    )
+    assert ok is False
+    assert 'WARNING: domain join failed (guest setup marked domain-join-failed)' in summary
+    assert 'domain[lab.test]: not joined' in summary
+    assert any('skipping long domain wait' in m for m in progress)
+    net_checks = [m for m in progress if m.startswith('Checking guest network')]
+    assert len(net_checks) <= 3
+    assert not any('Checking domain membership' in m for m in progress)
+
+
+def test_is_domain_join_failed_marker():
+    assert sv._is_domain_join_failed_marker('domain-join-failed')
+    assert sv._is_domain_join_failed_marker('domain-join-failed: LDAP')
+    assert not sv._is_domain_join_failed_marker('ok')
+    assert not sv._is_domain_join_failed_marker(None)

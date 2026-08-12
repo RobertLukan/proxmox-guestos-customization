@@ -4,26 +4,27 @@
 [![Security](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/security.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/security.yml)
 [![CodeQL](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/codeql.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/codeql.yml)
 
-**Current release: [2.6.14](VERSION)** — community project for **Sysprep guest OS customization** of Windows VMs in Proxmox VE (VMware-style: golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
+**Current release: [2.7.1](VERSION)** — community project for **guest OS customization** of Windows (**Sysprep**) and Linux (**cloud-init**) VMs in Proxmox VE (golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
 
 > **Not an official Proxmox product.** Lab-validated matrix (versions + editions):
-> [docs/VALIDATED_MATRIX.md](docs/VALIDATED_MATRIX.md) (includes Server **2025
-> Datacenter Eval** with static IP). Other 2025 SKUs / AD / disks still welcome
-> as community reports. Support is community / GitHub issues only —
+> [docs/VALIDATED_MATRIX.md](docs/VALIDATED_MATRIX.md) (Windows Server / Win11 + Linux
+> cloud-init). Other SKUs and feature combos welcome as community reports.
+> Support is community / GitHub issues only —
 > [open an issue](https://github.com/RobertLukan/proxmox-guestos-customization/issues).
 
-GuestOS is **Sysprep-only** (template → clone → guest agent). In-place Sysprep of existing/production VMs is **disabled**.
+Windows path is **Sysprep-only** (template → clone → guest agent). In-place Sysprep of existing/production VMs is **disabled**. Linux uses Proxmox **cloud-init** + guest-agent verify.
 
 | Path | Status | How it works |
 |------|--------|----------------|
-| **Sysprep customize** | **Supported** (only path) | Template → clone → guest-agent writes unattend + `setup.ps1` → `sysprep /generalize` → verify |
+| **Sysprep customize** | **Supported** | Windows template → clone → guest-agent writes unattend + `setup.ps1` → `sysprep /generalize` → verify |
+| **Linux cloud-init** | **Supported** (2.7+) | Linux template (`l24`/`l26`) → clone → Proxmox cloud-init → guest-agent verify; optional OS disk grow + detach |
 | **Bulk Win11 batch** | **Supported** (Win11 tagged templates) | CSV/API batch → one task per desktop → shared network/DNS defaults |
 
 ## Start here
 
 1. **Deploy GuestOS alone** (recommended first step): Docker Compose + TLS — follow [docs/INSTALL.md](docs/INSTALL.md) §1–2.
-2. Prepare a **Windows golden image** template — [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md). Tag templates (`windows11` / `windowsserver2019` / `windowsserver2022` / `windowsserver2025`) so caps and UI modes classify correctly.
-3. Open the UI, change the default password, run one **Clone + Sysprep** smoke.
+2. Prepare a **Windows** and/or **Linux** golden image template — [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md), [docs/LINUX_TEMPLATE.md](docs/LINUX_TEMPLATE.md). Tag Windows templates (`windows11` / `windowsserver2019` / `windowsserver2022` / `windowsserver2025`) so caps and UI modes classify correctly.
+3. Open the UI, change the default password, run one **Clone + Sysprep** or **Linux cloud-init** smoke.
 4. *(Optional)* For VDI fleets, use **Bulk desktops** on a Win11 template — [docs/BULK_PROVISIONING.md](docs/BULK_PROVISIONING.md).
 5. *(Optional / advanced)* Wire **Proxmox Datacenter Manager** with the AGPL GuestOS fork — [docs/INSTALL.md](docs/INSTALL.md) §3 and [PDM integration](docs/PDM_INTEGRATION.md).
 
@@ -38,6 +39,7 @@ GuestOS is **Sysprep-only** (template → clone → guest agent). In-place Syspr
 | Area | Notes |
 |------|--------|
 | Clone + Sysprep (hostname, static/DHCP, optional AD join) | **Stable** for lab-tested rows in [VALIDATED_MATRIX.md](docs/VALIDATED_MATRIX.md) (2019 Eval, 2022 Std VL, 2025 Datacenter Eval static, Win11); other editions welcome as reports |
+| Linux cloud-init (hostname, static/DHCP, optional multi-NIC) | **Stable for lab** on Ubuntu 24.04 cloud image — see matrix; other distros welcome as reports |
 | Bulk Win11 batch (CSV / API) | **Stable for lab** — max 10/batch, 20/day; Win11 only |
 | Configure disks (OS / data / pagefile) | **Windows Server family** — lab OK on 2019 Eval + 2022 Standard VL; see matrix for gaps |
 | Provisioning safeguards (cores/RAM/disk/storage) | **Stable** — no in-app override; use PVE for exceptions |
@@ -46,7 +48,9 @@ GuestOS is **Sysprep-only** (template → clone → guest agent). In-place Syspr
 ## Features
 
 - Clone Windows templates and run **Clone + Sysprep (customize)** in one job.
+- Clone Linux templates and apply **Proxmox cloud-init** (hostname, DNS, user/SSH/password, optional OS disk grow + detach after ready).
 - Sysprep applies hostname, **timezone**, **locale**, **static** or **DHCP** networking (optional **IPv6**), **workgroup** or AD join, optional multi-NIC on single deploys.
+- Domain join: TCP preflight to DC (53/88/389) when joining; soft warning path if join fails after Sysprep.
 - **Customization Specs** tab: named reusable presets (no admin password stored); apply in the wizard / via `spec_id`.
 - **Bulk Win11 provisioning:** CSV rows (`hostname,ip/prefix[,vlan]`), shared gateway/DNS, batch monitor, idempotent API (single NIC).
 - **Safeguards:** batch/day/inflight limits; Win11 vs Server cores/RAM/disk caps; storage warn@65% / block@80%; live CSV duplicate hostname/IP checks; clone VMID collision retries.
@@ -56,11 +60,12 @@ GuestOS is **Sysprep-only** (template → clone → guest agent). In-place Syspr
 
 ## Workflow overview
 
-1. Pick a **Windows Proxmox template** (`ostype` `win10` / `win11` / …) tagged for family.
-2. **Single:** Clone + Sysprep → guest agent writes unattend + `setup.ps1` → `sysprep /generalize /oobe /shutdown`.
-3. **Bulk (Win11):** submit shared settings + CSV desktops → one Celery task per row → Jobs filtered by `batch_id`.
-4. After OOBE, **FirstLogonCommands** runs `setup.ps1` (network, cleanup, optional domain join), then logs off to the login screen.
-5. GuestOS verifies setup markers / hostname / expected static IP via the guest agent.
+1. Pick a **Windows** (`win10`/`win11`/…) or **Linux** (`l24`/`l26`) Proxmox template.
+2. **Windows single:** Clone + Sysprep → guest agent writes unattend + `setup.ps1` → `sysprep /generalize /oobe /shutdown`.
+3. **Linux:** Clone + cloud-init → power on → guest-agent verify (optional OS disk grow / detach cloud-init drive).
+4. **Bulk (Win11):** submit shared settings + CSV desktops → one Celery task per row → Jobs filtered by `batch_id`.
+5. After Windows OOBE, **FirstLogonCommands** runs `setup.ps1` (network, cleanup, optional domain join), then logs off to the login screen.
+6. GuestOS verifies setup markers / hostname / expected static IP via the guest agent.
 
 From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launch` → wizard.
 
@@ -69,6 +74,7 @@ From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launc
 - GuestOS host packages: **`git`**, **`curl`**, and **Docker Engine + Compose v2** (or **Podman** with Compose **v2** / `podman-compose` — not the old Python `docker-compose` 1.x).
 - Proxmox VE API reachable from the GuestOS **worker** (clone, config, start/stop, guest agent).
 - Windows **template** with working QEMU Guest Agent — details: [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md).
+- Linux **template** with cloud-init + QEMU Guest Agent — details: [docs/LINUX_TEMPLATE.md](docs/LINUX_TEMPLATE.md).
 - For local/venv instead of Compose: Python 3.12+ (plus Redis for Celery).
 
 ## Installation
@@ -77,7 +83,8 @@ From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launc
 
 | Doc | Topic |
 |-----|--------|
-| [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md) | Golden-image checklist + tags |
+| [docs/WINDOWS_TEMPLATE.md](docs/WINDOWS_TEMPLATE.md) | Windows golden-image checklist + tags |
+| [docs/LINUX_TEMPLATE.md](docs/LINUX_TEMPLATE.md) | Linux cloud-init golden image + API |
 | [docs/VALIDATED_MATRIX.md](docs/VALIDATED_MATRIX.md) | Lab-tested OS/edition matrix + community asks |
 | [docs/SMOKE_BACKLOG.md](docs/SMOKE_BACKLOG.md) | Next-round lab smoke checklist (NTP, …) |
 | [docs/BULK_PROVISIONING.md](docs/BULK_PROVISIONING.md) | Batch provisioning, quotas, caps |
@@ -98,7 +105,7 @@ cp .env.example .env
 # Compose HTTPS: GUESTOS_TLS_HOST, BEHIND_REVERSE_PROXY=True; set PRIMARY_BRIDGE to your PVE bridge.
 chmod +x deploy/caddy/gen-selfsigned.sh
 ./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"   # lab self-signed; use real certs in prod
-export GUESTOS_VERSION=2.6.14   # pin a release; or omit for :latest
+export GUESTOS_VERSION=2.7.1   # pin a release; or omit for :latest
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
@@ -156,7 +163,7 @@ when pulling.
 ```bash
 # Connected machine (force amd64 even on Apple Silicon / ARM builders)
 PLATFORM=linux/amd64
-VER=2.6.14
+VER=2.7.1
 docker pull --platform "$PLATFORM" "ghcr.io/robertlukan/proxmox-guestos-customization:${VER}"
 docker pull --platform "$PLATFORM" redis:7-alpine
 # optional if using Compose Caddy:

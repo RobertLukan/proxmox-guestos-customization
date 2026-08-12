@@ -55,6 +55,8 @@ def get_proxmox_api():
 _WINDOWS_OSTYPES = frozenset({
     'wxp', 'w2k', 'w2k3', 'w2k8', 'wvista', 'win7', 'win8', 'win10', 'win11',
 })
+# Linux guests commonly use l26 (2.6+ kernel) or legacy l24.
+_LINUX_OSTYPES = frozenset({'l24', 'l26'})
 
 
 def _looks_like_windows_server_name(name):
@@ -267,6 +269,13 @@ def is_windows_ostype(ostype):
     return str(ostype).strip().lower() in _WINDOWS_OSTYPES
 
 
+def is_linux_ostype(ostype):
+    """True when ``ostype`` is a Proxmox Linux guest type."""
+    if not ostype:
+        return False
+    return str(ostype).strip().lower() in _LINUX_OSTYPES
+
+
 def get_vm_ostype(vmid, node=None, proxmox=None):
     """Return the QEMU ``ostype`` for ``vmid``, or None on failure."""
     proxmox = proxmox or get_proxmox_api()
@@ -300,6 +309,17 @@ def require_windows_guest(vmid, node=None, proxmox=None):
     return ostype
 
 
+def require_linux_guest(vmid, node=None, proxmox=None):
+    """Raise ``ValueError`` unless ``vmid`` has a Linux ``ostype``."""
+    ostype = get_vm_ostype(vmid, node=node, proxmox=proxmox)
+    if not is_linux_ostype(ostype):
+        raise ValueError(
+            f"VM {vmid} is not a Linux guest (ostype={ostype!r}). "
+            "Expected Proxmox ostype l26/l24 for cloud-init customize."
+        )
+    return ostype
+
+
 def is_proxmox_template(vmid, proxmox=None):
     """True when cluster resources mark ``vmid`` as a QEMU template."""
     proxmox = proxmox or get_proxmox_api()
@@ -326,6 +346,17 @@ def require_sysprep_template(template_vmid, proxmox=None):
     return require_windows_guest(template_vmid, proxmox=proxmox)
 
 
+def require_linux_template(template_vmid, proxmox=None):
+    """Linux Proxmox template suitable for clone + cloud-init customize."""
+    proxmox = proxmox or get_proxmox_api()
+    if not is_proxmox_template(template_vmid, proxmox=proxmox):
+        raise ValueError(
+            f"VMID {template_vmid} is not a Proxmox template. "
+            "Linux customize clones a cloud-init golden image template only."
+        )
+    return require_linux_guest(template_vmid, proxmox=proxmox)
+
+
 def require_sysprep_existing_target(vmid, node=None, proxmox=None):
     """Always reject: in-place Sysprep of existing VMs is disabled."""
     raise ValueError(
@@ -334,10 +365,12 @@ def require_sysprep_existing_target(vmid, node=None, proxmox=None):
     )
 
 
-def get_template_vms():
+def get_template_vms(family='windows'):
+    """Return Proxmox templates filtered by OS family (``windows`` or ``linux``)."""
     proxmox = get_proxmox_api()
     if not proxmox:
         return []
+    fam = (family or 'windows').strip().lower()
     templates = []
     for vm in proxmox.cluster.resources.get(type='vm'):
         if vm.get('template') != 1:
@@ -349,10 +382,20 @@ def get_template_vms():
         except Exception as e:
             logging.warning(f"Skipping template {vmid}: cannot read config ({e})")
             continue
-        if not is_windows_ostype(cfg.get('ostype')):
-            continue
+        ostype = cfg.get('ostype')
+        if fam == 'linux':
+            if not is_linux_ostype(ostype):
+                continue
+        else:
+            if not is_windows_ostype(ostype):
+                continue
         templates.append(vm)
     return templates
+
+
+def get_linux_template_vms():
+    """Return Linux (l24/l26) Proxmox templates."""
+    return get_template_vms(family='linux')
 
 def get_network_bridges():
     """Return Linux bridges / SDN VNets visible on the Proxmox cluster.
@@ -562,14 +605,17 @@ def _allocate_next_vmid(proxmox):
         raise
 
 
-def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan, max_attempts=5, nics=None):
-    """Clones a Windows template VM and returns the new VMID.
+def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan, max_attempts=5, nics=None,
+             os_family='windows'):
+    """Clones a template VM and returns the new VMID.
 
     Retries VMID allocation when concurrent clones race on ``/cluster/nextid``
     (classic ``config file already exists`` under bulk provisioning).
 
     ``nics`` is an optional list of ``{bridge, vlan}`` for multi-NIC (single
     customize). When omitted, a single ``net0`` is configured from bridge/vlan.
+
+    ``os_family`` is ``windows`` (default) or ``linux`` — selects ostype gate.
     """
     proxmox = get_proxmox_api()
     if not proxmox:
@@ -582,7 +628,11 @@ def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan, max_attempts=5, 
         raise Exception(f"VMID {template_vmid} is not a Proxmox template.")
 
     node = template_info['node']
-    require_windows_guest(template_vmid, node=node, proxmox=proxmox)
+    fam = (os_family or 'windows').strip().lower()
+    if fam == 'linux':
+        require_linux_guest(template_vmid, node=node, proxmox=proxmox)
+    else:
+        require_windows_guest(template_vmid, node=node, proxmox=proxmox)
 
     last_error = None
     new_vmid = None
@@ -653,6 +703,186 @@ def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan, max_attempts=5, 
     proxmox.nodes(node).qemu(new_vmid).config.post(**post_kwargs)
 
     return {'vmid': new_vmid, 'uuid': vm_uuid}
+
+
+def apply_cloudinit_config(vmid, *, nics=None, nameservers=None, searchdomain=None,
+                           ciuser=None, sshkeys=None, cipassword=None):
+    """Set Proxmox cloud-init fields on a clone (ipconfigN, DNS, SSH user/keys).
+
+    ``nics`` entries may include network_mode (dhcp|static), ip_address, netmask,
+    gateway, enable_ipv6, ipv6_address, ipv6_prefix, ipv6_gateway, ipv6_mode
+    (static|dhcp).
+    """
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not proxmox or not node:
+        raise Exception(f"VM {vmid} not found.")
+
+    kwargs = {}
+    nic_list = list(nics or [])
+    if not nic_list:
+        nic_list = [{'network_mode': 'dhcp'}]
+
+    for i, nic in enumerate(nic_list):
+        mode = str(nic.get('network_mode') or 'dhcp').strip().lower()
+        parts = []
+        if mode == 'static':
+            ip = (nic.get('ip_address') or '').strip()
+            prefix = nic.get('netmask')
+            if not ip:
+                raise ValueError(f'NIC{i} static mode requires ip_address.')
+            try:
+                prefix_i = int(prefix)
+            except (TypeError, ValueError):
+                raise ValueError(f'NIC{i} static mode requires netmask (prefix length).')
+            parts.append(f'ip={ip}/{prefix_i}')
+            gw = (nic.get('gateway') or '').strip()
+            if gw:
+                parts.append(f'gw={gw}')
+        else:
+            parts.append('ip=dhcp')
+
+        enable_v6 = nic.get('enable_ipv6') in (True, 'true', '1', 1, 'yes', 'on')
+        if enable_v6:
+            v6_mode = str(nic.get('ipv6_mode') or 'static').strip().lower()
+            if v6_mode == 'dhcp':
+                parts.append('ip6=dhcp')
+            else:
+                ip6 = (nic.get('ipv6_address') or '').strip()
+                p6 = nic.get('ipv6_prefix') or 64
+                if not ip6:
+                    raise ValueError(f'NIC{i} IPv6 static mode requires ipv6_address.')
+                parts.append(f'ip6={ip6}/{int(p6)}')
+                gw6 = (nic.get('ipv6_gateway') or '').strip()
+                if gw6:
+                    parts.append(f'gw6={gw6}')
+        kwargs[f'ipconfig{i}'] = ','.join(parts)
+
+    dns = nameservers
+    if isinstance(dns, str):
+        dns = [p.strip() for p in dns.split(',') if p.strip()]
+    if dns:
+        kwargs['nameserver'] = ' '.join(str(x) for x in dns)
+    if searchdomain:
+        kwargs['searchdomain'] = str(searchdomain).strip()
+    if ciuser:
+        kwargs['ciuser'] = str(ciuser).strip()
+    if sshkeys:
+        # Proxmox expects URL-encoded newlines for multi-key blobs.
+        from urllib.parse import quote
+        raw = sshkeys if isinstance(sshkeys, str) else '\n'.join(sshkeys)
+        kwargs['sshkeys'] = quote(raw.strip() + '\n', safe='')
+    if cipassword:
+        kwargs['cipassword'] = str(cipassword)
+
+    if kwargs:
+        proxmox.nodes(node).qemu(vmid).config.set(**kwargs)
+    return True
+
+
+_CLOUDINIT_DISK_RE = re.compile(r'^(ide|scsi|sata)\d+$', re.I)
+_CI_CONFIG_KEYS = frozenset({
+    'ciuser', 'cipassword', 'sshkeys', 'nameserver', 'searchdomain',
+    'cicustom', 'citype',
+})
+
+
+def find_cloudinit_drive_keys(cfg):
+    """Return bus keys (e.g. ``ide0``) that look like Proxmox cloud-init CDs."""
+    keys = []
+    for k, v in (cfg or {}).items():
+        if not _CLOUDINIT_DISK_RE.match(str(k)):
+            continue
+        blob = str(v or '').lower()
+        if 'cloudinit' in blob:
+            keys.append(k)
+    return keys
+
+
+def detach_cloudinit_drive(vmid, clear_ci_fields=True):
+    """Remove the Cloud-Init CDROM so Proxmox stops re-seeding the guest.
+
+    The VM should be **stopped** — Proxmox often ignores hot-unplug of the
+    cloud-init CDROM while running. Prefer :func:`freeze_linux_cloudinit`.
+
+    Guest hostname/network/user already on disk stay as-is. Optionally clears
+    ``ipconfig*`` / ``ciuser`` / DNS fields from the VM config so the UI no
+    longer looks cloud-init-managed.
+    """
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not proxmox or not node:
+        raise Exception(f"VM {vmid} not found.")
+    status = (proxmox.nodes(node).qemu(vmid).status.current.get() or {}).get('status')
+    if status == 'running':
+        raise Exception(
+            f"VM {vmid} is running; stop the guest before detaching cloud-init "
+            "(use freeze_linux_cloudinit)."
+        )
+    cfg = proxmox.nodes(node).qemu(vmid).config.get() or {}
+    drive_keys = find_cloudinit_drive_keys(cfg)
+    deleted = list(drive_keys)
+
+    for key in drive_keys:
+        try:
+            proxmox.nodes(node).qemu(vmid).config.set(delete=key)
+        except Exception as e:
+            logging.warning(
+                "Could not delete cloud-init drive %s on VM %s: %s",
+                key, vmid, type(e).__name__,
+            )
+
+    # Drop cloud-init drive from boot order if present.
+    boot = str(cfg.get('boot') or '')
+    if boot.startswith('order=') and drive_keys:
+        order = boot[len('order='):]
+        parts = [p for p in order.split(';') if p and p not in drive_keys]
+        new_boot = f"order={';'.join(parts)}" if parts else ''
+        if new_boot != boot:
+            try:
+                if new_boot:
+                    proxmox.nodes(node).qemu(vmid).config.set(boot=new_boot)
+                else:
+                    proxmox.nodes(node).qemu(vmid).config.set(delete='boot')
+            except Exception as e:
+                logging.warning(
+                    "Could not update boot order after cloud-init detach on VM %s: %s",
+                    vmid, type(e).__name__,
+                )
+
+    if clear_ci_fields:
+        # Re-read after drive deletes.
+        cfg = proxmox.nodes(node).qemu(vmid).config.get() or {}
+        to_delete = []
+        for k in cfg:
+            if k in _CI_CONFIG_KEYS or str(k).startswith('ipconfig'):
+                to_delete.append(k)
+            # Detached cloud-init volumes often land as unusedN.
+            if str(k).startswith('unused') and 'cloudinit' in str(cfg.get(k) or '').lower():
+                to_delete.append(k)
+        if to_delete:
+            try:
+                proxmox.nodes(node).qemu(vmid).config.set(delete=','.join(to_delete))
+                deleted.extend(to_delete)
+            except Exception as e:
+                logging.warning(
+                    "Could not clear cloud-init fields on VM %s: %s",
+                    vmid, type(e).__name__,
+                )
+
+    return {'detached_drives': drive_keys, 'cleared': deleted}
+
+
+def freeze_linux_cloudinit(vmid, clear_ci_fields=True):
+    """Power off → detach Cloud-Init CDROM → power on (settings stay on disk).
+
+    Hot-removing the cloud-init drive while the guest is running is unreliable
+    on Proxmox; a stop/start cycle is required for the detach to stick.
+    """
+    power_off_vm(vmid, timeout=120)
+    result = detach_cloudinit_drive(vmid, clear_ci_fields=clear_ci_fields)
+    power_on_vm(vmid)
+    return result
 
 
 _DISK_KEY_RE = re.compile(r'^(scsi|virtio|sata|ide)(\d+)$')

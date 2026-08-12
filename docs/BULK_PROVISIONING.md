@@ -20,14 +20,21 @@ See request/response schema examples in [`openapi.yaml`](openapi.yaml).
 In **New VM with Sysprep** on a **Windows 11** template (`windows11` tag), choose
 **Bulk desktops (batch)**:
 
-1. Fill shared settings (template, resources, network defaults, optional domain,
-   optional **Customization Spec** / `spec_id`).
-2. On Basics, paste CSV lines (static: `hostname,ip/prefix[,vlan]`; DHCP: `hostname[,vlan]`).
-   The form shows how many rows you can still add from remaining batch/daily capacity,
-   and rejects duplicate hostnames/IPs plus unusable addresses (loopback, link-local,
-   multicast) as you type.
-3. Submit. GuestOS creates a `batch_id` and enqueues one task per row.
-4. Jobs page can be filtered by `batch_id`.
+1. On **Basics**, paste CSV lines (static: `hostname,ip/prefix[,vlan]`; DHCP: `hostname[,vlan]`),
+   optional shared gateway (static only), and **optional DNS** (leave blank to use
+   DHCP-provided DNS; set explicitly for AD/DC override). VLAN is per CSV row —
+   there is no Domain Profile DNS/VLAN shortcut in bulk.
+2. On **Network**, pick the bridge (and skip the single-customize profile DNS/VLAN
+   controls — they are hidden in bulk).
+3. On **Domain** (optional), enable Join domain. Profile credentials use a Domain-step
+   profile select (credentials only; does not fill DNS/VLAN). Or enter manual join
+   credentials.
+4. Submit. GuestOS creates a `batch_id` and enqueues one task per row.
+5. Jobs page can be filtered by `batch_id`.
+
+The form shows how many rows you can still add from remaining batch/daily capacity,
+and rejects duplicate hostnames/IPs plus unusable addresses (loopback, link-local,
+multicast) as you type.
 
 **Windows Server** templates (e.g. `windowsserver2019` / `2022` / `2025`) do **not**
 offer bulk mode — use single Customize only. The API rejects bulk starts against

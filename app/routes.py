@@ -2,9 +2,11 @@ from flask import render_template, request, Response, redirect, url_for, json, j
 from app import app, db, celery, login_manager, csrf
 from app.proxmox import (
     get_template_vms,
+    get_linux_template_vms,
     get_network_bridges,
     require_windows_guest,
     require_sysprep_template,
+    require_linux_template,
     require_sysprep_existing_target,
     is_proxmox_template,
     use_pve_override,
@@ -13,7 +15,7 @@ from app.proxmox import (
     power_off_vm,
     inventory_vm_disks,
 )
-from app.celery_app import sysprep_workflow_task
+from app.celery_app import sysprep_workflow_task, linux_cloudinit_workflow_task
 from app.models import Task, User, BatchRequest, CustomizationSpec
 from app.specs import resolve_spec_from_request, sanitize_spec_payload
 from app.windows_identity import (
@@ -196,22 +198,43 @@ def apply_domain_profile_network(data):
     return True, None
 
 
-def resolve_domain_join_from_request(data):
+def apply_domain_profile_ou_only(data):
+    """Fill blank ``domain_ou`` from profile without touching DNS/VLAN."""
+    profile_name = (data.get('domain_profile') or '').strip()
+    if not profile_name:
+        return True, None
+    profile = app.config.get('DOMAIN_PROFILES', {}).get(profile_name)
+    if not profile:
+        msg = f'Unknown domain profile: {profile_name!r}'
+        return False, _json_field_error(msg, domain_profile=msg)
+    if not (data.get('domain_ou') or '').strip() and profile.get('domain_ou'):
+        data['domain_ou'] = profile.get('domain_ou')
+    return True, None
+
+
+def resolve_domain_join_from_request(data, apply_network=True):
     """Resolve domain-join fields on ``data`` server-side.
 
-    Always applies network defaults from the selected profile (DNS/VLAN) first
-    when blanks; that step alone does not join the domain.
+    When ``apply_network`` is true (single customize), applies network defaults
+    from the selected profile (DNS/VLAN) when blanks; that step alone does not
+    join the domain. Bulk passes ``apply_network=False`` so Basics DNS and CSV
+    VLAN are not overwritten by the profile used for credentials.
+
     When ``join_domain`` is set and ``use_domain_profile_credentials`` is true
     (the default), credentials and domain name are taken from ``DOMAIN_PROFILES``
-    — never from the request body. The UI picks the same profile under Network
-    for DNS/VLAN and reuses it for join credentials.
+    — never from the request body.
 
     Returns ``(True, None)`` on success, or ``(False, (response, status))`` when
     the named profile is missing.
     """
-    ok, err = apply_domain_profile_network(data)
-    if not ok:
-        return False, err
+    if apply_network:
+        ok, err = apply_domain_profile_network(data)
+        if not ok:
+            return False, err
+    else:
+        ok, err = apply_domain_profile_ou_only(data)
+        if not ok:
+            return False, err
 
     join_domain = _as_request_bool(data.get('join_domain'), False)
     data['join_domain'] = join_domain
@@ -227,7 +250,7 @@ def resolve_domain_join_from_request(data):
         if not profile:
             if not profile_name:
                 msg = (
-                    'Select a domain profile under Network when using profile credentials.'
+                    'Select a domain profile when using profile credentials.'
                 )
             else:
                 msg = f'Unknown domain profile: {profile_name!r}'
@@ -374,9 +397,11 @@ def change_password():
 @login_required
 def index():
     templates = get_template_vms()
+    linux_templates = get_linux_template_vms()
     return render_template(
         'index.html',
         templates=templates,
+        linux_templates=linux_templates,
     )
 
 
@@ -392,6 +417,19 @@ def _reject_non_sysprep_template(template_vmid):
         return redirect(url_for('index'))
     return None
 
+
+def _reject_non_linux_template(template_vmid):
+    """Flash + redirect home unless VMID is a Linux Proxmox template."""
+    if not template_vmid:
+        flash('Missing template_vmid')
+        return redirect(url_for('index'))
+    try:
+        require_linux_template(template_vmid)
+    except ValueError as e:
+        flash(public_error_text(e))
+        return redirect(url_for('index'))
+    return None
+
 @app.route('/select', methods=['POST'])
 @login_required
 def select_template():
@@ -400,6 +438,16 @@ def select_template():
     if rejected:
         return rejected
     return redirect(url_for('sysprep_form', template_vmid=template_vmid))
+
+
+@app.route('/select_linux', methods=['POST'])
+@login_required
+def select_linux_template():
+    template_vmid = request.form.get('template_vmid')
+    rejected = _reject_non_linux_template(template_vmid)
+    if rejected:
+        return rejected
+    return redirect(url_for('linux_form', template_vmid=template_vmid))
 
 @app.route('/task_status/<task_id>')
 @login_or_api_token_required
@@ -725,6 +773,28 @@ def sysprep_form():
         specs=specs,
     )
 
+
+@app.route('/linux_form', methods=['GET', 'POST'])
+@login_required
+def linux_form():
+    """Linux golden-image path: template → clone → Proxmox cloud-init."""
+    if request.method == 'GET':
+        template_vmid = request.args.get('template_vmid')
+    else:
+        template_vmid = request.form.get('template_vmid')
+    rejected = _reject_non_linux_template(template_vmid)
+    if rejected:
+        return rejected
+    remote_id = (request.values.get('remote_id') or request.args.get('remote_id') or '').strip()
+    bridges = get_network_bridges()
+    return render_template(
+        'linux_form.html',
+        template_vmid=template_vmid,
+        bridges=bridges,
+        primary_bridge=app.config.get('PRIMARY_BRIDGE') or 'vmbr0',
+        remote_id=remote_id,
+    )
+
 @app.route('/start_sysprep_workflow', methods=['POST'])
 @csrf.exempt
 @login_or_api_token_required
@@ -764,6 +834,11 @@ def start_sysprep_workflow():
         if not ok_admit:
             return admit_result
         warnings = admit_result
+        try:
+            from app.domain_preflight import check_domain_join_preflight
+            check_domain_join_preflight(data)
+        except ValidationError as e:
+            return _json_field_error(public_error_text(e), dns_servers=public_error_text(e))
         family = classify_windows_guest_family(template_vmid)
         if _as_request_bool(data.get('manage_disks')) and family != 'server':
             return _json_field_error(
@@ -815,6 +890,92 @@ def start_sysprep_workflow():
     resp = {'task_id': task_id}
     if warnings:
         resp['warnings'] = warnings
+    return jsonify(resp)
+
+
+@app.route('/start_linux_cloudinit_workflow', methods=['POST'])
+@csrf.exempt
+@login_or_api_token_required
+@with_session_csrf
+def start_linux_cloudinit_workflow():
+    """Clone a Linux template and customize via Proxmox cloud-init + QGA verify."""
+    data = request.json or {}
+    data['os_family'] = 'linux'
+    ok, err = resolve_pve_remote(data, _json_field_error)
+    if not ok:
+        return err
+
+    template_vmid = data.get('template_vmid')
+    if not template_vmid:
+        return _json_field_error('template_vmid is required.', template_vmid='Required.')
+
+    from app.remotes import attach_pve_override
+    from app.linux_cloudinit import prepare_linux_payload
+
+    try:
+        pve_override = attach_pve_override(data)
+    except ValueError as e:
+        msg = public_error_text(e, fallback='Invalid remote.')
+        return _json_field_error(msg, remote_id=msg)
+    with use_pve_override(pve_override):
+        try:
+            require_linux_template(template_vmid)
+        except ValueError as e:
+            return jsonify({'error': public_error_text(e, fallback='Invalid template.')}), 400
+        try:
+            prepare_linux_payload(data)
+            caps = validate_resource_caps(data, 'linux')
+            check_daily_quota(extra_items=1)
+            _level, storage = check_storage_for_template(template_vmid)
+        except ValidationError as e:
+            return _json_field_error(public_error_text(e))
+        warnings = []
+        if storage and storage.get('level') == 'warn' and storage.get('message'):
+            warnings.append(storage['message'])
+
+    if not (data.get('bridge') or '').strip():
+        data['bridge'] = app.config.get('PRIMARY_BRIDGE') or 'vmbr0'
+
+    data.pop('_pve', None)
+
+    task_id = str(uuid.uuid4())
+    vm_uuid = str(uuid.uuid4())
+    hostname = data.get('hostname')
+
+    task = Task(
+        id=task_id,
+        name='Linux Cloud-Init Workflow',
+        description=f'Starting Linux cloud-init workflow for {hostname}',
+        vm_uuid=vm_uuid,
+        hostname=(hostname or None),
+        template_vmid=int(data['template_vmid']) if str(data.get('template_vmid', '')).isdigit() else None,
+        remote_id=(data.get('remote_id') or None),
+        submitter=_request_submitter(),
+        options_json=options_to_json(data),
+    )
+    db.session.add(task)
+    db.session.commit()
+
+    try:
+        stash_task_secrets(task_id, data)
+    except RuntimeError as e:
+        task.status = 'FAILURE'
+        task.message = str(e)
+        task.error_code = 'secrets_stash'
+        task.error_details = str(e)
+        db.session.commit()
+        return jsonify({'error': str(e), 'task_id': task_id}), 503
+
+    linux_cloudinit_workflow_task.apply_async(
+        args=(task_id, data),
+        queue='clone_queue',
+    )
+
+    resp = {'task_id': task_id}
+    if warnings:
+        resp['warnings'] = warnings
+    if caps:
+        resp['caps'] = {'family': caps.get('family')}
     return jsonify(resp)
 
 
@@ -913,6 +1074,16 @@ def start_sysprep_bulk_workflow():
             if not ok_admit:
                 return admit_result
             warnings = admit_result
+            # Resolve join credentials on shared first (no profile DNS/VLAN fill)
+            # so domain preflight can use domain_name when dns_servers is blank.
+            ok, err = resolve_domain_join_from_request(shared, apply_network=False)
+            if not ok:
+                return err
+            try:
+                from app.domain_preflight import check_domain_join_preflight
+                check_domain_join_preflight(shared)
+            except ValidationError as e:
+                return _json_field_error(public_error_text(e), dns_servers=public_error_text(e))
 
     batch_id = str(uuid.uuid4())
     batch = BatchRequest(
@@ -938,7 +1109,7 @@ def start_sysprep_bulk_workflow():
         if not (data.get('hostname') or '').strip():
             rejected += 1
             continue
-        ok, err = resolve_domain_join_from_request(data)
+        ok, err = resolve_domain_join_from_request(data, apply_network=False)
         if not ok:
             rejected += 1
             continue

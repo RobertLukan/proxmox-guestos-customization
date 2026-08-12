@@ -10,3 +10,4 @@ omit =
     app/task_progress.py
     app/sysprep_verify.py
     app/sysprep_power.py
+    app/linux_verify.py

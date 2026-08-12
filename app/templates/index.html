@@ -3,21 +3,22 @@
 {% block content %}
 <h1>Select a Proxmox VM Template</h1>
 <p class="page-lead">
-    Guest OS customization matches the VMware model: take a <strong>Windows template</strong>
-    (golden image), <strong>clone</strong> it, then <strong>Sysprep</strong> the clone.
-    In-place Sysprep of existing VMs is not allowed.
+    Guest OS customization clones a <strong>golden-image template</strong>, then customizes the clone
+    (Windows Sysprep or Linux cloud-init). In-place customization of existing VMs is not allowed.
 </p>
+
 {% if templates %}
-<form action="{{ url_for('select_template') }}" method="post">
+<form action="{{ url_for('select_template') }}" method="post" class="mb-5">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <h2 class="h5">Windows</h2>
     <div class="mb-3">
         <label for="template" class="form-label">Windows template</label>
         <select name="template_vmid" id="template" class="form-select">
             {% for template in templates %}
-            <option value="{{ template.vmid }}">{{ template.name }}</option>
+            <option value="{{ template.vmid }}">{{ template.name }} ({{ template.vmid }})</option>
             {% endfor %}
         </select>
-        <div class="form-text">Windows templates only (Proxmox ostype win10/win11/…). Guest agent required on the clone.</div>
+        <div class="form-text">Proxmox ostype win10/win11/…. Guest agent required on the clone.</div>
     </div>
     <div class="d-grid gap-2">
         <button type="submit" name="purpose" value="sysprep_now" formaction="{{ url_for('sysprep_form') }}" class="btn btn-primary">Clone + Sysprep (customize)</button>
@@ -27,10 +28,31 @@
 <div class="alert alert-warning" role="alert">
     No Windows templates found. Set the VM <code>ostype</code> to a Windows value (e.g. <code>win10</code>, <code>win11</code>) and convert to a Proxmox template.
 </div>
+{% endif %}
+
+{% if linux_templates %}
+<form action="{{ url_for('select_linux_template') }}" method="post" class="mb-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <h2 class="h5">Linux</h2>
+    <div class="mb-3">
+        <label for="linux_template" class="form-label">Linux template</label>
+        <select name="template_vmid" id="linux_template" class="form-select">
+            {% for template in linux_templates %}
+            <option value="{{ template.vmid }}">{{ template.name }} ({{ template.vmid }})</option>
+            {% endfor %}
+        </select>
+        <div class="form-text">Proxmox ostype l24/l26 with Cloud-Init drive + qemu-guest-agent. See docs/LINUX_TEMPLATE.md.</div>
+    </div>
+    <div class="d-grid gap-2">
+        <button type="submit" formaction="{{ url_for('linux_form') }}" class="btn btn-primary">Clone + cloud-init (customize)</button>
+    </div>
+</form>
+{% else %}
+<div class="alert alert-secondary" role="alert">
+    No Linux templates found yet. Import a cloud image (Ubuntu/Debian), add a Cloud-Init drive, install <code>qemu-guest-agent</code>, then <code>qm template</code>.
+</div>
+{% endif %}
+
 {# Keep a CSRF field for forms that post from this page context / tests. #}
 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-{% endif %}
-<p class="form-text mt-3 mb-0">
-    <strong>Clone + Sysprep</strong> is the supported customization path (template → clone → generalize/OOBE).
-</p>
 {% endblock %}

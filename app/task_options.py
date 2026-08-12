@@ -8,6 +8,8 @@ _SECRET_KEYS = frozenset({
     'domain_password',
     'domain_username',  # keep name out of chips; domain_name/profile remain
     'domain_join_b64',
+    'cipassword',
+    'sshkeys',
     '_pve',
     'password',
 })
@@ -59,7 +61,7 @@ def build_task_options(data: dict | None) -> dict:
             if not isinstance(d, dict):
                 continue
             entry = {'role': d.get('role') or 'data'}
-            for k in ('size_gb', 'grow_to_gb', 'letter'):
+            for k in ('size_gb', 'grow_to_gb', 'letter', 'mountpoint', 'fstype'):
                 if d.get(k) not in (None, ''):
                     entry[k] = d.get(k)
             slim.append(entry)
@@ -70,9 +72,18 @@ def build_task_options(data: dict | None) -> dict:
         out['nic_count'] = len(nics)
     elif out.get('network_mode'):
         out['nic_count'] = 1
-    for key in ('cores', 'ram', 'spec_id', 'timezone', 'locale', 'workgroup'):
+    for key in (
+        'cores', 'ram', 'spec_id', 'timezone', 'locale', 'workgroup',
+        'ciuser', 'searchdomain', 'os_family', 'os_disk_gb',
+    ):
         if raw.get(key) not in (None, ''):
             out[key] = raw.get(key)
+    if raw.get('detach_cloudinit_after_ready') not in (None, '', False):
+        dci = raw.get('detach_cloudinit_after_ready')
+        if isinstance(dci, str):
+            out['detach_cloudinit_after_ready'] = dci.lower() in ('1', 'true', 'yes', 'on')
+        else:
+            out['detach_cloudinit_after_ready'] = bool(dci)
     if raw.get('fast_waits') not in (None, '', False):
         fw = raw.get('fast_waits')
         if isinstance(fw, str):
@@ -105,6 +116,12 @@ def options_summary_chips(options: dict | None) -> list[str]:
         chips.append('AD')
     elif o.get('workgroup'):
         chips.append('WG')
+    if o.get('os_family') == 'linux':
+        chips.append('Linux')
+    if o.get('os_disk_gb'):
+        chips.append(f"{o['os_disk_gb']}G")
+    if o.get('detach_cloudinit_after_ready'):
+        chips.append('freeze')
     if o.get('manage_disks') and o.get('disks'):
         chips.append('disks')
     nic_count = o.get('nic_count') or 0
