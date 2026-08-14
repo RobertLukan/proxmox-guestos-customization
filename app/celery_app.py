@@ -1,8 +1,11 @@
 """Celery tasks for GuestOS Sysprep and Linux cloud-init workflows."""
 import logging
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app import celery, app, db
 from app.models import Task, _utcnow
+from app.task_janitor import finalize_batch_if_done as _finalize_batch_if_done
 from app.proxmox import (
     clone_vm,
     power_on_vm,
@@ -173,6 +176,7 @@ def _mark_clone_failed(vmid, hostname=None, data=None, stop=False):
 def _abandon_cancelled_clone(task_id, vmid=None, hostname=None, data=None):
     """Persist result_vmid and tag/stop a clone when the task was cancelled."""
     task = Task.query.get(task_id)
+    batch_id = task.batch_id if task else None
     if task:
         if vmid is not None:
             task.result_vmid = vmid
@@ -183,6 +187,7 @@ def _abandon_cancelled_clone(task_id, vmid=None, hostname=None, data=None):
         db.session.commit()
     if vmid:
         _mark_clone_failed(vmid, hostname=hostname or (task.hostname if task else None), data=data, stop=True)
+    _finalize_batch_if_done(batch_id)
 
 
 def _fail_sysprep_task(task_id, message, vmid=None, hostname=None, error_code=None, data=None):
@@ -202,9 +207,11 @@ def _fail_sysprep_task(task_id, message, vmid=None, hostname=None, error_code=No
         task.error_code = error_code
     if vmid is not None:
         task.result_vmid = vmid
+    batch_id = task.batch_id
     db.session.commit()
     if vmid:
         _mark_clone_failed(vmid, hostname=hostname or task.hostname, data=data, stop=False)
+    _finalize_batch_if_done(batch_id)
 
 
 def _clone_nics_arg(data):
@@ -239,7 +246,7 @@ def _attach_macs_to_nics(data, vmid):
             data['primary_mac_address'] = validate_mac(mac)
 
 
-@celery.task(bind=True)
+@celery.task(bind=True, soft_time_limit=14400, time_limit=14700)
 def sysprep_workflow_task(self, task_id, data):
     with app.app_context():
         new_vmid = None
@@ -362,6 +369,24 @@ def sysprep_workflow_task(self, task_id, data):
                 if _task_cancelled(task_id):
                     _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
                     return
+                if _as_bool(data.get('join_domain'), False):
+                    try:
+                        from app.domain_guest_probe import probe_domain_credentials_in_guest
+                        probe_domain_credentials_in_guest(
+                            new_vmid,
+                            data,
+                            on_progress=lambda msg: update_task_progress(task_id, 72, msg),
+                        )
+                    except ValidationError as e:
+                        _fail_sysprep_task(
+                            task_id,
+                            str(e),
+                            vmid=new_vmid,
+                            hostname=hostname,
+                            error_code='domain_cred_probe',
+                            data=data,
+                        )
+                        return
                 set_lifecycle_tag(new_vmid, 'lifecycle-customizing')
                 update_task_progress(task_id, 80, "Resolving product key and writing sysprep files...")
                 _ensure_server_product_key(data, new_vmid)
@@ -428,6 +453,16 @@ def sysprep_workflow_task(self, task_id, data):
                 )
                 return
 
+        except SoftTimeLimitExceeded:
+            app.logger.error("Task %s hit soft time limit", task_id)
+            _fail_sysprep_task(
+                task_id,
+                'Workflow exceeded time limit (soft). Check worker logs / guest state.',
+                vmid=new_vmid,
+                hostname=hostname,
+                error_code='time_limit',
+                data=data,
+            )
         except Exception as e:
             app.logger.error(f"Task {task_id} failed: {e}", exc_info=True)
             _fail_sysprep_task(
@@ -440,7 +475,7 @@ def sysprep_workflow_task(self, task_id, data):
             )
 
 
-@celery.task(bind=True)
+@celery.task(bind=True, soft_time_limit=14400, time_limit=14700)
 def sysprep_verify_task(self, task_id, vmid, data):
     with app.app_context():
         data = dict(data or {})
@@ -499,7 +534,9 @@ def sysprep_verify_task(self, task_id, vmid, data):
                         f"Sysprep workflow for {data['hostname']} completed. "
                         f"Verify: {verify_summary}"
                     )
+                    batch_id = task.batch_id
                     db.session.commit()
+                    _finalize_batch_if_done(batch_id)
                 else:
                     _fail_sysprep_task(
                         task_id,
@@ -509,6 +546,16 @@ def sysprep_verify_task(self, task_id, vmid, data):
                         error_code='verify',
                         data=data,
                     )
+        except SoftTimeLimitExceeded:
+            app.logger.error("Verify task %s hit soft time limit", task_id)
+            _fail_sysprep_task(
+                task_id,
+                'Verify phase exceeded time limit (soft).',
+                vmid=vmid,
+                hostname=hostname,
+                error_code='time_limit',
+                data=data,
+            )
         except Exception as e:
             app.logger.error(f"Verify task {task_id} failed: {e}", exc_info=True)
             _fail_sysprep_task(
@@ -540,7 +587,7 @@ def sysprep_existing_vm_task(self, task_id, data):
             db.session.commit()
 
 
-@celery.task(bind=True)
+@celery.task(bind=True, soft_time_limit=14400, time_limit=14700)
 def linux_cloudinit_workflow_task(self, task_id, data):
     """Clone a Linux template, apply Proxmox cloud-init, verify via QGA."""
     with app.app_context():
@@ -665,6 +712,16 @@ def linux_cloudinit_workflow_task(self, task_id, data):
                 )
                 return
 
+        except SoftTimeLimitExceeded:
+            app.logger.error("Linux task %s hit soft time limit", task_id)
+            _fail_sysprep_task(
+                task_id,
+                'Linux workflow exceeded time limit (soft).',
+                vmid=new_vmid,
+                hostname=hostname,
+                error_code='time_limit',
+                data=data,
+            )
         except Exception as e:
             app.logger.error(f"Linux task {task_id} failed: {e}", exc_info=True)
             _fail_sysprep_task(
@@ -677,7 +734,7 @@ def linux_cloudinit_workflow_task(self, task_id, data):
             )
 
 
-@celery.task(bind=True)
+@celery.task(bind=True, soft_time_limit=7200, time_limit=7500)
 def linux_verify_task(self, task_id, vmid, data):
     with app.app_context():
         data = dict(data or {})
@@ -735,7 +792,9 @@ def linux_verify_task(self, task_id, vmid, data):
                         f"Linux cloud-init workflow for {data.get('hostname')} completed. "
                         f"Verify: {verify_summary}{extra}"
                     )
+                    batch_id = task.batch_id
                     db.session.commit()
+                    _finalize_batch_if_done(batch_id)
                 else:
                     _fail_sysprep_task(
                         task_id,
@@ -746,6 +805,16 @@ def linux_verify_task(self, task_id, vmid, data):
                         error_code='verify',
                         data=data,
                     )
+        except SoftTimeLimitExceeded:
+            app.logger.error("Linux verify task %s hit soft time limit", task_id)
+            _fail_sysprep_task(
+                task_id,
+                'Linux verify exceeded time limit (soft).',
+                vmid=vmid,
+                hostname=hostname,
+                error_code='time_limit',
+                data=data,
+            )
         except Exception as e:
             app.logger.error(f"Linux verify task {task_id} failed: {e}", exc_info=True)
             _fail_sysprep_task(

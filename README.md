@@ -64,7 +64,7 @@ Windows path is **Sysprep-only** (template → clone → guest agent). In-place 
 2. **Windows single:** Clone + Sysprep → guest agent writes unattend + `setup.ps1` → `sysprep /generalize /oobe /shutdown`.
 3. **Linux:** Clone + cloud-init → power on → guest-agent verify (optional OS disk grow / detach cloud-init drive).
 4. **Bulk (Win11):** submit shared settings + CSV desktops → one Celery task per row → Jobs filtered by `batch_id`.
-5. After Windows OOBE, **FirstLogonCommands** runs `setup.ps1` (network, cleanup, optional domain join), then logs off to the login screen.
+5. After Windows OOBE, scheduled task **`GuestOS-Setup`** (SYSTEM AtStartup) runs `setup.ps1` (network, cleanup, optional domain join) and leaves the login screen — **no AutoLogon**.
 6. GuestOS verifies setup markers / hostname / expected static IP via the guest agent.
 
 From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launch` → wizard.
@@ -92,6 +92,8 @@ From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launc
 | [docs/PDM_INTEGRATION.md](docs/PDM_INTEGRATION.md) | Machine API + PDM + lab notes |
 | [docs/openapi.yaml](docs/openapi.yaml) | Start / bulk / limits API schema |
 | [docs/FAILURE_RUNBOOK.md](docs/FAILURE_RUNBOOK.md) | Failure triage + limit saturation |
+| [docs/VMWARE_GAP_ANALYSIS.md](docs/VMWARE_GAP_ANALYSIS.md) | GuestOS vs vSphere Customization Spec (security + functionality) |
+| [docs/AD_VALIDATION.md](docs/AD_VALIDATION.md) | AD join layers, profiles, lab smoke notes |
 
 ### Docker Compose (recommended)
 
@@ -231,6 +233,8 @@ Full list and comments: [`.env.example`](.env.example). Summary by necessity:
 | Variable | Default | Notes |
 |----------|---------|--------|
 | `DOMAIN_PROFILES_JSON` | `{}` | Named AD / DNS / VLAN profiles for domain join |
+| `DOMAIN_JOIN_CRED_PROBE` | `true` | Pre-Sysprep in-clone QGA LDAP/ADSI credential check |
+| `DOMAIN_JOIN_CRED_PROBE_WAIT_SECONDS` | `90` | Max wait for guest IP during cred probe |
 | `GUESTOS_PATH_PREFIX` | empty | Subpath mount (e.g. `/guestos`); leave empty at site root |
 | `DATABASE_URL` | `sqlite:///site.db` | SQLAlchemy URL |
 | `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | local Redis | Compose overrides to the `redis` service |

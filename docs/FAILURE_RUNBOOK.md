@@ -13,13 +13,15 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 | Stuck ~88–92% after Sysprep | Shutdown wait missed / hung generalize | Console; agent bounce; orphaned clone VMID in task; worker logs `[sysprep]:` + Panther probe lines |
 | Task `FAILURE` `sysprep_guest_failed` | Sysprep validate failed in guest (AppX/Copilot/unattend) | Task message includes Panther log excerpt; fix template AppX then re-clone |
 | Fail writing unattend / setup before Sysprep | QGA `file-write` ACL / agent overload | Worker log: `agent file-write` / Permission denied — see [QGA file writes](#qga-file-writes) |
-| `verification failed` / `setup.done missing` | FirstLogon `setup.ps1` never finished | Guest `C:\ProgramData\GuestOS\` markers + transcript; on **Eval** Server check InstallPid / GVLK regression below |
-| Stuck ~98% on `pending reboot` | Pagefile/domain reboot never finalized `setup.done` | AutoLogon still enabled? `setup.pending_reboot` present; FirstLogon re-ran? |
-| Stuck ~98% waiting for `setup.ps1` after Sysprep | OOBE never reached FirstLogon (often Eval+GVLK) | Console: product-key / InstallPid `0xC004F015` → see Evaluation vs GVLK |
+| `verification failed` / `setup.done missing` | SYSTEM `GuestOS-Setup` task never finished `setup.ps1` | Guest `C:\ProgramData\GuestOS\` markers + transcript; `schtasks /Query /TN GuestOS-Setup`; on **Eval** Server check InstallPid / GVLK regression below |
+| Stuck ~98% on `pending reboot` | Pagefile/domain reboot never finalized `setup.done` | `setup.pending_reboot` present; task still registered and fires at next startup? |
+| Stuck ~98% waiting for `setup.ps1` after Sysprep | OOBE never completed / task never ran (often Eval+GVLK) | Console: product-key / InstallPid `0xC004F015` → see Evaluation vs GVLK; confirm `GuestOS-Setup` task exists |
 | `setup.ps1 failed` | Network, disk serial, pagefile, domain join | `setup.failed` contents; guest event log |
 | DHCP verify fail after `setup.done` | No lease on expected NIC | Bridge/VLAN; DHCP server; MAC match |
 | Domain verify fail / `WARNING: domain join failed` | Join failed (DC down, bad creds/DNS) or slow | Guest marker `domain-join-failed` shortens verify; check DC/DNS preflight; `PartOfDomain` via QGA |
 | Admit fails: DC/DNS unreachable | `join_domain` preflight (TCP 53/88/389) | Power on DC; fix `dns_servers` / routing before clone |
+| Task `FAILURE` `domain_cred_probe` before Sysprep | In-clone LDAP/ADSI bind failed | Read `class=` / `guest_ip=` / `username=` in task message; fix VLAN/DHCP/DNS or join account; never re-run Sysprep on that clone |
+| Admit fails: computer already exists / bad OU | Hostname uniqueness or `domain_ou` LDAP check | Rename hostname; remove stale computer object; fix OU DN |
 | Disk verify fail / `pagefile_pending_reboot` | Volume/pagefile not ready (legacy) | Prefer builds that wait for `setup.done` after pagefile reboot; check serials/letters |
 | Wrong data/pagefile roles on multi-disk template | Plan used bus order without `source_key` | Use disk planner; bind `source_key`; match sizes |
 
@@ -27,29 +29,44 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 
 `setup.ps1` is persisted as `HKLM\SOFTWARE\GuestOS\SetupPs1B64` before Sysprep
 (specialize deletes loose copies under Sysprep/ProgramData; embedding the script
-in unattend hung Sysprep in lab). FirstLogon extracts it to
-`C:\Windows\Temp\GuestOS-setup.ps1`. Markers:
+in unattend hung Sysprep in lab). Specialize registers scheduled task
+**`GuestOS-Setup`** (SYSTEM, AtStartup +45s plus a short Once+repeat catch-up
+for the first post-Sysprep boot — AtStartup alone is missed when the task is
+registered during specialize), which extracts the script to
+`C:\Windows\Temp\GuestOS-setup.ps1` via `GuestOS-FirstLogon.cmd`. There is **no**
+AutoLogon / FirstLogonCommands. Markers:
 
-- `setup.done` — FirstLogon setup finished; required for SUCCESS
+- `setup.done` — setup finished; required for SUCCESS
 - `setup.done` with detail `domain-join-failed` — OS/network setup finished but AD join failed (soft); verify emits **WARNING** and skips the long domain wait
 - `setup.failed` — setup threw; verify fails with detail
-- `setup.pending_reboot` — pagefile or domain join scheduled a reboot; verify keeps waiting until `setup.done` after the next AutoLogon
+- `setup.pending_reboot` — pagefile or domain join scheduled a reboot; verify keeps waiting until `setup.done` after the next AtStartup task run
 - `setup.lock` / transcript — concurrent run / debugging
 
-**Domain-join preflight:** When `join_domain` is true, admit/worker probe configured `dns_servers` (and resolved `domain_name`) on TCP 53/88/389 before clone so a powered-off DC fails fast instead of after Sysprep.
+**Domain-join preflight:** When `join_domain` is true, admit/worker probe configured
+`dns_servers` (and resolved `domain_name`) on TCP 53/88/389 before clone so a
+powered-off DC fails fast instead of after Sysprep.
+
+**In-clone credential probe (pre-Sysprep):** After QGA is up and **before** writing
+Sysprep payloads, GuestOS runs a short guest LDAP/ADSI bind with the join account
+(`DOMAIN_JOIN_CRED_PROBE`, default on). Failures use error code `domain_cred_probe`
+and include debug fields (`class`, `domain`, `username`, `dns_servers`,
+`bind_target`, `guest_ip`) — never the password. At probe time the NIC bridge/VLAN
+is already set, but the guest IP is usually still DHCP (not the final unattend
+static IP). That is intentional: it answers “can this account bind to the DC from
+this L2 path?” Operators can also call `POST /api/domain/test_credentials` (or use
+the UI **Test credentials** buttons) from the GuestOS host without cloning.
 
 Also written: `HKLM\SOFTWARE\GuestOS` `SetupStatus=done|failed|pending_reboot` (survives ProgramData cleanup).
 
 **Credential scrub:** After setup reaches **final** `done` (including the post-reboot finalize),
 `setup.ps1` removes `SetupPs1B64`, `C:\GuestOS\setup.ps1`, and Temp
-`GuestOS-setup.ps1` copies so domain-join credentials are not left on disk.
-While `pending_reboot` is set, `SetupPs1B64` is kept and `Keep-GuestOsAutoLogonForReboot`
-registers `HKLM\\...\\RunOnce\\GuestOSFinalizeSetup` (FirstLogonCommands do **not**
-re-run after an intentional reboot).
-Markers (`setup.done`) remain for verify.
-**Do not run `setup.ps1` from SetupComplete.cmd** — that path runs during specialize and
-specialize cleanup can delete `ProgramData\GuestOS` after the script finishes, which
-drops `setup.done` while leaving IP/disks applied. FirstLogonCommands is the only runner.
+`GuestOS-setup.ps1` copies so domain-join credentials are not left on disk, and
+**unregisters** the `GuestOS-Setup` task. While `pending_reboot` is set,
+`SetupPs1B64` is kept and the scheduled task stays enabled so AtStartup can
+finalize after reboot. Markers (`setup.done`) remain for verify.
+**Do not run `setup.ps1` from SetupComplete.cmd as the primary runner** — that path
+runs during specialize and specialize cleanup can delete `ProgramData\GuestOS`
+after the script finishes. SetupComplete only re-registers the task as a safety net.
 
 ## Agent hang
 
@@ -65,11 +82,13 @@ Task API progress alone previously looked silent in ``docker compose logs``.
    includes that support, or pass an explicit `product_key`. Do not use empty Setup
    `ProductKey`/`WillShowUI` in specialize — that fails with "could not apply
    unattend settings".
-4. If OOBE stalls / FirstLogon never runs on an **Evaluation** Server image, see
+4. If OOBE stalls / the setup task never runs on an **Evaluation** Server image, see
    [Evaluation vs GVLK](#evaluation-vs-gvlk-server-2019-regression) below —
    do **not** inject a VL GVLK into Eval.
-5. If OOBE is stuck elsewhere, check AutoLogon (`LogonCount=3`) and that
-   `GuestOS-FirstLogon.cmd` / setup markers exist.
+5. If OOBE is stuck elsewhere, confirm `GuestOS-Setup` exists
+   (`schtasks /Query /TN GuestOS-Setup`), `GuestOS-FirstLogon.cmd` is present, and
+   setup markers under `C:\ProgramData\GuestOS\`. Winlogon should **not** have
+   `AutoAdminLogon` / `DefaultPassword`.
 6. Do not re-run in-place Sysprep on a production VM; delete the clone and start a new customize.
 
 ## Evaluation vs GVLK (Server 2019 regression)
@@ -81,7 +100,8 @@ key** page. That path landed in 2.6.x and is correct for **volume-license** SKUs
 
 **Regression:** The same auto-GVLK was also applied to **Evaluation** templates
 (e.g. lab Server 2019 Standard Evaluation). A VL GVLK is invalid on Eval; OOBE
-`InstallPid` fails with **`hr=0xC004F015`**, FirstLogonCommands never run, and the
+`InstallPid` fails with **`hr=0xC004F015`**, OOBE never finishes, the
+`GuestOS-Setup` task never usefully runs `setup.ps1`, and the
 job sits at ~98% waiting for `setup.ps1` / `setup.done`.
 
 **Fix (2.6.3+):** Guest edition is detected via the guest agent. Evaluation SKUs
@@ -94,6 +114,13 @@ job sits at ~98% waiting for `setup.ps1` / `setup.done`.
 
 VL guests still get the matched GVLK when edition is known. One unattend
 template; Jinja branches on `windows_evaluation` — not separate setup trees.
+
+**Client OOBE user-name prompt (no AutoLogon):** On Win10/11,
+`HideLocalAccountScreen` does **not** apply (Server-only). Without AutoLogon,
+OOBE still asks “Who's going to use this device?” unless unattend creates a
+`LocalAccounts` entry. GuestOS creates a short-lived `GuestOSOobe` admin for
+that page; `setup.ps1` removes it after enabling built-in Administrator.
+`UnattendCreatedUser` is set for all SKUs as an extra OOBE marker.
 
 **Fail closed (2.6.5+):** If the guest-agent edition probe returns empty (WMI/QGA
 glitch), GuestOS does **not** invent a Standard GVLK. Worker log:
@@ -202,6 +229,21 @@ Mitigations:
 4. Scale workers by queue (`clone_queue` and `verify_queue`) and host resources.
 5. There is **no** in-app override — provision exceptions directly in Proxmox VE.
 6. Tune `BULK_MAX_*` / `PROVISION_MAX_PER_DAY` / `STORAGE_*_PCT` only after validating capacity.
+
+### Stuck RUNNING / PROGRESS jobs
+
+GuestOS auto-heals the ledger on Jobs page, `/api/metrics`, batch GET, and bulk
+admission:
+
+- **Finished batches** left `RUNNING` are finalized to `SUCCESS` / `FAILED` /
+  `CANCELLED` once every child task is terminal.
+- **Orphan inflight tasks** (`PENDING`/`STARTED`/`PROGRESS`) with no
+  `updated_at` activity for `TASK_STALE_AFTER_SECONDS` (default **6 hours**) are
+  marked `FAILURE` (`error_code=stale`) and any clone is tagged
+  `failed-customization`. Celery workflows also have a ~4h soft time limit.
+
+To force a sweep: open **Jobs** or call `GET /api/metrics` (response includes
+`janitor.tasks_reaped` / `janitor.batches_finalized`).
 
 ## SQLite ledger backup
 

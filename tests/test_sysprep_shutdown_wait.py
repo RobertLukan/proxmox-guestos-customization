@@ -166,6 +166,18 @@ def test_match_sysprep_failure_clean_log():
     assert sp._match_sysprep_failure('Info SYSPRP starting generalize\nInfo OK') is None
 
 
+def test_match_sysprep_failure_ignores_ie_provider_info_noise():
+    """IE provider RegOpenKeyEx Info lines must not abort an in-progress Sysprep."""
+    blob = (
+        "2026-08-14 21:50:34, Info                  SYSPRP [IE sysprep provider] "
+        "RegOpenKeyEx failed on 'Software\\Microsoft\\Internet Explorer\\User Preferences' "
+        "(0x00000002)\n"
+        "2026-08-14 21:50:34, Info                  SYSPRP [IE sysprep provider] "
+        "RegOpenKeyEx on 'Software\\Microsoft\\Internet Explorer\\User Preferences' returned 2\n"
+    )
+    assert sp._match_sysprep_failure(blob) is None
+
+
 def test_probe_sysprep_panther_failure_from_setupact(monkeypatch):
     def _tail(vmid, path, lines=80):
         if 'setuperr' in path.lower():

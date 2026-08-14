@@ -8,7 +8,7 @@ needs community reports**.
 **GuestOS release when this matrix was last updated:** see [VERSION](../VERSION)
 (matrix date below). Prefer current `main` / latest GHCR tag when testing.
 
-**Matrix date:** 2026-08-12 (GuestOS **2.7.1** lab reconfirm)
+**Matrix date:** 2026-08-14 (GuestOS **2.7.1** lab; 2019 static+AD added)
 
 ## What “lab OK” means
 
@@ -27,7 +27,7 @@ licensing advice, or production certification.
 
 | OS | Channel / edition (as seen by guest) | Tag used | DHCP | Static IP | AD join | Configure disks | Notes |
 |----|--------------------------------------|----------|------|-----------|---------|-----------------|-------|
-| Windows Server **2019** | **Standard Evaluation** (`ServerStandardEval`) | `windowsserver2019` | OK | — | OK | OK | Eval path (no VL GVLK); reconfirmed 2.7.1 (DHCP+AD+disks) |
+| Windows Server **2019** | **Standard Evaluation** (`ServerStandardEval`) | `windowsserver2019` | OK | OK | OK | OK | Eval path (no VL GVLK); DHCP+AD+disks reconfirmed 2.7.1; static `192.168.123.210` + AD+disks 2026-08-14 (`S19ST224349`) |
 | Windows Server **2022** | **Standard** volume-license (`ServerStandard`) | `windowsserver2022` | OK | — | OK | OK | Auto GVLK for OOBE; reconfirmed 2.7.1 (DHCP+AD+disks) |
 | Windows Server **2025** | **Datacenter Evaluation** | `windowsserver2025` | — | OK | — | — | Eval path; static IP smoke 2026-08 |
 | Windows **11** | Desktop / VDI template | `windows11` | OK | — | OK | — | Disks N/A (Win11); reconfirmed 2.7.1 (DHCP+AD) |
@@ -96,20 +96,22 @@ Maintainers will update this matrix when reports are confirmed.
 |---------|-----------|------------------|----------------------|-------|--------------|
 | Clone + customize + verify | OK | OK | OK | OK | OK (cloud-init) |
 | DHCP | OK | OK | — | OK | — |
-| Static IP | — | — | OK | — | OK |
+| Static IP | OK | — | OK | — | OK |
 | AD join (`lab.test`) | OK | OK | — | OK | N/A |
 | Disks (OS + pagefile + data) | OK | OK | — | N/A | OS grow OK |
 | Bulk Win11 batch | — | — | — | Lab-exercised separately | N/A |
 | IPv6 / multi-NIC | Not smoked | Not smoked | Not smoked | Not smoked | Lab OK (2-NIC) |
 
-Static IP is lab-OK on Server 2025 Datacenter Eval and Ubuntu static smoke; Windows
-IPv6/multi-NIC remain unit-covered only. Community reports welcome for other
-OS × feature combinations.
+Static IP is lab-OK on Server **2019** Eval (DHCP+AD path also OK; static+AD+disks
+2026-08-14), Server **2025** Datacenter Eval, and Ubuntu. Windows IPv6/multi-NIC
+remain unit-covered only. Community reports welcome for other OS × feature
+combinations.
 
 ## Related docs
 
 - Golden image prep: [WINDOWS_TEMPLATE.md](WINDOWS_TEMPLATE.md), [LINUX_TEMPLATE.md](LINUX_TEMPLATE.md)
 - AD join checklist: [AD_VALIDATION.md](AD_VALIDATION.md)
+- vs vSphere Customization Spec: [VMWARE_GAP_ANALYSIS.md](VMWARE_GAP_ANALYSIS.md)
 - Next-round smoke backlog (NTP, etc.): [SMOKE_BACKLOG.md](SMOKE_BACKLOG.md)
 - Eval vs GVLK: [FAILURE_RUNBOOK.md](FAILURE_RUNBOOK.md#evaluation-vs-gvlk-server-2019-regression)
 - Failure triage: [FAILURE_RUNBOOK.md](FAILURE_RUNBOOK.md)

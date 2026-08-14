@@ -171,20 +171,10 @@ def _prepare_domain_join(data):
         data['workgroup'] = validate_workgroup(data.get('workgroup') or DEFAULT_WORKGROUP)
         return
 
-    domain = validate_domain(data.get('domain_name'))
-    username = (data.get('domain_username') or '').strip()
-    password = data.get('domain_password')
-    if not username or not password:
-        raise ValidationError("Domain join requires a username and password.")
-    ou = (data.get('domain_ou') or '').strip()
+    from app.domain_credentials import prepare_join_credentials
 
-    blob = {'domain': domain, 'username': username, 'password': password}
-    if ou:
-        blob['ou'] = ou
-
+    blob = prepare_join_credentials(data)
     data['join_domain'] = True
-    data['domain_name'] = domain
-    data['domain_ou'] = ou
     data['workgroup'] = ''
     data['domain_join_b64'] = base64.b64encode(
         json.dumps(blob).encode('utf-8')
@@ -335,10 +325,10 @@ def _render_sysprep_files(data):
     return unattended_xml, setup_ps1, setup_complete
 
 
-# Survives specialize better than Temp/GuestOS; FirstLogonCommands only invokes this.
+# Survives specialize; GuestOS-Setup (SYSTEM AtStartup) invokes this launcher.
 _FIRSTLOGON_CMD = (
     '@echo off\r\n'
-    'rem GuestOS: extract setup.ps1 from HKLM and run it (FirstLogonCommands).\r\n'
+    'rem GuestOS: extract setup.ps1 from HKLM and run it (SYSTEM scheduled task).\r\n'
     'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
     "\"$ErrorActionPreference='Stop'; "
     "$b=(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\GuestOS' -Name SetupPs1B64 -ErrorAction Stop).SetupPs1B64; "
@@ -347,9 +337,17 @@ _FIRSTLOGON_CMD = (
     '& $out"\r\n'
 )
 
+_REGISTER_SETUP_CMD = (
+    '@echo off\r\n'
+    'REM Register GuestOS-Setup: SYSTEM AtStartup task that runs GuestOS-FirstLogon.cmd.\r\n'
+    'powershell.exe -NoProfile -ExecutionPolicy Bypass -File '
+    '"%SystemRoot%\\System32\\GuestOS-RegisterSetup.ps1"\r\n'
+    'exit /b %ERRORLEVEL%\r\n'
+)
+
 
 def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
-    """Write the answer file and persist setup.ps1 for FirstLogon.
+    """Write the answer file and persist setup.ps1 for the SYSTEM setup task.
 
     Loose files under ``System32\\Sysprep`` / ``ProgramData\\GuestOS`` are often
     deleted by specialize cleanup (while ``unattended.xml`` itself survives).
@@ -358,11 +356,22 @@ def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
     (written in-guest from a staged file to avoid guest-agent cmdline limits).
     """
     write_file_to_guest(vmid, unattended_xml, r'C:\Windows\System32\Sysprep\unattended.xml')
-    # Short FirstLogon target — avoids a huge powershell -Command in unattend.
+    # Launcher + task registration (specialize RunSynchronous calls RegisterSetup).
     write_file_to_guest(
         vmid,
         _FIRSTLOGON_CMD.encode('ascii'),
         r'C:\Windows\System32\GuestOS-FirstLogon.cmd',
+    )
+    write_file_to_guest(
+        vmid,
+        _REGISTER_SETUP_CMD.encode('ascii'),
+        r'C:\Windows\System32\GuestOS-RegisterSetup.cmd',
+    )
+    register_ps1 = render_template('sysprep/GuestOS-RegisterSetup.ps1').encode('utf-8-sig')
+    write_file_to_guest(
+        vmid,
+        register_ps1,
+        r'C:\Windows\System32\GuestOS-RegisterSetup.ps1',
     )
     staged = r'C:\Windows\Temp\GuestOS-setup.staged.ps1'
     last_err = None

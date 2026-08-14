@@ -1,5 +1,5 @@
-# Post-Sysprep configuration applied by FirstLogonCommands.
-# Primary on-disk copy: C:\Windows\System32\Sysprep\GuestOS-setup.ps1
+# Post-Sysprep configuration applied by GuestOS-Setup (SYSTEM AtStartup task).
+# Launcher: C:\Windows\System32\GuestOS-FirstLogon.cmd (extracts SetupPs1B64).
 #
 # NOTE: this file is NOT autoescaped by Jinja (it is not HTML/XML). Every value
 # interpolated below is validated server-side before rendering:
@@ -18,9 +18,8 @@ try {
     Start-Transcript -Path 'C:\ProgramData\GuestOS\setup.log' -Append | Out-Null
 } catch {}
 
-# SetupComplete.cmd must NOT invoke this script. After a successful FirstLogon
-# run (or intentional reboot for pagefile), skip heavy work so a second launch
-# cannot hang on pagefile/DHCP again.
+# SetupComplete.cmd must NOT invoke this script as the primary runner. After a
+# successful run (or intentional reboot for pagefile/domain), skip heavy work.
 function Test-GuestOsAlreadyDone {
     if (Test-Path -LiteralPath 'C:\ProgramData\GuestOS\setup.done') { return $true }
     if (Test-Path -LiteralPath 'C:\Windows\GuestOS\setup.done') { return $true }
@@ -45,15 +44,28 @@ if (Test-GuestOsAlreadyDone) {
     exit 0
 }
 
-function Invoke-GuestOsLogoff {
+function Test-GuestOsRunningAsSystem {
+    try {
+        return ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18')
+    } catch {
+        return $false
+    }
+}
+
+function Invoke-GuestOsSessionEnd {
+    # SYSTEM AtStartup has no interactive desktop to log off; leave the login screen.
+    if (Test-GuestOsRunningAsSystem) {
+        Write-Output "setup.ps1: SYSTEM runner finished; leaving login screen."
+        return
+    }
     Write-Output "setup.ps1: Logging off interactive session to end at lock screen."
     shutdown /l /f
 }
 
-# Overlapping FirstLogon invocations: first writer wins the lock.
-# SetupComplete must NOT run this script (specialize can delete ProgramData\GuestOS
-# after SetupComplete returns). Take over when the lock owner PID is gone or
-# the lock is older than 15 minutes.
+# Overlapping invocations: first writer wins the lock.
+# SetupComplete must NOT run this script as primary (specialize can delete
+# ProgramData\GuestOS after SetupComplete returns). Take over when the lock
+# owner PID is gone or the lock is older than 15 minutes.
 $lockPath = 'C:\ProgramData\GuestOS\setup.lock'
 function Test-GuestOsSetupLockStale {
     param([string]$Path)
@@ -106,7 +118,8 @@ function Write-GuestOsSetupMarker {
         Remove-Item -LiteralPath 'C:\Windows\GuestOS\setup.pending_reboot' -Force -ErrorAction SilentlyContinue
     }
 }
-function Clear-GuestOsAutoLogon {
+function Clear-GuestOsWinlogonSecrets {
+    # Scrub any leftover AutoLogon plaintext (should be absent with the SYSTEM runner).
     try {
         $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
         Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value '0' -ErrorAction SilentlyContinue
@@ -114,37 +127,34 @@ function Clear-GuestOsAutoLogon {
         Remove-ItemProperty -Path $winlogon -Name DefaultPassword -ErrorAction SilentlyContinue
     } catch {}
 }
-function Keep-GuestOsAutoLogonForReboot {
+function Ensure-GuestOsSetupTask {
+    # Leave / re-register GuestOS-Setup so AtStartup re-runs after pending_reboot.
     try {
-        $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
-        Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value '1' -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $winlogon -Name AutoLogonCount -Value 1 -Type DWord -ErrorAction SilentlyContinue
-    } catch {}
-    # FirstLogonCommands run only once after OOBE. An intentional pagefile/domain
-    # reboot must re-invoke setup via RunOnce so pending_reboot can finalize.
-    try {
-        $cmd = 'C:\Windows\System32\GuestOS-FirstLogon.cmd'
-        if (-not (Test-Path -LiteralPath $cmd)) {
-            @(
-                '@echo off',
-                'rem GuestOS: extract setup.ps1 from HKLM and run it (RunOnce after pending_reboot).',
-                'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference=''Stop''; $b=(Get-ItemProperty -Path ''HKLM:\SOFTWARE\GuestOS'' -Name SetupPs1B64 -ErrorAction Stop).SetupPs1B64; $out=$env:TEMP+''\GuestOS-setup.ps1''; [IO.File]::WriteAllBytes($out,[Convert]::FromBase64String($b)); & $out"'
-            ) | Set-Content -LiteralPath $cmd -Encoding ASCII
+        $existing = Get-ScheduledTask -TaskName 'GuestOS-Setup' -ErrorAction SilentlyContinue
+        if (-not $existing) {
+            $reg = 'C:\Windows\System32\GuestOS-RegisterSetup.cmd'
+            if (Test-Path -LiteralPath $reg) {
+                & cmd.exe /c "`"$reg`""
+            }
+        } else {
+            Enable-ScheduledTask -TaskName 'GuestOS-Setup' -ErrorAction SilentlyContinue | Out-Null
         }
-        $runOnce = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'
-        if (-not (Test-Path -LiteralPath $runOnce)) {
-            New-Item -Path $runOnce -Force | Out-Null
-        }
-        Set-ItemProperty -Path $runOnce -Name 'GuestOSFinalizeSetup' `
-            -Value ("cmd.exe /c `"" + $cmd + "`"") -ErrorAction SilentlyContinue
-        Write-Output "setup.ps1: Registered RunOnce GuestOSFinalizeSetup for post-reboot finalize."
+        Write-Output "setup.ps1: GuestOS-Setup task left enabled for post-reboot run."
     } catch {
-        Write-Output "setup.ps1: RunOnce registration warning: $($_.Exception.Message)"
+        Write-Output "setup.ps1: Ensure-GuestOsSetupTask warning: $($_.Exception.Message)"
+    }
+}
+function Disable-GuestOsSetupTask {
+    try {
+        Unregister-ScheduledTask -TaskName 'GuestOS-Setup' -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Output "setup.ps1: Unregistered GuestOS-Setup scheduled task."
+    } catch {
+        Write-Output "setup.ps1: Disable-GuestOsSetupTask warning: $($_.Exception.Message)"
     }
 }
 function Scrub-GuestOsSetupArtifacts {
     # Remove durable setup.ps1 (may contain domain_join_b64). Keep SetupPs1B64
-    # until final done so RunOnce/FirstLogon can re-run after pending_reboot.
+    # until final done so the AtStartup task can re-run after pending_reboot.
     try {
         Remove-ItemProperty -Path 'HKLM:\SOFTWARE\GuestOS' -Name SetupPs1B64 -ErrorAction SilentlyContinue
     } catch {}
@@ -155,14 +165,35 @@ function Scrub-GuestOsSetupArtifacts {
         Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
     }
 }
+function Wait-GuestOsNetworkReady {
+    param([int]$TimeoutSeconds = 300)
+    Write-Output "setup.ps1: Waiting for non-link-local IPv4 (up to ${TimeoutSeconds}s)..."
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $ips = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.IPAddress -and
+                $_.IPAddress -notlike '127.*' -and
+                $_.IPAddress -notlike '169.254.*'
+            } |
+            Select-Object -ExpandProperty IPAddress)
+        if ($ips.Count -gt 0) {
+            Write-Output "setup.ps1: network ready ($($ips[0]))."
+            return
+        }
+        Start-Sleep -Seconds 5
+    }
+    Write-Output "setup.ps1: network wait timed out; continuing anyway."
+}
 # After an intentional pagefile/domain reboot, finalize done and exit (no re-run).
 if (Test-GuestOsPendingReboot) {
     Write-Output "setup.ps1: pending_reboot observed -- marking setup done."
     Write-GuestOsSetupMarker -Status done -Detail 'ok-after-reboot'
     Scrub-GuestOsSetupArtifacts
-    Clear-GuestOsAutoLogon
+    Disable-GuestOsSetupTask
+    Clear-GuestOsWinlogonSecrets
     try { Stop-Transcript | Out-Null } catch {}
-    Invoke-GuestOsLogoff
+    Invoke-GuestOsSessionEnd
     exit 0
 }
 if (Test-Path -LiteralPath $lockPath) {
@@ -186,6 +217,8 @@ try {
 }
 
 try {
+
+Wait-GuestOsNetworkReady
 
 {% if manage_disks and disk_plan_b64 %}
 # --- Disk reconcile (optional) --------------------------------------------
@@ -583,7 +616,8 @@ Write-Output "setup.ps1: Network configuration complete."
 
 # --- Local accounts --------------------------------------------------------
 # Sysprep /generalize does NOT remove accounts that existed on the template
-# (e.g. an interactive "rl" user). Enable the built-in Administrator and drop
+# (e.g. an interactive "rl" user). Unattend also creates GuestOSOobe so client
+# OOBE can finish without AutoLogon. Enable the built-in Administrator and drop
 # every other local account so clones boot to a clean admin-only local state.
 # Built-in / system accounts are left alone.
 Write-Output "setup.ps1: Enabling built-in Administrator account."
@@ -611,7 +645,7 @@ Get-LocalUser | Where-Object { $keepLocalUsers -notcontains $_.Name } | ForEach-
 }
 
 # Scrub plaintext admin password from answer files left on disk (Winlogon
-# DefaultPassword remains until Clear-GuestOsAutoLogon after final done).
+# DefaultPassword should already be absent without AutoLogon).
 Remove-Item -LiteralPath 'C:\Windows\System32\Sysprep\unattended.xml' -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath 'C:\Windows\Panther\unattend.xml' -Force -ErrorAction SilentlyContinue
 
@@ -625,8 +659,31 @@ $j = ConvertFrom-Json ([System.Text.Encoding]::UTF8.GetString([System.Convert]::
 $sec = ConvertTo-SecureString $j.password -AsPlainText -Force
 $cred = New-Object System.Management.Automation.PSCredential($j.username, $sec)
 
+function Format-DomainJoinError([string]$msg) {
+  $m = $msg.ToLowerInvariant()
+  if ($m -match 'logon failure|username or password is incorrect|0x8007052e|52e') {
+    return "invalid_credentials: $msg"
+  }
+  if ($m -match 'already a member|already exists|0x80071392|directory object') {
+    return "computer_account: $msg"
+  }
+  if ($m -match 'network path|rpc server|domain controller|dns|timeout|unreachable|0x8007054b') {
+    return "unreachable: $msg"
+  }
+  if ($m -match 'access is denied|insufficient|0x80070005|permission') {
+    return "permission_denied: $msg"
+  }
+  if ($m -match 'account|locked|disabled|password expired|logon hours') {
+    return "account_restricted: $msg"
+  }
+  return "other: $msg"
+}
+
+Write-Output "setup.ps1: Domain join starting domain=$($j.domain) username=$($j.username)$(if ($j.ou) { " ou=$($j.ou)" } else { '' })."
+
 # Wait for the network/DNS to be usable, then join with a few retries.
 $joined = $false
+$lastJoinErr = ''
 for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
     try {
         {% if domain_ou %}
@@ -635,7 +692,7 @@ for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
         Add-Computer -DomainName $j.domain -Credential $cred -Force -ErrorAction Stop
         {% endif %}
         $joined = $true
-        Write-Output "setup.ps1: Joined domain $($j.domain)."
+        Write-Output "setup.ps1: Joined domain $($j.domain) as $($j.username)."
         # Best-effort: pull time from the domain (PDC) before the membership reboot.
         # Does not fail the job if the DC clock/NTP is wrong — that is an AD/lab issue.
         try {
@@ -644,32 +701,34 @@ for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
             Write-Output "setup.ps1: w32tm /resync skipped: $($_.Exception.Message)"
         }
     } catch {
-        Write-Output "setup.ps1: Domain join attempt $($i + 1) failed: $($_.Exception.Message)"
+        $lastJoinErr = Format-DomainJoinError $_.Exception.Message
+        Write-Output "setup.ps1: Domain join attempt $($i + 1) failed ($lastJoinErr)"
         Start-Sleep -Seconds 15
     }
 }
 
-# Do not scrub SetupPs1B64 before an intentional reboot — RunOnce must
+# Do not scrub SetupPs1B64 before an intentional reboot — the AtStartup task must
 # re-extract setup.ps1 to mark done. Scrub only on final done paths.
 if ($joined) {
     Write-Output "setup.ps1: Restarting to finalize domain membership."
-    Keep-GuestOsAutoLogonForReboot
+    Ensure-GuestOsSetupTask
     Write-GuestOsSetupMarker -Status pending_reboot -Detail 'domain-join'
     try { Stop-Transcript | Out-Null } catch {}
     shutdown /r /t 5
 } elseif ($pagefileLetter) {
     Write-Output "setup.ps1: Restarting so pagefile on ${pagefileLetter}: becomes active."
-    Keep-GuestOsAutoLogonForReboot
+    Ensure-GuestOsSetupTask
     Write-GuestOsSetupMarker -Status pending_reboot -Detail 'pagefile'
     try { Stop-Transcript | Out-Null } catch {}
     shutdown /r /t 5
 } else {
-    Write-Output "setup.ps1: Domain join FAILED after retries; leaving machine in workgroup."
+    Write-Output "setup.ps1: Domain join FAILED after retries domain=$($j.domain) username=$($j.username) last=$lastJoinErr; leaving machine in workgroup."
     Write-GuestOsSetupMarker -Status done -Detail 'domain-join-failed'
     Scrub-GuestOsSetupArtifacts
-    Clear-GuestOsAutoLogon
+    Disable-GuestOsSetupTask
+    Clear-GuestOsWinlogonSecrets
     try { Stop-Transcript | Out-Null } catch {}
-    Invoke-GuestOsLogoff
+    Invoke-GuestOsSessionEnd
 }
 {% else %}
 # Workgroup (non-domain) path.
@@ -690,16 +749,17 @@ if ($workgroup) {
 
 if ($pagefileLetter) {
     Write-Output "setup.ps1: Restarting so pagefile on ${pagefileLetter}: becomes active."
-    Keep-GuestOsAutoLogonForReboot
+    Ensure-GuestOsSetupTask
     Write-GuestOsSetupMarker -Status pending_reboot -Detail 'pagefile'
     try { Stop-Transcript | Out-Null } catch {}
     shutdown /r /t 5
 } else {
     Write-GuestOsSetupMarker -Status done -Detail 'ok'
     Scrub-GuestOsSetupArtifacts
-    Clear-GuestOsAutoLogon
+    Disable-GuestOsSetupTask
+    Clear-GuestOsWinlogonSecrets
     try { Stop-Transcript | Out-Null } catch {}
-    Invoke-GuestOsLogoff
+    Invoke-GuestOsSessionEnd
 }
 {% endif %}
 } catch {

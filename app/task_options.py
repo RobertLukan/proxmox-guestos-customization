@@ -6,7 +6,6 @@ import json
 _SECRET_KEYS = frozenset({
     'administrator_password',
     'domain_password',
-    'domain_username',  # keep name out of chips; domain_name/profile remain
     'domain_join_b64',
     'cipassword',
     'sshkeys',
@@ -41,6 +40,7 @@ def build_task_options(data: dict | None) -> dict:
             '1', 'true', 'yes', 'on',
         )
     _set('domain_name', (raw.get('domain_name') or '').strip() or None)
+    _set('domain_username', (raw.get('domain_username') or '').strip() or None)
     _set('domain_profile', (raw.get('domain_profile') or '').strip() or None)
     if 'use_domain_profile_credentials' in raw:
         upc = raw.get('use_domain_profile_credentials')

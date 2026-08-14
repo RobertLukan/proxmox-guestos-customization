@@ -92,15 +92,21 @@ pagefile/data when needed, or reuses existing non-boot disks via the planner
    click **Do this later**; empty Setup `ProductKey`/`WillShowUI` in specialize
    fails.) Pass `product_key` to use your own key instead.
    **Evaluation** images never get a VL GVLK — that combination fails OOBE
-   `InstallPid` (`0xC004F015`) and blocks FirstLogon (regression found when
+   `InstallPid` (`0xC004F015`) and blocks post-OOBE setup (regression found when
    Server 2022 GVLK auto-inject was added; fixed in 2.6.3 — see
    [FAILURE_RUNBOOK.md](FAILURE_RUNBOOK.md#evaluation-vs-gvlk-server-2019-regression)).
 3. Write `unattended.xml` and persist `setup.ps1` as
    `HKLM\SOFTWARE\GuestOS\SetupPs1B64` (specialize deletes loose Sysprep/ProgramData
-   copies; embedding in unattend hung Sysprep). FirstLogon extracts and runs it.
+   copies; embedding in unattend hung Sysprep). Specialize registers scheduled task
+   **`GuestOS-Setup`** (SYSTEM AtStartup) which extracts and runs setup — **no AutoLogon**.
+   Unattend creates a short-lived `GuestOSOobe` local admin so Win10/11 client OOBE
+   does not stop on “Who's going to use this device?” (`HideLocalAccountScreen` is
+   Server-only); `setup.ps1` removes that account after enabling built-in Administrator.
+   The scheduled task also uses a short Once+repeat trigger because AtStartup is
+   missed when the task is registered during specialize on the same boot.
    Large staging writes use chunked guest-agent transfers.
-4. Run Sysprep generalize/OOBE; on first logon, `setup.ps1` applies network /
-   cleanup / optional domain join / disk letters.
+4. Run Sysprep generalize/OOBE; after OOBE the AtStartup task runs `setup.ps1`
+   (network / cleanup / optional domain join / disk letters) and leaves the login screen.
 5. Verify durable setup markers and expected hostname/IP before marking SUCCESS.
 
 If a job fails mid-flight, the clone may remain on the cluster — see

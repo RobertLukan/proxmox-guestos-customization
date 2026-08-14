@@ -51,6 +51,7 @@ docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 | GET | `/api/tasks` / `/api/tasks/<id>` | Bearer / token **or** session |
 | GET/POST | `/api/specs` | Bearer / token **or** session+CSRF |
 | GET/PUT/DELETE | `/api/specs/<id>` | Bearer / token **or** session+CSRF |
+| POST | `/api/domain/test_credentials` | Bearer / token **or** session+CSRF |
 | GET | `/api/provision_limits` | Bearer / token **or** session |
 
 `POST /start_sysprep_existing_vm_task` returns **403** (disabled — protects production VMs).

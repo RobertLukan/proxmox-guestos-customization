@@ -1,14 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
     <!--
-      specialize: hostname/timezone + enable built-in Administrator (needed for AutoLogon).
-      setup.ps1 is delivered via HKLM\SOFTWARE\GuestOS SetupPs1B64 (survives specialize
-      cleanup that deletes loose files under Sysprep/ProgramData). FirstLogon extracts it.
+      specialize: hostname/timezone + enable built-in Administrator + register
+      GuestOS-Setup (SYSTEM AtStartup scheduled task). setup.ps1 is delivered via
+      HKLM\SOFTWARE\GuestOS SetupPs1B64 (survives specialize cleanup). The task
+      extracts and runs it after OOBE — no AutoLogon / FirstLogonCommands.
+
+      Client OOBE (Win10/11) requires a LocalAccounts entry when AutoLogon is
+      absent; HideLocalAccountScreen only applies to Server. A short-lived
+      GuestOSOobe admin satisfies the "Who's going to use this device?" page;
+      setup.ps1 removes it after enabling built-in Administrator.
 
       Evaluation vs volume-license is one template with Jinja branches — not separate files:
       - VL Server: optional Shell-Setup ProductKey (GVLK) so OOBE skips Enter product key
       - Evaluation: never inject a VL GVLK; mark product-key OOBE as already shown so
-        InstallPid does not fail with 0xC004F015 and block FirstLogonCommands
+        InstallPid does not fail with 0xC004F015 and leave the guest stuck in OOBE
     -->
     <settings pass="specialize">
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -24,16 +30,19 @@
             <RunSynchronous>
                 <RunSynchronousCommand wcm:action="add">
                     <Order>1</Order>
-                    <Description>Enable built-in Administrator for GuestOS AutoLogon</Description>
+                    <Description>Enable built-in Administrator for GuestOS local admin</Description>
                     <Path>cmd.exe /c net user Administrator /active:yes</Path>
                 </RunSynchronousCommand>
-                {% if windows_evaluation %}
                 <RunSynchronousCommand wcm:action="add">
                     <Order>2</Order>
-                    <Description>GuestOS: skip OOBE product-key UI on Evaluation SKUs</Description>
-                    <Path>cmd.exe /c reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE" /v SetupDisplayedProductKey /t REG_DWORD /d 1 /f &amp; reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE" /v UnattendCreatedUser /t REG_DWORD /d 1 /f</Path>
+                    <Description>GuestOS: mark unattend-created user for OOBE</Description>
+                    <Path>cmd.exe /c reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE" /v UnattendCreatedUser /t REG_DWORD /d 1 /f{% if windows_evaluation %} &amp; reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE" /v SetupDisplayedProductKey /t REG_DWORD /d 1 /f{% endif %}</Path>
                 </RunSynchronousCommand>
-                {% endif %}
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>3</Order>
+                    <Description>GuestOS: register SYSTEM AtStartup setup task</Description>
+                    <Path>cmd.exe /c C:\Windows\System32\GuestOS-RegisterSetup.cmd</Path>
+                </RunSynchronousCommand>
             </RunSynchronous>
         </component>
     </settings>
@@ -51,33 +60,29 @@
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
                 <HideLocalAccountScreen>true</HideLocalAccountScreen>
+                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
             </OOBE>
             <UserAccounts>
                 <AdministratorPassword>
                     <Value>{{ administrator_password }}</Value>
                     <PlainText>true</PlainText>
                 </AdministratorPassword>
+                {# Win10/11 client OOBE still prompts for a user name unless a
+                   LocalAccounts entry exists (HideLocalAccountScreen is Server-only).
+                   GuestOSOobe is removed by setup.ps1 account cleanup. #}
+                <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                        <Name>GuestOSOobe</Name>
+                        <DisplayName>GuestOS</DisplayName>
+                        <Group>Administrators</Group>
+                        <Password>
+                            <Value>{{ administrator_password }}</Value>
+                            <PlainText>true</PlainText>
+                        </Password>
+                    </LocalAccount>
+                </LocalAccounts>
             </UserAccounts>
-            <!-- AutoLogon a few times so FirstLogonCommands can retry if setup.ps1
-                 reboots (pagefile/domain) or a transient failure occurs. -->
-            <AutoLogon>
-                <Enabled>true</Enabled>
-                <Username>Administrator</Username>
-                <LogonCount>3</LogonCount>
-                <Password>
-                    <Value>{{ administrator_password }}</Value>
-                    <PlainText>true</PlainText>
-                </Password>
-            </AutoLogon>
-            <FirstLogonCommands>
-                <SynchronousCommand wcm:action="add">
-                    <Order>1</Order>
-                    <Description>GuestOS post-sysprep network and accounts</Description>
-                    <!-- Short launcher only — long -Command lines are fragile on Server 2019.
-                         GuestOS-FirstLogon.cmd is written by GuestOS before Sysprep. -->
-                    <CommandLine>cmd.exe /c C:\Windows\System32\GuestOS-FirstLogon.cmd</CommandLine>
-                </SynchronousCommand>
-            </FirstLogonCommands>
+            {# No AutoLogon / FirstLogonCommands: GuestOS-Setup (SYSTEM AtStartup) runs setup.ps1. #}
         </component>
     </settings>
 </unattend>

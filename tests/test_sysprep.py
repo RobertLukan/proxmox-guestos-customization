@@ -65,16 +65,22 @@ def test_unattend_sets_hostname_and_timezone():
     assert '<ComputerName>WINSRV19-01</ComputerName>' in xml
     assert '<TimeZone>Central European Standard Time</TimeZone>' in xml
     assert '<InputLocale>en-US</InputLocale>' in xml
-    assert 'FirstLogonCommands' in xml
-    assert 'GuestOS-FirstLogon.cmd' in xml
+    assert 'GuestOS-RegisterSetup.cmd' in xml
+    assert 'register SYSTEM AtStartup setup task' in xml
+    assert '<FirstLogonCommands>' not in xml
+    assert '<AutoLogon>' not in xml
     assert 'GUESTOS_SETUP_B64' not in xml  # must NOT embed huge blob in unattend (hangs Sysprep)
 
-    assert '<AutoLogon>' in xml
     assert 'net user Administrator /active:yes' in xml
     assert 'Microsoft-Windows-Setup' not in xml
     assert '<WillShowUI>' not in xml
     assert '<ProductKey>' not in xml
     assert 'SetupDisplayedProductKey' not in xml  # VL / non-eval path
+    # Client OOBE needs LocalAccounts when AutoLogon is absent (Server-only HideLocalAccountScreen).
+    assert 'UnattendCreatedUser' in xml
+    assert '<LocalAccounts>' in xml
+    assert '<Name>GuestOSOobe</Name>' in xml
+    assert '<HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>' in xml
 
 
 def test_unattend_evaluation_skips_product_key_and_marks_oobe():
@@ -87,8 +93,13 @@ def test_unattend_evaluation_skips_product_key_and_marks_oobe():
     xml = xml.decode()
     assert '<ProductKey>' not in xml
     assert 'SetupDisplayedProductKey' in xml
-    assert 'skip OOBE product-key UI on Evaluation' in xml
-    assert 'GuestOS-FirstLogon.cmd' in xml
+    assert 'UnattendCreatedUser' in xml
+    assert 'mark unattend-created user for OOBE' in xml
+    assert 'GuestOS-RegisterSetup.cmd' in xml
+    assert '<LocalAccounts>' in xml
+    assert '<Name>GuestOSOobe</Name>' in xml
+    assert '<AutoLogon>' not in xml
+    assert '<FirstLogonCommands>' not in xml
 
 
 def test_unattend_includes_product_key_when_set():
@@ -261,15 +272,32 @@ def test_setup_ps1_resets_recycle_bin_on_data_volumes():
         ps1 = ps1.decode()
     assert 'Reset-GuestOsRecycleBin' in ps1
     assert 'pending_reboot' in ps1
-    assert 'Keep-GuestOsAutoLogonForReboot' in ps1
-    assert 'GuestOSFinalizeSetup' in ps1
-    assert 'RunOnce' in ps1
+    assert 'Ensure-GuestOsSetupTask' in ps1
+    assert 'Disable-GuestOsSetupTask' in ps1
+    assert 'Wait-GuestOsNetworkReady' in ps1
+    assert 'Keep-GuestOsAutoLogonForReboot' not in ps1
+    assert 'GuestOSFinalizeSetup' not in ps1
+    assert 'AutoAdminLogon' in ps1  # scrub leftover only
     assert 'pending_reboot observed -- marking setup done' in ps1
-    assert 'Invoke-GuestOsLogoff' in ps1
+    assert 'Invoke-GuestOsSessionEnd' in ps1
+    assert 'Invoke-GuestOsLogoff' not in ps1
     assert 'Removing stale pagefile' in ps1
     assert 'function Reset-GuestOsRecycleBin' in ps1
     assert "Remove-Item -LiteralPath $path -Recurse -Force" in ps1
     assert 'Reset-GuestOsRecycleBin -Letter $Letter' in ps1
+
+
+def test_setup_complete_defers_to_scheduled_task():
+    """SetupComplete must not run setup.ps1 (specialize cleanup drops ProgramData)."""
+    data = _base_data()
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        _xml, _ps1, cmd = _render_sysprep_files(data)
+    cmd = cmd.decode()
+    assert 'deferring GuestOS setup.ps1 to GuestOS-Setup scheduled task' in cmd
+    assert 'GuestOS-RegisterSetup.cmd' in cmd
+    assert r'C:\ProgramData\GuestOS\setup.ps1' not in cmd
+    assert 'powershell.exe -File' not in cmd
 
 
 def test_setup_ps1_optional_ipv6():
@@ -312,16 +340,40 @@ def test_setup_ps1_enables_admin_and_removes_other_local_users():
     assert 'keepLocalUsers' in ps1
 
 
-def test_setup_complete_defers_to_firstlogon():
-    """SetupComplete must not run setup.ps1 (specialize cleanup drops ProgramData)."""
-    data = _base_data()
+def test_write_sysprep_files_registers_task_launcher(monkeypatch):
+    """Host writes RegisterSetup + FirstLogon launcher before Sysprep."""
+    from app import sysprep_render as sr
+
+    written = []
+
+    def _write(vmid, content, path):
+        written.append(path)
+        return None
+
+    monkeypatch.setattr(sr, 'write_file_to_guest', _write)
+    monkeypatch.setattr(
+        sr,
+        'run_command_in_guest',
+        lambda *a, **k: None,
+    )
     with flask_app.app_context():
-        _validate_sysprep_network(data)
-        _xml, _ps1, cmd = _render_sysprep_files(data)
-    cmd = cmd.decode()
-    assert 'deferring GuestOS setup.ps1 to FirstLogonCommands' in cmd
-    assert 'powershell.exe' not in cmd
-    assert r'C:\ProgramData\GuestOS\setup.ps1' not in cmd
+        sr._write_sysprep_files(1, b'<xml/>', b'# ps1', b'@echo off')
+    assert r'C:\Windows\System32\GuestOS-FirstLogon.cmd' in written
+    assert r'C:\Windows\System32\GuestOS-RegisterSetup.cmd' in written
+    assert r'C:\Windows\System32\GuestOS-RegisterSetup.ps1' in written
+    assert r'C:\Windows\Setup\Scripts\SetupComplete.cmd' in written
+
+
+def test_register_setup_ps1_has_startup_and_first_boot_triggers():
+    """AtStartup alone is missed when registered during specialize; Once+repeat covers first boot."""
+    from flask import render_template
+
+    with flask_app.app_context():
+        ps1 = render_template('sysprep/GuestOS-RegisterSetup.ps1')
+    assert 'New-ScheduledTaskTrigger -AtStartup' in ps1
+    assert 'RepetitionInterval' in ps1
+    assert '-Once' in ps1
+    assert 'first boot' in ps1.lower() or 'Once+2m' in ps1
 
 
 def test_static_allows_empty_gateway():
@@ -402,13 +454,15 @@ def test_dhcp_with_dns_override_sets_servers():
 def test_domain_join_packs_credentials_as_base64_json():
     data = _base_data()
     data.update(join_domain=True, domain_name='CORP.Example.com',
-                domain_username='svc-join', domain_password='p@ss', domain_ou='OU=Servers,DC=corp')
+                domain_username='svc-join@corp.example.com', domain_password='p@ss',
+                domain_ou='OU=Servers,DC=corp')
     _prepare_domain_join(data)
     assert data['join_domain'] is True
     assert data['domain_name'] == 'corp.example.com'  # normalized
+    assert data['domain_username'] == 'svc-join@corp.example.com'
     assert 'domain_password' not in data  # raw secret scrubbed from payload
     decoded = json.loads(base64.b64decode(data['domain_join_b64']))
-    assert decoded == {'domain': 'corp.example.com', 'username': 'svc-join',
+    assert decoded == {'domain': 'corp.example.com', 'username': 'svc-join@corp.example.com',
                        'password': 'p@ss', 'ou': 'OU=Servers,DC=corp'}
 
 
@@ -418,7 +472,7 @@ def test_domain_join_password_is_not_interpolated_raw():
     nasty = "a'; Remove-Item C:\\ #$x"
     data = _base_data()
     data.update(join_domain=True, domain_name='corp.local',
-                domain_username='svc', domain_password=nasty)
+                domain_username=r'CORP\svc', domain_password=nasty)
     with flask_app.app_context():
         _validate_sysprep_network(data)
         _prepare_domain_join(data)
@@ -427,9 +481,18 @@ def test_domain_join_password_is_not_interpolated_raw():
     assert nasty not in ps1  # raw secret never appears
     assert 'Add-Computer' in ps1
     assert 'w32tm /resync /force' in ps1
+    assert 'Format-DomainJoinError' in ps1
     # The blob still round-trips to the correct password.
     decoded = json.loads(base64.b64decode(data['domain_join_b64']))
     assert decoded['password'] == nasty
+
+
+def test_domain_join_rejects_bare_username():
+    data = _base_data()
+    data.update(join_domain=True, domain_name='corp.local',
+                domain_username='svc-join', domain_password='p')
+    with pytest.raises(ValidationError, match='bare names'):
+        _prepare_domain_join(data)
 
 
 def test_domain_join_requires_credentials():
@@ -442,7 +505,7 @@ def test_domain_join_requires_credentials():
 @pytest.mark.parametrize('bad', ['not_a_domain', 'corp', '-bad.local', ''])
 def test_domain_join_rejects_bad_domain(bad):
     data = _base_data()
-    data.update(join_domain=True, domain_name=bad, domain_username='u', domain_password='p')
+    data.update(join_domain=True, domain_name=bad, domain_username='u@corp.local', domain_password='p')
     with pytest.raises(ValidationError):
         _prepare_domain_join(data)
 

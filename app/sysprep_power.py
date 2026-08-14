@@ -27,9 +27,14 @@ _SYSPREP_FAIL_PATTERNS = (
     re.compile(r'will not function properly in the sysprep image', re.I),
     re.compile(r'Sysprep was not able to validate', re.I),
     re.compile(r'A fatal error occurred while trying to sysprep', re.I),
-    re.compile(r'SYSPREP_FAILED|Sysprep.*failed', re.I),
+    re.compile(r'SYSPREP_FAILED', re.I),
+    # Avoid matching Info noise like "[IE sysprep provider] RegOpenKeyEx failed".
+    re.compile(r'Sysprep (?:encountered an error|failed to (?:validate|complete|generalize))', re.I),
     re.compile(r'hr=0x[0-9A-Fa-f]{8}', re.I),
 )
+
+# Panther Info/Warning lines often say "failed" for missing optional keys — not fatal.
+_SYSPREP_NONFATAL_LEVEL = re.compile(r',\s*(?:Info|Warning)\s+', re.I)
 
 
 class SysprepGuestFailed(Exception):
@@ -76,6 +81,8 @@ def _match_sysprep_failure(text: str):
         stripped = line.strip()
         if not stripped:
             continue
+        if _SYSPREP_NONFATAL_LEVEL.search(stripped):
+            continue
         for pat in _SYSPREP_FAIL_PATTERNS:
             if pat.search(stripped):
                 return stripped, pat.pattern
@@ -85,9 +92,12 @@ def _match_sysprep_failure(text: str):
         if m:
             # Prefer surrounding line
             for line in text.splitlines():
+                if _SYSPREP_NONFATAL_LEVEL.search(line):
+                    continue
                 if pat.search(line):
                     return line.strip(), pat.pattern
-            return m.group(0), pat.pattern
+            # Matched only inside Info/Warning noise — ignore.
+            continue
     return None
 
 

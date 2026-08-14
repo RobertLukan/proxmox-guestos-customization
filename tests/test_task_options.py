@@ -7,6 +7,7 @@ def test_build_task_options_strips_secrets():
         'network_mode': 'dhcp',
         'join_domain': True,
         'domain_name': 'lab.test',
+        'domain_username': 'svc@lab.test',
         'domain_profile': 'lab',
         'administrator_password': 'nope',
         'domain_password': 'nope',
@@ -21,6 +22,7 @@ def test_build_task_options_strips_secrets():
     assert opts['network_mode'] == 'dhcp'
     assert opts['join_domain'] is True
     assert opts['domain_name'] == 'lab.test'
+    assert opts['domain_username'] == 'svc@lab.test'
     assert 'administrator_password' not in opts
     assert 'domain_password' not in opts
     assert 'domain_join_b64' not in opts
@@ -31,3 +33,4 @@ def test_build_task_options_strips_secrets():
     assert 'disks' in chips
     raw = options_to_json(data)
     assert 'nope' not in raw
+    assert 'svc@lab.test' in raw

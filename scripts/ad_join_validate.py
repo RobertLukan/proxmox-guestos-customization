@@ -89,7 +89,8 @@ def main() -> int:
             return 1
         domain = (prof.get('domain_name') or '').strip()
         dns = (prof.get('dns_servers') or '').strip()
-        user_ok = bool((prof.get('domain_username') or '').strip())
+        user = (prof.get('domain_username') or '').strip()
+        user_ok = bool(user)
         pass_ok = bool(prof.get('domain_password'))
         vlan = prof.get('vlan')
         ou = (prof.get('domain_ou') or '').strip()
@@ -102,6 +103,12 @@ def main() -> int:
         print(f'    dns_servers={dns or "(none)"} vlan={vlan} ou={ou or "(none)"}')
         print(f'    credentials: username={"set" if user_ok else "MISSING"} '
               f'password={"set" if pass_ok else "MISSING"}')
+        if user_ok and '@' not in user and '\\' not in user and '/' not in user:
+            print(
+                '    WARN: username looks bare; GuestOS requires UPN '
+                '(user@domain.tld) or DOMAIN\\user'
+            )
+            issues += 1
 
         if not domain or not user_ok or not pass_ok:
             print('    STATUS: incomplete profile')

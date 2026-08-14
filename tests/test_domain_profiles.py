@@ -154,19 +154,20 @@ def test_resolve_bulk_keeps_explicit_dns(app):
 
 
 def test_resolve_domain_join_manual_credentials(app):
+    flask_app = app
     flask_app.config['DOMAIN_PROFILES'] = PROFILES
     data = {
         'join_domain': True,
         'use_domain_profile_credentials': False,
         'domain_name': 'manual.local',
-        'domain_username': 'manual-user',
+        'domain_username': 'manual-user@manual.local',
         'domain_password': 'manual-pass',
         'domain_ou': 'OU=Custom,DC=manual,DC=local',
     }
     ok, err = resolve_domain_join_from_request(data)
     assert ok and err is None
     assert data['domain_name'] == 'manual.local'
-    assert data['domain_username'] == 'manual-user'
+    assert data['domain_username'] == 'manual-user@manual.local'
     assert data['domain_password'] == 'manual-pass'
 
 

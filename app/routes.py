@@ -123,6 +123,8 @@ def _summarize_batch(batch):
 
 
 def _bulk_admission_ok(remote_id):
+    from app.task_janitor import sweep_job_ledger
+    sweep_job_ledger()
     inflight_statuses = ('PENDING', 'STARTED', 'PROGRESS')
     global_running = Task.query.filter(Task.status.in_(inflight_statuses)).count()
     if global_running >= app.config.get('BULK_MAX_CONCURRENT_GLOBAL', 10):
@@ -159,6 +161,8 @@ def _admit_resource_and_quota(payload, template_vmid, extra_items=1):
     On failure: ``(False, flask_error_tuple, None, None)`` where flask_error_tuple
     is ``(response, status_code)``.
     """
+    from app.task_janitor import sweep_job_ledger
+    sweep_job_ledger()
     family = classify_windows_guest_family(template_vmid)
     try:
         caps = validate_resource_caps(payload, family)
@@ -259,7 +263,19 @@ def resolve_domain_join_from_request(data, apply_network=True):
         data['domain_username'] = profile.get('domain_username')
         data['domain_password'] = profile.get('domain_password')
     # else: domain_name / username / password come from the request body as typed
+    try:
+        from app.domain_credentials import prepare_join_credentials
+        prepare_join_credentials(data)
+    except ValidationError as e:
+        msg = str(e)
+        return False, _json_field_error(msg, domain_username=msg)
     return True, None
+
+
+def _admit_domain_directory_checks(data):
+    """Hostname uniqueness + OU DN validate after TCP preflight (join only)."""
+    from app.domain_credentials import run_admit_directory_checks
+    run_admit_directory_checks(data)
 
 
 @login_manager.user_loader
@@ -616,6 +632,8 @@ def api_get_task(task_id):
 @login_required
 def jobs_page():
     """Simple GuestOS job history page (same ledger as the PDM tab)."""
+    from app.task_janitor import sweep_job_ledger
+    sweep_job_ledger()
     batch_id = (request.args.get('batch_id') or '').strip()
     q = Task.query
     if batch_id:
@@ -628,6 +646,8 @@ def jobs_page():
 @app.route('/api/metrics')
 @login_or_api_token_required
 def api_metrics():
+    from app.task_janitor import sweep_job_ledger
+    sweep = sweep_job_ledger()
     inflight_statuses = ('PENDING', 'STARTED', 'PROGRESS')
     by_status = {
         s: Task.query.filter(Task.status == s).count()
@@ -655,6 +675,12 @@ def api_metrics():
             'accepted': BatchRequest.query.filter(BatchRequest.status == 'ACCEPTED').count(),
             'cancelled': BatchRequest.query.filter(BatchRequest.status == 'CANCELLED').count(),
             'failed': BatchRequest.query.filter(BatchRequest.status == 'FAILED').count(),
+            'success': BatchRequest.query.filter(BatchRequest.status == 'SUCCESS').count(),
+        },
+        'janitor': {
+            'batches_finalized': len(sweep.get('batches_finalized') or []),
+            'tasks_reaped': len(sweep.get('tasks_reaped') or []),
+            'stale_after_seconds': app.config.get('TASK_STALE_AFTER_SECONDS', 21600),
         },
     })
 
@@ -837,6 +863,7 @@ def start_sysprep_workflow():
         try:
             from app.domain_preflight import check_domain_join_preflight
             check_domain_join_preflight(data)
+            _admit_domain_directory_checks(data)
         except ValidationError as e:
             return _json_field_error(public_error_text(e), dns_servers=public_error_text(e))
         family = classify_windows_guest_family(template_vmid)
@@ -1082,6 +1109,7 @@ def start_sysprep_bulk_workflow():
             try:
                 from app.domain_preflight import check_domain_join_preflight
                 check_domain_join_preflight(shared)
+                _admit_domain_directory_checks(shared)
             except ValidationError as e:
                 return _json_field_error(public_error_text(e), dns_servers=public_error_text(e))
 
@@ -1111,6 +1139,11 @@ def start_sysprep_bulk_workflow():
             continue
         ok, err = resolve_domain_join_from_request(data, apply_network=False)
         if not ok:
+            rejected += 1
+            continue
+        try:
+            _admit_domain_directory_checks(data)
+        except ValidationError:
             rejected += 1
             continue
         ok, err = resolve_pve_remote(data, _json_field_error)
@@ -1251,6 +1284,11 @@ def api_get_batch(batch_id):
     batch = BatchRequest.query.get(batch_id)
     if not batch:
         return jsonify({'error': 'Batch not found'}), 404
+    # Heal stuck RUNNING batches whose tasks already finished.
+    from app.task_janitor import finalize_batch_if_done, sweep_job_ledger
+    sweep_job_ledger()
+    finalize_batch_if_done(batch_id)
+    batch = BatchRequest.query.get(batch_id)
     tasks = (
         Task.query.filter(Task.batch_id == batch_id)
         .order_by(Task.sequence_no.asc(), Task.timestamp.asc())
@@ -1393,6 +1431,64 @@ def specs_delete(spec_id):
     db.session.commit()
     flash(f'Spec "{name}" deleted.')
     return redirect(url_for('specs_page'))
+
+
+@app.route('/api/domain/test_credentials', methods=['POST', 'OPTIONS'])
+@csrf.exempt
+@login_or_api_token_required
+@with_session_csrf
+def api_domain_test_credentials():
+    """LDAP bind test for profile or manual join credentials (no clone)."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    body = request.json or {}
+    data = dict(body)
+    profile_name = (data.get('domain_profile') or '').strip()
+    if profile_name and _as_request_bool(data.get('use_domain_profile_credentials'), True):
+        profile = app.config.get('DOMAIN_PROFILES', {}).get(profile_name)
+        if not profile:
+            return jsonify({
+                'ok': False,
+                'class': 'other',
+                'result': f'Unknown domain profile: {profile_name!r}',
+            }), 400
+        data['domain_name'] = profile.get('domain_name')
+        data['domain_username'] = profile.get('domain_username')
+        data['domain_password'] = profile.get('domain_password')
+        if not (data.get('dns_servers') or '').strip() and profile.get('dns_servers'):
+            data['dns_servers'] = profile.get('dns_servers')
+    try:
+        from app.domain_credentials import host_ldap_bind, format_cred_probe_failure
+        result = host_ldap_bind(data)
+    except ValidationError as e:
+        return jsonify({
+            'ok': False,
+            'class': 'other',
+            'result': str(e),
+            'domain': (data.get('domain_name') or '').strip() or None,
+            'username': (data.get('domain_username') or '').strip() or None,
+        }), 400
+    payload = {
+        'ok': bool(result.get('ok')),
+        'class': result.get('class'),
+        'result': result.get('result'),
+        'bind_target': result.get('bind_target'),
+        'domain': result.get('domain'),
+        'username': result.get('username'),
+        'dns_servers': (data.get('dns_servers') or '').strip() or None,
+        'domain_profile': profile_name or None,
+    }
+    if not payload['ok']:
+        payload['message'] = format_cred_probe_failure(
+            error_class=payload['class'] or 'other',
+            domain=payload['domain'] or '',
+            username=payload['username'] or '',
+            dns_servers=payload.get('dns_servers'),
+            bind_target=payload.get('bind_target'),
+            result=payload.get('result'),
+            domain_profile=payload.get('domain_profile'),
+        )
+    return jsonify(payload), 200 if payload['ok'] else 400
 
 
 @app.route('/api/specs', methods=['GET', 'POST', 'OPTIONS'])

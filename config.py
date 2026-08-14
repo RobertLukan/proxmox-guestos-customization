@@ -136,6 +136,15 @@ except ValueError:
 # Lab/smoke only: honor request fast_waits=true. Off by default in production.
 ALLOW_FAST_WAITS = _env_bool('ALLOW_FAST_WAITS', False)
 
+# Pre-Sysprep in-clone AD credential probe (QGA LDAP/ADSI bind). Default on.
+DOMAIN_JOIN_CRED_PROBE = _env_bool('DOMAIN_JOIN_CRED_PROBE', True)
+try:
+    DOMAIN_JOIN_CRED_PROBE_WAIT_SECONDS = max(
+        30, int(os.environ.get('DOMAIN_JOIN_CRED_PROBE_WAIT_SECONDS') or '90')
+    )
+except ValueError:
+    DOMAIN_JOIN_CRED_PROBE_WAIT_SECONDS = 90
+
 # Bulk / provisioning safeguards (no superadmin bypass — use PVE for exceptions).
 try:
     BULK_MAX_ITEMS = max(1, int(os.environ.get('BULK_MAX_ITEMS') or '10'))
@@ -157,6 +166,12 @@ try:
     PROVISION_MAX_PER_DAY = max(1, int(os.environ.get('PROVISION_MAX_PER_DAY') or '20'))
 except ValueError:
     PROVISION_MAX_PER_DAY = 20
+# Orphan inflight (PENDING/STARTED/PROGRESS) with no updated_at activity this long
+# are auto-failed by the job janitor (default 6h). Minimum enforced: 1h.
+try:
+    TASK_STALE_AFTER_SECONDS = max(3600, int(os.environ.get('TASK_STALE_AFTER_SECONDS') or '21600'))
+except ValueError:
+    TASK_STALE_AFTER_SECONDS = 21600
 try:
     WIN11_MAX_CORES = max(1, int(os.environ.get('WIN11_MAX_CORES') or '8'))
 except ValueError:

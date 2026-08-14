@@ -170,12 +170,50 @@
     var useNetGroup = form.querySelector('#use_domain_profile_network_group');
     var credHint = form.querySelector('#domain_profile_cred_hint');
     var credHelp = form.querySelector('#domain_profile_cred_help');
-    var manualCreds = form.querySelectorAll('#domain_name, #domain_username, #domain_password');
+    var manualCreds = form.querySelectorAll('#domain_name, #domain_username, #domain_password, #domain_password_confirm');
     var syncingProfile = false;
+    var testManualBtn = form.querySelector('#test_domain_credentials_btn');
+    var testManualStatus = form.querySelector('#test_domain_credentials_status');
+    var testProfileBtn = form.querySelector('#test_domain_profile_btn');
+    var testProfileStatus = form.querySelector('#test_domain_profile_status');
+    var profileTestGroup = form.querySelector('#domain_profile_test_group');
 
     function isBulkMode() {
       var mode = form.querySelector('#provision_mode');
       return !!(mode && mode.value === 'bulk');
+    }
+
+    function setTestStatus(el, ok, text) {
+      if (!el) return;
+      el.textContent = text || '';
+      el.classList.toggle('text-success', !!ok);
+      el.classList.toggle('text-danger', ok === false);
+    }
+
+    function postCredentialTest(body, statusEl, btn) {
+      if (btn) btn.disabled = true;
+      setTestStatus(statusEl, null, 'Testing…');
+      return fetch('/api/domain/test_credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify(body),
+        credentials: 'same-origin',
+      }).then(function (resp) {
+        return resp.json().then(function (j) {
+          return { ok: resp.ok && j && j.ok, body: j };
+        });
+      }).then(function (r) {
+        if (r.ok) {
+          setTestStatus(statusEl, true, 'OK — bind succeeded' + (r.body.bind_target ? ' (' + r.body.bind_target + ')' : ''));
+        } else {
+          var msg = (r.body && (r.body.message || r.body.result)) || 'Credential test failed';
+          setTestStatus(statusEl, false, String(msg).split('\n')[0]);
+        }
+      }).catch(function (err) {
+        setTestStatus(statusEl, false, 'Test request failed: ' + (err && err.message ? err.message : err));
+      }).finally(function () {
+        if (btn) btn.disabled = false;
+      });
     }
 
     function syncProfileSelects(source) {
@@ -197,6 +235,7 @@
       setSectionVisible(credFields, joining && !useProfile);
       setDataRequired(Array.prototype.slice.call(manualCreds), joining && !useProfile);
       setSectionVisible(profileJoinGroup, bulk && joining && useProfile);
+      setSectionVisible(profileTestGroup, joining && useProfile);
       if (profileJoinSelect) {
         if (bulk && joining && useProfile) {
           profileJoinSelect.setAttribute('data-required', 'true');
@@ -255,6 +294,38 @@
     if (profileSelect) {
       profileSelect.addEventListener('change', function () {
         syncProfileSelects(profileSelect);
+      });
+    }
+    if (testManualBtn) {
+      testManualBtn.addEventListener('click', function () {
+        var dnsEl = form.querySelector('#dns_servers');
+        postCredentialTest({
+          use_domain_profile_credentials: false,
+          domain_name: (form.querySelector('#domain_name') || {}).value || '',
+          domain_username: (form.querySelector('#domain_username') || {}).value || '',
+          domain_password: (form.querySelector('#domain_password') || {}).value || '',
+          dns_servers: (dnsEl && dnsEl.value) || '',
+        }, testManualStatus, testManualBtn);
+      });
+    }
+    if (testProfileBtn) {
+      testProfileBtn.addEventListener('click', function () {
+        var name = '';
+        if (isBulkMode() && profileJoinSelect && profileJoinSelect.value) {
+          name = profileJoinSelect.value;
+        } else if (profileSelect) {
+          name = profileSelect.value || '';
+        }
+        if (!name) {
+          setTestStatus(testProfileStatus, false, 'Select a domain profile first.');
+          return;
+        }
+        var dnsEl = form.querySelector('#dns_servers');
+        postCredentialTest({
+          use_domain_profile_credentials: true,
+          domain_profile: name,
+          dns_servers: (dnsEl && dnsEl.value) || '',
+        }, testProfileStatus, testProfileBtn);
       });
     }
     applyJoin();
@@ -857,6 +928,16 @@
       data.domain_name = '';
       data.domain_username = '';
       data.domain_password = '';
+    } else {
+      var pw = data.domain_password || '';
+      var pwConfirmEl = form.querySelector('#domain_password_confirm');
+      var pwConfirm = pwConfirmEl ? (pwConfirmEl.value || '') : '';
+      if (pw !== pwConfirm) {
+        if (pwConfirmEl && window.GuestOSValidate) {
+          GuestOSValidate.setInvalid(pwConfirmEl, 'Passwords do not match.');
+        }
+        throw new Error('Domain password and confirmation do not match.');
+      }
     }
     if (joinDomain) {
       data.workgroup = '';

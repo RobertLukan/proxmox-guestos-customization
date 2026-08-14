@@ -276,18 +276,42 @@
                 <div class="mb-3">
                     <label for="domain_name" class="form-label">Domain Name</label>
                     <input type="text" class="form-control" id="domain_name" name="domain_name" placeholder="corp.example.com">
+                    <div class="form-text">FQDN of the AD domain (e.g. corp.example.com), not NetBIOS alone.</div>
                     <div class="invalid-feedback"></div>
                 </div>
                 <div class="mb-3">
                     <label for="domain_username" class="form-label">Service Account Username</label>
-                    <input type="text" class="form-control" id="domain_username" name="domain_username">
+                    <input type="text" class="form-control" id="domain_username" name="domain_username"
+                           placeholder="svc-join@corp.example.com or CORP\svc-join" autocomplete="username">
+                    <div class="form-text">
+                        Use UPN (<code>user@domain.tld</code>) or down-level (<code>DOMAIN\user</code>).
+                        Bare names like <code>svc-join</code> are rejected. Avoid pasting trailing spaces.
+                    </div>
                     <div class="invalid-feedback"></div>
                 </div>
                 <div class="mb-3">
                     <label for="domain_password" class="form-label">Service Account Password</label>
                     <input type="password" class="form-control" id="domain_password" name="domain_password" autocomplete="new-password">
+                    <div class="form-text">Trailing newlines from paste/.env are stripped; intentional spaces are kept.</div>
                     <div class="invalid-feedback"></div>
                 </div>
+                <div class="mb-3">
+                    <label for="domain_password_confirm" class="form-label">Confirm Password</label>
+                    <input type="password" class="form-control" id="domain_password_confirm" autocomplete="new-password">
+                    <div class="invalid-feedback"></div>
+                </div>
+                <div class="mb-3">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" id="test_domain_credentials_btn">
+                        Test credentials
+                    </button>
+                    <span class="form-text ms-2" id="test_domain_credentials_status" aria-live="polite"></span>
+                </div>
+            </div>
+            <div class="mb-3" id="domain_profile_test_group">
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="test_domain_profile_btn">
+                    Test profile credentials
+                </button>
+                <span class="form-text ms-2" id="test_domain_profile_status" aria-live="polite"></span>
             </div>
             <div class="mb-3">
                 <label for="domain_ou" class="form-label">Target OU (optional)</label>

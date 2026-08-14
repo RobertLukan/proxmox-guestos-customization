@@ -132,6 +132,10 @@ def test_bulk_join_profile_keeps_empty_dns(client, app, monkeypatch):
         'app.domain_preflight.check_domain_join_preflight',
         lambda data, timeout=2.0: None,
     )
+    monkeypatch.setattr(
+        'app.routes._admit_domain_directory_checks',
+        lambda data: None,
+    )
     calls = []
 
     class _Task:
