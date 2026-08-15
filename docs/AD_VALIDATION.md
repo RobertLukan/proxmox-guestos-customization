@@ -86,8 +86,10 @@ usually still template/DHCP, not the final unattend static address.
 Jobs history stores `domain_username` (and profile/domain) but never
 `domain_password` / `domain_join_b64`.
 
-Optional native unattend `JoinDomain` (specialize) is **not** enabled yet; join
-remains late `Add-Computer` in `setup.ps1` after OOBE.
+Optional native unattend `JoinDomain` (specialize) is an **experiment on DHCP
+guests only** (`unattend_join`): `Microsoft-Windows-UnattendedJoin` in
+`unattended.xml`. Static IP still uses late `Add-Computer` in `setup.ps1`.
+`setup.ps1` skips `Add-Computer` when `PartOfDomain` is already true.
 
 ## What “validated” means here
 

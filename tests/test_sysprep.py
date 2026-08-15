@@ -487,6 +487,53 @@ def test_domain_join_password_is_not_interpolated_raw():
     assert decoded['password'] == nasty
 
 
+def test_unattend_join_dhcp_only():
+    """Specialize UnattendedJoin is DHCP-only; static stays late Add-Computer."""
+    dhcp = _base_data()
+    dhcp.pop('ip_address', None)
+    dhcp.pop('gateway', None)
+    dhcp.update(
+        network_mode='dhcp',
+        use_dhcp=True,
+        join_domain=True,
+        domain_name='lab.test',
+        domain_username='administrator@lab.test',
+        domain_password='p@ss',
+        domain_ou='OU=Computers,DC=lab,DC=test',
+    )
+    with flask_app.app_context():
+        _validate_sysprep_network(dhcp)
+        _prepare_domain_join(dhcp)
+        assert dhcp['unattend_join'] is True
+        xml, ps1, _cmd = _render_sysprep_files(dhcp)
+    xml = xml.decode()
+    ps1 = ps1.decode()
+    assert '<JoinDomain>lab.test</JoinDomain>' in xml
+    assert '<Username>administrator</Username>' in xml
+    assert 'Microsoft-Windows-UnattendedJoin' in xml
+    assert 'OU=Computers,DC=lab,DC=test' in xml
+    assert 'Already domain-joined' in ps1
+    assert 'unattend_join_password' not in dhcp
+
+    static = _base_data()
+    static.update(
+        join_domain=True,
+        domain_name='lab.test',
+        domain_username='administrator@lab.test',
+        domain_password='p@ss',
+    )
+    with flask_app.app_context():
+        _validate_sysprep_network(static)
+        _prepare_domain_join(static)
+        assert static.get('unattend_join') is False
+        xml, ps1, _cmd = _render_sysprep_files(static)
+    xml = xml.decode()
+    ps1 = ps1.decode()
+    assert 'Microsoft-Windows-UnattendedJoin' not in xml
+    assert 'Add-Computer' in ps1
+    assert 'Already domain-joined' in ps1
+
+
 def test_domain_join_rejects_bare_username():
     data = _base_data()
     data.update(join_domain=True, domain_name='corp.local',

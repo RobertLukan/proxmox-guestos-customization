@@ -682,7 +682,23 @@ function Format-DomainJoinError([string]$msg) {
 Write-Output "setup.ps1: Domain join starting domain=$($j.domain) username=$($j.username)$(if ($j.ou) { " ou=$($j.ou)" } else { '' })."
 
 # Wait for the network/DNS to be usable, then join with a few retries.
-$joined = $false
+# UnattendedJoin (DHCP specialize) may already have joined; skip Add-Computer.
+$alreadyJoined = $false
+try {
+    $cs = Get-CimInstance Win32_ComputerSystem
+    $alreadyJoined = [bool]$cs.PartOfDomain
+    if ($alreadyJoined) {
+        Write-Output "setup.ps1: Already domain-joined ($($cs.Domain)); skipping Add-Computer."
+        try {
+            w32tm /resync /force 2>&1 | ForEach-Object { Write-Output "setup.ps1: w32tm: $_" }
+        } catch {
+            Write-Output "setup.ps1: w32tm /resync skipped: $($_.Exception.Message)"
+        }
+    }
+} catch {
+    Write-Output "setup.ps1: Could not read PartOfDomain: $($_.Exception.Message)"
+}
+$joined = $alreadyJoined
 $lastJoinErr = ''
 for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
     try {
@@ -709,7 +725,7 @@ for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
 
 # Do not scrub SetupPs1B64 before an intentional reboot — the AtStartup task must
 # re-extract setup.ps1 to mark done. Scrub only on final done paths.
-if ($joined) {
+if ($joined -and -not $alreadyJoined) {
     Write-Output "setup.ps1: Restarting to finalize domain membership."
     Ensure-GuestOsSetupTask
     Write-GuestOsSetupMarker -Status pending_reboot -Detail 'domain-join'
@@ -721,6 +737,14 @@ if ($joined) {
     Write-GuestOsSetupMarker -Status pending_reboot -Detail 'pagefile'
     try { Stop-Transcript | Out-Null } catch {}
     shutdown /r /t 5
+} elseif ($joined) {
+    Write-Output "setup.ps1: Domain membership already in place; marking setup done."
+    Write-GuestOsSetupMarker -Status done -Detail 'ok'
+    Scrub-GuestOsSetupArtifacts
+    Disable-GuestOsSetupTask
+    Clear-GuestOsWinlogonSecrets
+    try { Stop-Transcript | Out-Null } catch {}
+    Invoke-GuestOsSessionEnd
 } else {
     Write-Output "setup.ps1: Domain join FAILED after retries domain=$($j.domain) username=$($j.username) last=$lastJoinErr; leaving machine in workgroup."
     Write-GuestOsSetupMarker -Status done -Detail 'domain-join-failed'

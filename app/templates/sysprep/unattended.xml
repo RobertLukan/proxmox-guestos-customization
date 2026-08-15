@@ -45,6 +45,21 @@
                 </RunSynchronousCommand>
             </RunSynchronous>
         </component>
+        {# DHCP-only: join during specialize while the NIC still has DHCP/DNS.
+           Static guests keep late Add-Computer in setup.ps1. #}
+        {% if unattend_join %}
+        <component name="Microsoft-Windows-UnattendedJoin" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <Identification>
+                <JoinDomain>{{ unattend_join_domain }}</JoinDomain>
+                {% if unattend_join_ou %}<MachineObjectOU>{{ unattend_join_ou }}</MachineObjectOU>{% endif %}
+                <Credentials>
+                    <Domain>{{ unattend_join_cred_domain }}</Domain>
+                    <Username>{{ unattend_join_username }}</Username>
+                    <Password>{{ unattend_join_password }}</Password>
+                </Credentials>
+            </Identification>
+        </component>
+        {% endif %}
     </settings>
     <settings pass="oobeSystem">
         <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
