@@ -42,24 +42,29 @@ def _collect_join_targets(data) -> list[str]:
 
 
 def check_domain_join_preflight(data, timeout: float = 2.0):
-    """Raise ValidationError when join is requested but no DC/DNS endpoint answers.
+    """Best-effort host reachability check when ``join_domain`` is set.
 
-    Probes TCP 53 (DNS), 88 (Kerberos), and 389 (LDAP) on configured
-    ``dns_servers`` (and resolved ``domain_name`` addresses). Any single open
-    port on any target is enough to pass.
+    Probes TCP 53/88/389 on ``dns_servers`` (and resolved ``domain_name``).
+    Any open port on any target is enough to pass (returns ``None``).
 
-    Returns ``None`` when join is not requested or a target is reachable.
+    Host unreachable / missing DNS is **advisory**: returns a warning string so
+    admit can continue. The guest VLAN may still reach the DC; the in-clone
+    credential probe remains the hard gate before Sysprep.
+
+    Returns ``None`` when join is not requested, a target is reachable, or
+    nothing to warn about.
     """
     if not _as_bool((data or {}).get('join_domain'), False):
         return None
 
     targets = _collect_join_targets(data or {})
     if not targets:
-        raise ValidationError(
-            'Domain join requested but no dns_servers (or resolvable domain_name) '
-            'were provided to locate a domain controller. Set dns_servers to the DC '
-            'or domain DNS IP before joining.'
+        msg = (
+            'Domain join: no dns_servers (or resolvable domain_name) for GuestOS-host '
+            'DC preflight; continuing — in-clone probe / guest DNS will validate the path.'
         )
+        logging.warning(msg)
+        return msg
 
     ports = (389, 88, 53)
     for host in targets:
@@ -71,7 +76,10 @@ def check_domain_join_preflight(data, timeout: float = 2.0):
                 return None
 
     tried = ', '.join(f'{h}:53/88/389' for h in targets)
-    raise ValidationError(
-        'Domain join requested but no domain controller / DNS endpoint is reachable '
-        f'(probed {tried}). Power on the DC, fix routing, or correct dns_servers.'
+    msg = (
+        'Domain join: DC/DNS not reachable from the GuestOS host '
+        f'(probed {tried}). Continuing — the guest VLAN may still reach AD; '
+        'in-clone credential probe is authoritative before Sysprep.'
     )
+    logging.warning(msg)
+    return msg

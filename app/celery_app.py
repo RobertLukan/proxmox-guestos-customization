@@ -266,6 +266,7 @@ def sysprep_workflow_task(self, task_id, data):
                     _validate_sysprep_network(data)
                     _prepare_domain_join(data)
                     from app.domain_preflight import check_domain_join_preflight
+                    # Host DC reachability is advisory; in-clone probe is the hard gate.
                     check_domain_join_preflight(data)
                     if _as_bool(data.get('manage_disks')):
                         if not is_windows_server_template(data['template_vmid']):

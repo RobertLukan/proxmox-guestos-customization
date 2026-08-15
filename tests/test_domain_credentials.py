@@ -191,6 +191,29 @@ def test_host_ldap_ou_missing(monkeypatch):
         dc.host_ldap_validate_ou(data)
 
 
+def test_host_ldap_ou_unreachable_is_soft(monkeypatch):
+    """GuestOS host cannot reach LDAP — OU check skipped (guest path may work)."""
+    from app import domain_credentials as dc
+    import ldap3
+    from ldap3.core.exceptions import LDAPException
+
+    class Boom:
+        def __init__(self, *a, **k):
+            raise LDAPException('connection refused')
+
+    monkeypatch.setattr(ldap3, 'Server', Boom)
+    monkeypatch.setattr(ldap3, 'Connection', Boom)
+
+    data = {
+        'domain_name': 'lab.test',
+        'domain_username': 'svc@lab.test',
+        'domain_password': 'x',
+        'dns_servers': '10.0.0.1',
+        'domain_ou': 'OU=Servers,DC=lab,DC=test',
+    }
+    dc.host_ldap_validate_ou(data)  # does not raise
+
+
 def test_api_domain_test_credentials_manual(client, app, monkeypatch):
     app.config['API_TOKENS'] = frozenset({'tok'})
 
@@ -255,4 +278,6 @@ def test_api_domain_test_credentials_profile(client, app, monkeypatch):
     body = resp.get_json()
     assert body['ok'] is False
     assert body['class'] == 'invalid_credentials'
+    assert body.get('continue_allowed') is True
+    assert 'GuestOS' in (body.get('advisory') or '')
     assert 's3cret' not in str(body)

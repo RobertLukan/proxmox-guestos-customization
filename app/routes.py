@@ -862,7 +862,10 @@ def start_sysprep_workflow():
         warnings = admit_result
         try:
             from app.domain_preflight import check_domain_join_preflight
-            check_domain_join_preflight(data)
+            host_warn = check_domain_join_preflight(data)
+            if host_warn:
+                warnings = list(warnings or [])
+                warnings.append(host_warn)
             _admit_domain_directory_checks(data)
         except ValidationError as e:
             return _json_field_error(public_error_text(e), dns_servers=public_error_text(e))
@@ -1108,7 +1111,10 @@ def start_sysprep_bulk_workflow():
                 return err
             try:
                 from app.domain_preflight import check_domain_join_preflight
-                check_domain_join_preflight(shared)
+                host_warn = check_domain_join_preflight(shared)
+                if host_warn:
+                    warnings = list(warnings or [])
+                    warnings.append(host_warn)
                 _admit_domain_directory_checks(shared)
             except ValidationError as e:
                 return _json_field_error(public_error_text(e), dns_servers=public_error_text(e))
@@ -1477,6 +1483,8 @@ def api_domain_test_credentials():
         'username': result.get('username'),
         'dns_servers': (data.get('dns_servers') or '').strip() or None,
         'domain_profile': profile_name or None,
+        # UI may continue after a failed host test; in-clone probe is authoritative.
+        'continue_allowed': True,
     }
     if not payload['ok']:
         payload['message'] = format_cred_probe_failure(
@@ -1487,6 +1495,12 @@ def api_domain_test_credentials():
             bind_target=payload.get('bind_target'),
             result=payload.get('result'),
             domain_profile=payload.get('domain_profile'),
+        )
+        payload['advisory'] = (
+            'Host credential test failed; you may still submit. '
+            'This often means the GuestOS host cannot reach DNS/AD '
+            '(firewall, routing, or VLAN), not only bad passwords. '
+            'The in-clone probe still validates join credentials after the guest has network.'
         )
     return jsonify(payload), 200 if payload['ok'] else 400
 

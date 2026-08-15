@@ -106,8 +106,10 @@ paths:
     post:
       summary: Test AD join credentials (host LDAP bind; no clone)
       description: >
-        Bind with profile or manual credentials from the GuestOS host.
-        In-clone QGA probe remains authoritative for the guest VLAN path.
+        Bind with profile or manual credentials from the GuestOS host using
+        dns_servers (Network-step DNS / DC IPs). A failed bind returns HTTP 400
+        with continue_allowed=true and an advisory — the UI may still submit;
+        in-clone QGA probe remains authoritative for the guest VLAN path.
         Never returns passwords.
       security:
         - bearerAuth: []
@@ -136,7 +138,9 @@ paths:
         '200':
           description: Bind succeeded
         '400':
-          description: Bind failed or invalid input
+          description: >
+            Bind failed or invalid input. Body may include continue_allowed and
+            advisory so clients can allow proceed-with-warning.
   /api/specs:
     get:
       summary: List Customization Specs (non-secret presets)

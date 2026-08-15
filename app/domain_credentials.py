@@ -233,6 +233,25 @@ def host_ldap_bind(
             'domain': domain,
             'username': username,
         }
+    # Prefer explicit DNS/DC IPs from the Network step. Binding only to the
+    # domain FQDN often fails inside the GuestOS container (no domain DNS).
+    dns_list = []
+    try:
+        dns_list = validate_dns_servers(data.get('dns_servers'), allow_ipv6=True)
+    except ValidationError:
+        dns_list = []
+    if not dns_list:
+        return {
+            'ok': False,
+            'class': 'unreachable',
+            'result': (
+                'dns_servers is empty — set DNS on the Network step to your '
+                'DC/domain DNS IP(s) before testing from the GuestOS host'
+            ),
+            'bind_target': None,
+            'domain': domain,
+            'username': username,
+        }
 
     tmo = _ldap_timeout_seconds(timeout)
     last_err = 'no LDAP target responded'
@@ -349,9 +368,10 @@ def host_ldap_validate_ou(data: dict, *, timeout: float = 5.0) -> None:
     password, _ = normalize_domain_password(data.get('domain_password'))
     targets = _ldap_server_candidates(data)
     if not targets:
-        raise ValidationError(
-            'domain_ou is set but no dns_servers/domain available to validate the OU DN.'
+        logging.warning(
+            'domain_ou validation skipped: no dns_servers/domain for GuestOS-host LDAP'
         )
+        return
     tmo = _ldap_timeout_seconds(timeout)
     last_err = None
     for host in targets:
@@ -382,9 +402,12 @@ def host_ldap_validate_ou(data: dict, *, timeout: float = 5.0) -> None:
                 raise ValidationError(f'Cannot validate domain_ou (LDAP auth failed): {e}') from e
         except Exception as e:  # noqa: BLE001
             last_err = e
-    raise ValidationError(
-        f'Cannot validate domain_ou {ou!r}: LDAP unreachable ({last_err})'
+    # Host cannot reach LDAP — skip OU check; guest path may still work.
+    logging.warning(
+        'domain_ou validation skipped (LDAP unreachable from GuestOS host): %s',
+        last_err,
     )
+    return
 
 
 def run_admit_directory_checks(data: dict) -> None:

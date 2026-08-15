@@ -177,21 +177,42 @@
     var testProfileBtn = form.querySelector('#test_domain_profile_btn');
     var testProfileStatus = form.querySelector('#test_domain_profile_status');
     var profileTestGroup = form.querySelector('#domain_profile_test_group');
+    var continueNote = form.querySelector('#domain_cred_test_continue_note');
 
     function isBulkMode() {
       var mode = form.querySelector('#provision_mode');
       return !!(mode && mode.value === 'bulk');
     }
 
-    function setTestStatus(el, ok, text) {
+    function networkDnsServers() {
+      if (isBulkMode()) {
+        var bulkDns = form.querySelector('#bulk_dns_servers');
+        if (bulkDns && String(bulkDns.value || '').trim()) {
+          return String(bulkDns.value).trim();
+        }
+      }
+      var dnsEl = form.querySelector('#dns_servers');
+      return dnsEl ? String(dnsEl.value || '').trim() : '';
+    }
+
+    function setTestStatus(el, kind, text) {
+      // kind: 'ok' | 'fail' | 'warn' | null (neutral)
       if (!el) return;
       el.textContent = text || '';
-      el.classList.toggle('text-success', !!ok);
-      el.classList.toggle('text-danger', ok === false);
+      el.classList.remove('text-success', 'text-danger', 'text-warning');
+      if (kind === 'ok') el.classList.add('text-success');
+      else if (kind === 'fail') el.classList.add('text-danger');
+      else if (kind === 'warn') el.classList.add('text-warning');
+    }
+
+    function setContinueNote(visible) {
+      if (!continueNote) return;
+      continueNote.hidden = !visible;
     }
 
     function postCredentialTest(body, statusEl, btn) {
       if (btn) btn.disabled = true;
+      setContinueNote(false);
       setTestStatus(statusEl, null, 'Testing…');
       return fetch('/api/domain/test_credentials', {
         method: 'POST',
@@ -200,17 +221,43 @@
         credentials: 'same-origin',
       }).then(function (resp) {
         return resp.json().then(function (j) {
-          return { ok: resp.ok && j && j.ok, body: j };
+          return { httpOk: resp.ok, ok: resp.ok && j && j.ok, body: j || {} };
+        }).catch(function () {
+          return { httpOk: resp.ok, ok: false, body: {} };
         });
       }).then(function (r) {
         if (r.ok) {
-          setTestStatus(statusEl, true, 'OK — bind succeeded' + (r.body.bind_target ? ' (' + r.body.bind_target + ')' : ''));
+          form.dataset.domainCredTest = 'ok';
+          setContinueNote(false);
+          setTestStatus(
+            statusEl,
+            'ok',
+            'OK — bind succeeded' + (r.body.bind_target ? ' (' + r.body.bind_target + ')' : '')
+          );
         } else {
-          var msg = (r.body && (r.body.message || r.body.result)) || 'Credential test failed';
-          setTestStatus(statusEl, false, String(msg).split('\n')[0]);
+          form.dataset.domainCredTest = 'failed';
+          setContinueNote(true);
+          var msg =
+            (r.body && (r.body.message || r.body.result || r.body.error)) ||
+            'Credential test failed';
+          if (r.body && r.body.class) {
+            msg = '[' + r.body.class + '] ' + msg;
+          }
+          setTestStatus(
+            statusEl,
+            'warn',
+            'Could not validate — you can continue. ' + String(msg).split('\n')[0]
+          );
         }
       }).catch(function (err) {
-        setTestStatus(statusEl, false, 'Test request failed: ' + (err && err.message ? err.message : err));
+        form.dataset.domainCredTest = 'failed';
+        setContinueNote(true);
+        setTestStatus(
+          statusEl,
+          'warn',
+          'Could not validate — you can continue. Test request failed: ' +
+            (err && err.message ? err.message : err)
+        );
       }).finally(function () {
         if (btn) btn.disabled = false;
       });
@@ -298,13 +345,22 @@
     }
     if (testManualBtn) {
       testManualBtn.addEventListener('click', function () {
-        var dnsEl = form.querySelector('#dns_servers');
+        var dns = networkDnsServers();
+        if (!dns) {
+          setContinueNote(false);
+          setTestStatus(
+            testManualStatus,
+            'warn',
+            'Set DNS servers on the Network step first (DC or domain DNS IPs). Those addresses are used for this test.'
+          );
+          return;
+        }
         postCredentialTest({
           use_domain_profile_credentials: false,
           domain_name: (form.querySelector('#domain_name') || {}).value || '',
           domain_username: (form.querySelector('#domain_username') || {}).value || '',
           domain_password: (form.querySelector('#domain_password') || {}).value || '',
-          dns_servers: (dnsEl && dnsEl.value) || '',
+          dns_servers: dns,
         }, testManualStatus, testManualBtn);
       });
     }
@@ -317,14 +373,23 @@
           name = profileSelect.value || '';
         }
         if (!name) {
-          setTestStatus(testProfileStatus, false, 'Select a domain profile first.');
+          setContinueNote(false);
+          setTestStatus(testProfileStatus, 'fail', 'Select a domain profile first.');
           return;
         }
-        var dnsEl = form.querySelector('#dns_servers');
+        var dns = networkDnsServers();
+        if (!dns) {
+          setContinueNote(false);
+          setTestStatus(
+            testProfileStatus,
+            'warn',
+            'No Network DNS set — will try the profile’s DNS if configured. Prefer setting DNS on the Network step.'
+          );
+        }
         postCredentialTest({
           use_domain_profile_credentials: true,
           domain_profile: name,
-          dns_servers: (dnsEl && dnsEl.value) || '',
+          dns_servers: dns,
         }, testProfileStatus, testProfileBtn);
       });
     }
@@ -1289,6 +1354,14 @@
           'Domain credentials',
           useProf.checked ? 'From network profile' : 'Manual'
         );
+      }
+      if (form.dataset.domainCredTest === 'failed') {
+        add(
+          'Credential test',
+          'Not validated from GuestOS host (you can still submit; in-clone probe runs later)'
+        );
+      } else if (form.dataset.domainCredTest === 'ok') {
+        add('Credential test', 'OK (host LDAP bind)');
       }
     }
     if (join && !join.checked) {

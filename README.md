@@ -92,7 +92,7 @@ From **PDM** (optional): template → **Customize (GuestOS)** → signed `/launc
 | [docs/PDM_INTEGRATION.md](docs/PDM_INTEGRATION.md) | Machine API + PDM + lab notes |
 | [docs/openapi.yaml](docs/openapi.yaml) | Start / bulk / limits API schema |
 | [docs/FAILURE_RUNBOOK.md](docs/FAILURE_RUNBOOK.md) | Failure triage + limit saturation |
-| [docs/VMWARE_GAP_ANALYSIS.md](docs/VMWARE_GAP_ANALYSIS.md) | GuestOS vs vSphere Customization Spec (security + functionality) |
+| [docs/VMWARE_GAP_ANALYSIS.md](docs/VMWARE_GAP_ANALYSIS.md) | Security + functionality assessment vs vSphere Customization Spec |
 | [docs/AD_VALIDATION.md](docs/AD_VALIDATION.md) | AD join layers, profiles, lab smoke notes |
 
 ### Docker Compose (recommended)

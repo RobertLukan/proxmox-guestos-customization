@@ -81,6 +81,7 @@
                 <div class="form-text">
                     Optional. Leave blank to use DHCP-provided DNS; set explicitly for AD/DC override
                     (VLAN remains per CSV row: <code>hostname[,vlan]</code> or <code>hostname,ip/prefix[,vlan]</code>).
+                    Domain <strong>Test credentials</strong> uses these IPs when set.
                 </div>
                 <div class="invalid-feedback"></div>
             </div>
@@ -203,6 +204,11 @@
             <label for="dns_servers" class="form-label">DNS Servers (comma-separated)</label>
             <input type="text" name="dns_servers" id="dns_servers" class="form-control" data-validate="dns_list"
                    placeholder="Optional under DHCP; recommended when joining a domain">
+            <div class="form-text" id="dns_servers_join_hint">
+                When joining a domain, set DNS here (usually the DC or domain DNS IPs).
+                The Domain step <strong>Test credentials</strong> button uses these addresses
+                to bind from the GuestOS host.
+            </div>
             <div class="invalid-feedback"></div>
         </div>
         <div class="form-check mb-3" id="enable_ipv6_group">
@@ -305,6 +311,9 @@
                         Test credentials
                     </button>
                     <span class="form-text ms-2" id="test_domain_credentials_status" aria-live="polite"></span>
+                    <div class="form-text mt-1" id="test_domain_credentials_dns_hint">
+                        Uses DNS servers from the <strong>Network</strong> step. Set those IPs before testing.
+                    </div>
                 </div>
             </div>
             <div class="mb-3" id="domain_profile_test_group">
@@ -312,6 +321,16 @@
                     Test profile credentials
                 </button>
                 <span class="form-text ms-2" id="test_domain_profile_status" aria-live="polite"></span>
+                <div class="form-text mt-1" id="test_domain_profile_dns_hint">
+                    Uses DNS from the <strong>Network</strong> step when set; otherwise the profile’s DNS.
+                    Prefer setting Network DNS to the DC/domain DNS IPs you expect the guest to use.
+                </div>
+            </div>
+            <div class="alert alert-warning py-2 mb-3" id="domain_cred_test_continue_note" hidden role="status">
+                Domain join credentials could not be validated from the GuestOS host.
+                You can continue — the in-clone probe still runs after the VM has network.
+                A failed host test can also mean traffic is not allowed between the GuestOS
+                instance and your DNS/AD servers (firewall, routing, or VLAN isolation).
             </div>
             <div class="mb-3">
                 <label for="domain_ou" class="form-label">Target OU (optional)</label>

@@ -24,7 +24,7 @@ For the full **OS / edition** lab matrix (not only AD), see
 | Live Sysprep+join on **Windows Server 2019** (Eval) + disks | **OK** (reconfirmed 2.7.1) |
 | Live Sysprep+join + disks on **Windows Server 2022** (VL) | **OK** (reconfirmed 2.7.1) |
 | Live Sysprep+join on **Windows 11** (no disks) | **OK** (reconfirmed 2.7.1) |
-| Domain reachability preflight (TCP 53/88/389) | **OK** (blocks admit when DC ports closed) |
+| Domain reachability preflight (TCP 53/88/389) | **OK** (advisory from GuestOS host; in-clone probe is the hard gate) |
 
 Dry-run command used:
 
@@ -63,12 +63,20 @@ Credential layers:
 
 1. **Normalize** usernames to UPN (`user@domain.tld`) or `DOMAIN\user` (bare names rejected);
    trim trailing `\r`/`\n` on passwords only.
-2. **Admit TCP** preflight to DC ports 53/88/389 (unchanged).
+2. **Admit TCP** preflight to DC ports 53/88/389 from the **GuestOS host** —
+   **advisory** when unreachable (response `warnings[]`); the guest VLAN may still
+   reach AD. Continuing is allowed; in-clone probe is the hard gate.
 3. **Admit LDAP** (best-effort from GuestOS host): refuse if the computer account
-   for `hostname` already exists; validate `domain_ou` DN when set.
+   for `hostname` already exists **when LDAP is reachable**; validate `domain_ou`
+   DN when set and reachable. Unreachable LDAP skips uniqueness/OU with a log
+   warning (does not block admit). Wrong join password while LDAP *is* reachable
+   still fails admit.
 4. **Profile / manual Test credentials** (`POST /api/domain/test_credentials`) —
-   host LDAP bind; no clone required. In-clone probe remains authoritative for the
-   guest network path.
+   host LDAP bind from the GuestOS instance using DNS servers from the Network step
+   (required for a meaningful manual test; profile test may fall back to profile DNS).
+   A failed UI test is advisory only — the wizard can continue; failure often means
+   routing/firewall between GuestOS and DNS/AD, not necessarily bad passwords.
+   In-clone probe remains authoritative for the guest network path.
 5. **In-clone QGA probe** after agent-up, before Sysprep write: wait for a non–link-local
    IPv4, then ADSI bind. Kill-switch: `DOMAIN_JOIN_CRED_PROBE=false`.
 

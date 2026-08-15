@@ -1,17 +1,19 @@
-# GuestOS vs VMware Guest Customization Spec — gap analysis
+# GuestOS vs VMware Guest Customization Spec — assessment
 
 **Audience:** operators and reviewers comparing Proxmox GuestOS customization to
-vSphere Guest Customization Specifications (security + functionality).
+vSphere Guest Customization Specifications.
 
-**GuestOS baseline:** 2.7.1+ (current tree after AutoLogon removal; primary
-runner is SYSTEM scheduled task `GuestOS-Setup`).
+**GuestOS baseline:** 2.7.1+ current tree (SYSTEM scheduled task `GuestOS-Setup`;
+no AutoLogon; host DC preflight advisory; in-clone cred probe is the hard gate).
 
 **VMware baseline:** vSphere **Guest Customization Specification** for Windows
 (Sysprep / unattend) and Linux (VMware Tools / scripting), as documented in
 Broadcom vSphere Virtual Machine Administration and the vCenter Guest API
 (`windows_configuration` / `gui_unattended`).
 
-**Ratings used below**
+This document is **analysis only**. It does not change runtime behavior.
+
+**Ratings**
 
 | Rating | Meaning |
 |--------|---------|
@@ -19,8 +21,6 @@ Broadcom vSphere Virtual Machine Administration and the vCenter Guest API
 | **Gap** | VMware Spec has it (or handles it more safely); GuestOS weaker or missing |
 | **Ahead** | GuestOS stronger or richer than classic Spec |
 | **Different** | Intentional design difference; not a strict deficiency |
-
-This document is **analysis only**. It does not change runtime behavior.
 
 ---
 
@@ -32,15 +32,16 @@ This document is **analysis only**. It does not change runtime behavior.
 - Where secrets live, how long they live on the guest, and scrub behavior
 - Named presets (GuestOS “Customization Specs” vs vSphere Spec Manager)
 - Linux golden-image customize (GuestOS cloud-init vs VMware Linux customization)
+- Who runs each AD check (GuestOS host vs guest VM vs verify worker) and fail severity
 
 ### Out of scope / related only
 
 | Topic | Why |
 |-------|-----|
-| Horizon Instant Clone / ClonePrep / AppVolumes | Different product surface; GuestOS has no Instant Clone analogue. Credential *preflight spirit* is noted in [AD_VALIDATION.md](AD_VALIDATION.md); not compared in depth here. |
+| Horizon Instant Clone / ClonePrep / AppVolumes | Different product surface; short note in [Appendix B](#appendix-b-horizon-instant-clone--cloneprep). Credential *preflight spirit* is noted in [AD_VALIDATION.md](AD_VALIDATION.md). |
 | vRealize / Aria Automation, Terraform providers | Orchestration layers above Spec / GuestOS |
 | ESXi-only without vCenter Spec Manager | Partial feature set |
-| Implementing remediations listed in §7 | Backlog recommendations only |
+| Implementing remediations listed in §6 | Backlog recommendations only |
 
 ---
 
@@ -54,7 +55,7 @@ flowchart LR
     VSysprep --> VJoin[Domain via Spec / UnattendedJoin]
   end
   subgraph guestos [GuestOS]
-    GClone[Clone via PVE] --> GProbe[Admit plus in-clone cred probe]
+    GClone[Clone via PVE] --> GProbe[Admit advisory plus in-clone cred probe]
     GProbe --> GSysprep[Sysprep unattend]
     GSysprep --> GTask[SYSTEM GuestOS-Setup]
     GTask --> GNet[Network then Add-Computer]
@@ -64,16 +65,18 @@ flowchart LR
 | Phase | VMware Spec | GuestOS |
 |-------|-------------|---------|
 | Clone | vCenter clone / deploy from template | PVE clone from Windows/Linux template |
-| Preflight | Spec validation; optional Horizon-style credential checks elsewhere | Admit TCP 53/88/389 ([`domain_preflight.py`](../app/domain_preflight.py)); host LDAP uniqueness/OU; optional UI test; **in-clone** ADSI bind before Sysprep write ([`domain_guest_probe.py`](../app/domain_guest_probe.py)) |
+| Preflight | Spec validation; optional Horizon-style credential checks elsewhere | UI test + host TCP/LDAP **advisory** when the GuestOS host cannot reach AD; **in-clone** ADSI bind before Sysprep is the hard gate ([`domain_preflight.py`](../app/domain_preflight.py), [`domain_guest_probe.py`](../app/domain_guest_probe.py)) |
 | Generalize | Sysprep + generated unattend | Sysprep + GuestOS-rendered [`unattended.xml`](../app/templates/sysprep/unattended.xml) |
 | Post-OOBE work | Often AutoLogon / GuiRunOnce / FirstLogonCommands; domain may join via Spec | **No** AutoLogon; SYSTEM task `GuestOS-Setup` → [`setup.ps1`](../app/templates/sysprep/setup.ps1) |
 | Network | Spec NIC settings applied during customization | Applied in `setup.ps1` after OOBE (DHCP/static/DNS/multi-NIC) |
-| Domain join | Spec “Windows Server Domain” (+ OU); typically unattend/UnattendedJoin path | Late `Add-Computer` in `setup.ps1` (native unattend `JoinDomain` **not** enabled yet) |
+| Domain join | Spec “Windows Server Domain” (+ OU); typically unattend/UnattendedJoin | Late `Add-Computer` in `setup.ps1` (native unattend `JoinDomain` **not** enabled yet) |
 | Verify | Customization status in vCenter | QGA markers / HKLM `SetupStatus` ([`sysprep_verify.py`](../app/sysprep_verify.py)) |
 
 ---
 
-## 3. Functionality matrix
+## 3. Functionality assessment
+
+### 3.1 Capability matrix
 
 | Capability | VMware Spec | GuestOS | Rating |
 |------------|-------------|---------|--------|
@@ -85,21 +88,42 @@ flowchart LR
 | AutoLogon as Administrator | Optional (`auto_logon` / count) | **Removed** — SYSTEM task runner | **Ahead** (security); **Different** (ops) |
 | FirstLogonCommands / GuiRunOnce | Supported in Spec / API | Not used; `GuestOS-Setup` replaces that role | **Different** |
 | Workgroup | Yes | Yes | **Parity** |
-| Domain join + OU | Yes (domain + credentials + OU path) | Yes (`Add-Computer`, optional `domain_ou`) | **Parity** (outcome); join **mechanism** **Gap** (no UnattendedJoin) |
+| Domain join + OU | Yes (domain + credentials + OU path) | Yes (`Add-Computer`, optional `domain_ou`) | **Parity** (outcome); join **mechanism** **Gap** (no UnattendedJoin) — [Appendix A](#appendix-a-unattendedjoin-vs-late-add-computer) |
 | DHCP / static IPv4 + DNS | Yes | Yes | **Parity** |
 | Multi-NIC | Yes | Yes (≤8; MAC then order) | **Parity** (code); lab matrix incomplete for Windows multi-NIC |
 | IPv6 | Spec-dependent | Supported in validators / setup | **Parity** (code); limited Windows lab |
-| Credential test / preflight | Spec UI validation; Horizon pool checks elsewhere | TCP + host LDAP + in-clone probe + `POST /api/domain/test_credentials` | **Ahead** |
+| Credential test / preflight | Spec UI validation; Horizon pool checks elsewhere | UI test (advisory) + host TCP/LDAP (advisory if unreachable) + **in-clone probe** (hard) | **Ahead** (layered; guest path is authoritative) |
 | Named presets | Customization Specification Manager (can hold secrets) | GuestOS Customization Specs (**non-secret** presets) | **Different** |
 | Bulk / fleet deploy | Templates + Spec + orchestrators | Bulk Win11 CSV/API (quotas) | **Different** |
 | Linux customize | Tools-based / cloud-init guests | Proxmox cloud-init + QGA verify | **Parity** (intent); **Different** (stack) |
 | Server data disks / pagefile volume | Not a classic Spec concern | `manage_disks` planner + verify | **Ahead** |
-| Domain join failure semantics | Customization often **fails** | Soft fail → marker `domain-join-failed`, task **WARNING** | **Different** / mild **Gap** if hard-fail is required |
+| Domain join failure semantics | Customization typically **fails** | Guest is left usable (`setup.done` + `domain-join-failed`); **job is `FAILURE`** with WARNING text in the message | **Parity** (job fails); **Different** (guest not stuck mid-setup) |
 | In-place customize of running prod VM | Generally clone/deploy oriented | Explicitly **disabled** for Sysprep | **Parity** (safe default) |
+
+### 3.2 AD join check timeline (source + severity)
+
+Sources: **GuestOS host** = web/worker container on the GuestOS appliance;
+**Guest VM** = the clone (QGA or SYSTEM task); **GuestOS app** = request
+validation / orchestration.
+
+| When | What | Source | Fail severity |
+|------|------|--------|----------------|
+| Domain step (optional) | **Test credentials** — LDAP bind using Network DNS | GuestOS host → DC | **Advisory** — wizard can continue |
+| Admit (start job) | Username form (UPN / `DOMAIN\user`); required password | GuestOS app | **Critical** — HTTP 400, no clone |
+| Admit | TCP 53/88/389 to `dns_servers` | GuestOS host → DC/DNS | **Advisory** — `warnings[]`; job still starts (guest VLAN may reach AD) |
+| Admit | LDAP: hostname uniqueness + OU DN | GuestOS host → DC | **Critical** if LDAP is reachable (collision / bad OU / bad password). **Skipped** (log warning) if LDAP unreachable |
+| Worker (early) | Same TCP preflight | GuestOS host (clone worker) | **Advisory** — does not fail the task |
+| After QGA, before Sysprep | In-clone ADSI bind | Guest VM via QGA (template/DHCP IP on clone VLAN) → DC | **Critical** — `FAILURE` / `domain_cred_probe` |
+| After OOBE (`setup.ps1`) | Network, then `Add-Computer` | Guest VM SYSTEM `GuestOS-Setup` → DC | Join OK → reboot; join fail → `domain-join-failed` marker (guest usable) |
+| Verify | Hostname, IP, `PartOfDomain` | GuestOS verify worker via QGA | Not joined when join was requested → **`FAILURE`** (`error_code=verify`) + WARNING text; joined → **SUCCESS** |
+
+**Practical takeaway:** a GuestOS host that cannot reach AD must not block clone.
+The in-clone probe answers “can this guest path bind?” If that passes and
+`Add-Computer` later fails, the VM is customized but the **job is still FAILURE**.
 
 ---
 
-## 4. Security matrix
+## 4. Security assessment
 
 | Topic | VMware Spec | GuestOS | Rating |
 |-------|-------------|---------|--------|
@@ -114,60 +138,97 @@ flowchart LR
 | Job / history scrubbing | Spec secrets not shown in UI | Passwords stripped from task options; `domain_username` retained; probe failures omit password | **Parity** / mild **Gap** (username retained by design) |
 | Failed clone cleanup | Operator / policy dependent | Failed clones renamed/tagged; **not** auto-deleted | **Different** |
 
----
+### Confirmed security gaps (prioritized)
 
-## 5. Confirmed gaps (prioritized)
-
-### P1 — security
+**P1**
 
 1. **Plaintext unattend passwords** — Administrator and `GuestOSOobe` use `PlainText>true` until `setup.ps1` deletes answer files / Panther copies.
 2. **Join secrets durable in HKLM** — `SetupPs1B64` can contain `domain_join_b64` from first boot through domain-join reboot until final `done` scrub.
 
-### P1 — functionality
+**P2**
 
-3. **No native unattend `JoinDomain` / Microsoft-Windows-UnattendedJoin** — join remains late `Add-Computer` after OOBE ([AD_VALIDATION.md](AD_VALIDATION.md)). Deferred until the SYSTEM runner path is considered stable enough to add a second join mechanism.
-
-### P2
-
-4. **Soft domain-join failure** — OS/network can SUCCESS with WARNING; VMware operators often expect customization **failure** when join fails. Make hard-fail configurable if parity is required.
-5. **Customization Specs cannot store admin password** — reduces secret sprawl vs VMware, but more operator friction per deploy.
-
-### P3 — lab / matrix coverage
-
-6. Windows static IP + AD was historically matrix-thin for 2019/2022/Win11 (2025 Eval static was OK). **Server 2019 Eval static + AD + disks** reconfirmed **2026-08-14** (`S19ST224349`, `192.168.123.210`) — see [VALIDATED_MATRIX.md](VALIDATED_MATRIX.md).
-7. Windows multi-NIC / IPv6 still mostly code-covered, not fully lab-smoked.
+3. **`DOMAIN_PROFILES_JSON` plaintext** on the GuestOS host.
+4. Customization Specs cannot store admin password — reduces sprawl vs VMware, more operator friction per deploy.
 
 ---
 
-## 6. Where GuestOS is ahead or intentionally different
+## 5. Where GuestOS is ahead or intentionally different
 
-- **No interactive AutoLogon** — avoids Winlogon `DefaultPassword`; post-OOBE work runs as SYSTEM via `GuestOS-Setup` (AtStartup + first-boot Once/repeat catch-up). `SetupComplete.cmd` is a safety net only (must not run full `setup.ps1` during specialize) — [FAILURE_RUNBOOK.md](FAILURE_RUNBOOK.md).
-- **Layered AD validation** — admit TCP, host LDAP (hostname uniqueness / OU), UI/API credential test, in-clone QGA bind before Sysprep.
+- **No interactive AutoLogon** — avoids Winlogon `DefaultPassword`; post-OOBE work runs as SYSTEM via `GuestOS-Setup` (AtStartup + first-boot Once/repeat catch-up). `SetupComplete.cmd` is a safety net only — [FAILURE_RUNBOOK.md](FAILURE_RUNBOOK.md).
+- **Layered AD validation with guest-path authority** — UI test and host TCP/LDAP do not block when the appliance cannot reach AD; in-clone QGA bind before Sysprep does.
 - **Secrets off the Celery broker** — one-shot task secret stash with TTL.
 - **Named Specs without passwords** — presets for non-secret fields only.
 - **Server disk / pagefile planner** — beyond classic Guest Customization Spec scope.
 - **In-place Sysprep disabled** — reduces accidental generalize of production guests.
 
-**Intentional timing note:** in-clone cred probe uses template/DHCP (or any non–link-local IPv4) on the already-attached bridge/VLAN — **not** the final static IP. That answers “can this account bind from this L2 path?” Final static address is applied later in `setup.ps1` ([FAILURE_RUNBOOK.md](FAILURE_RUNBOOK.md), [AD_VALIDATION.md](AD_VALIDATION.md)).
+**Intentional timing note:** in-clone cred probe uses template/DHCP (or any non–link-local IPv4) on the already-attached bridge/VLAN — **not** the final static IP. That answers “can this account bind from this L2 path?” Final static address is applied later in `setup.ps1`.
 
 ---
 
-## 7. Recommendations (backlog only)
+## 6. Recommendations (backlog only)
 
-Ranked for a future change set — **not** implemented by this document.
+Not implemented by this document.
 
 | Priority | Item | Intent |
 |----------|------|--------|
 | P1 | Encode unattend admin / `GuestOSOobe` passwords as Base64 (`PlainText>false`) | Shrink answer-file exposure window |
-| P1 | Split join secrets from durable `SetupPs1B64`, or scrub join blob earlier after successful `Add-Computer` (before pagefile reboot if possible) | Shorten HKLM secret lifetime |
-| P1 | Optional Microsoft-Windows-UnattendedJoin after runner stability | Closer Spec-parity join path; attribute failures carefully |
-| P2 | Config flag: hard-fail task when domain join fails | Match VMware fail-closed expectations |
+| P1 | Split join secrets from durable `SetupPs1B64`, or scrub join blob earlier after successful `Add-Computer` | Shorten HKLM secret lifetime |
+| P1 | Optional Microsoft-Windows-UnattendedJoin after runner stability | Closer Spec-parity join *timing*; attribute failures carefully |
 | P2 | Encrypt-at-rest for `DOMAIN_PROFILES_JSON` (or external secret store) | Reduce GuestOS-host plaintext AD creds |
 | P3 | Lab: Win11 + 2022 static+AD rows; Windows multi-NIC smoke | Close matrix gaps |
 
+A configurable “SUCCESS with WARNING when only join fails” flag is **not** recommended as default: current verify already **fails the job** when join was requested and `PartOfDomain` is false. That matches typical VMware customization failure. The remaining difference is that the guest is left at a login screen (workgroup) instead of stuck mid-OOBE.
+
 ---
 
-## 8. Sources
+## 7. Summary verdict
+
+GuestOS reaches **functional parity** with a classic vSphere Windows Customization Spec for the common path: hostname, Sysprep SID, network, domain/workgroup, Linux cloud-init-style customize. It is **ahead** on avoiding AutoLogon, on layered AD checks that treat the **guest VLAN** as authoritative, and on Server disk/pagefile automation.
+
+The main **security gaps** vs a well-operated vCenter Spec are: plaintext unattend password encoding, plaintext AD profiles on the GuestOS host, and a longer on-guest lifetime for domain-join material inside `SetupPs1B64`. The main **functional gap** is lack of native UnattendedJoin (deferred) — join *outcome* is still achieved via late `Add-Computer`. Join failure fails the **job**; it does not leave customization marked SUCCESS.
+
+---
+
+## Appendix A — UnattendedJoin vs late Add-Computer
+
+**Microsoft-Windows-UnattendedJoin** is an unattend component that joins AD during
+**specialize** (early Sysprep), using domain + credentials (and often OU) in the
+answer file — before a normal logon or late PowerShell script. vSphere Customization
+Specs typically drive this when “Windows Server Domain” is selected.
+
+**GuestOS** joins **after OOBE**: SYSTEM task `GuestOS-Setup` applies network
+(DHCP/static/DNS), then `Add-Computer`, then often reboots (`pending_reboot`).
+
+| Topic | UnattendedJoin (specialize) | GuestOS late `Add-Computer` |
+|-------|----------------------------|-----------------------------|
+| When | During specialize | After OOBE + network in `setup.ps1` |
+| Network | Must already reach DC (IP/DNS may still be in flux) | Static IP/DNS applied first — better for static+AD |
+| Secrets | In unattend during specialize (Panther copies until cleaned) | In HKLM `SetupPs1B64` until scrub (longer across `pending_reboot`) |
+| Failure | Specialize/join failure can stall customization hard | Guest marks `domain-join-failed`; verify **FAILURE** |
+
+UnattendedJoin does **not** remove secrets from disk; it moves them into the
+answer-file window. GuestOS deferred native JoinDomain until the SYSTEM runner
+was stable. Adding both paths later needs careful failure attribution.
+
+---
+
+## Appendix B — Horizon Instant Clone / ClonePrep
+
+Horizon Instant Clones are **not** a full Sysprep-per-desktop path. A **parent**
+VM is prepared once; Horizon forks many short-lived desktops. **ClonePrep**
+(historically also Sysprep / QuickPrep on linked clones) assigns identity and
+domain membership in seconds, without GuestOS-style clone → generalize → OOBE →
+`setup.ps1` for every pool member.
+
+Horizon pool credential checks are mostly **control-plane** (can this join
+account talk to AD?). GuestOS UI/admit tests are similar in spirit; GuestOS has
+**no Instant Clone / parent–fork analogue**. Comparing ClonePrep to
+`GuestOS-Setup` mixes VDI fork semantics with golden-image customize — out of
+scope for this assessment.
+
+---
+
+## Sources
 
 ### GuestOS
 
@@ -183,11 +244,3 @@ Ranked for a future change set — **not** implemented by this document.
 
 - [Create a Customization Specification for Windows](https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-1/vsphere-virtual-machine-administration/managing-virtual-machines/customizing-guest-operating-systems/create-and-manage-customization-specifications/create-a-customization-specification-for-windows-in-the-vsphere-client.html) — SID, admin password, optional AutoLogon, workgroup/domain + OU, network
 - vCenter Guest API `windows_configuration` / `gui_unattended` (`auto_logon`, `auto_logon_count`, domain secret fields)
-
----
-
-## 9. Summary verdict
-
-GuestOS reaches **functional parity** with a classic vSphere Windows Customization Spec for the common path: hostname, Sysprep SID, network, domain/workgroup, Linux cloud-init-style customize. It is **ahead** on avoiding AutoLogon and on layered AD preflight, and **ahead** on Server disk/pagefile automation.
-
-The main **security gaps** vs a well-operated vCenter Spec are: plaintext unattend password encoding, plaintext AD profiles on the GuestOS host, and a longer on-guest lifetime for domain-join material inside `SetupPs1B64`. The main **functional gap** is lack of native UnattendedJoin (deferred), plus soft-fail domain semantics if operators expect hard customization failure.

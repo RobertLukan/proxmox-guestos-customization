@@ -18,10 +18,10 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 | Stuck ~98% waiting for `setup.ps1` after Sysprep | OOBE never completed / task never ran (often Eval+GVLK) | Console: product-key / InstallPid `0xC004F015` → see Evaluation vs GVLK; confirm `GuestOS-Setup` task exists |
 | `setup.ps1 failed` | Network, disk serial, pagefile, domain join | `setup.failed` contents; guest event log |
 | DHCP verify fail after `setup.done` | No lease on expected NIC | Bridge/VLAN; DHCP server; MAC match |
-| Domain verify fail / `WARNING: domain join failed` | Join failed (DC down, bad creds/DNS) or slow | Guest marker `domain-join-failed` shortens verify; check DC/DNS preflight; `PartOfDomain` via QGA |
-| Admit fails: DC/DNS unreachable | `join_domain` preflight (TCP 53/88/389) | Power on DC; fix `dns_servers` / routing before clone |
+| Domain verify fail / `WARNING: domain join failed` | Join failed (DC down, bad creds/DNS) or slow | Guest marker `domain-join-failed` shortens verify; check DC/DNS; `PartOfDomain` via QGA |
+| Host DC/DNS unreachable at admit | GuestOS-host TCP preflight (advisory) | Job continues with `warnings[]`; in-clone probe is the hard gate |
+| Admit fails: computer exists / bad OU (LDAP reachable) | Host LDAP directory checks | Rename host or fix OU/creds |
 | Task `FAILURE` `domain_cred_probe` before Sysprep | In-clone LDAP/ADSI bind failed | Read `class=` / `guest_ip=` / `username=` in task message; fix VLAN/DHCP/DNS or join account; never re-run Sysprep on that clone |
-| Admit fails: computer already exists / bad OU | Hostname uniqueness or `domain_ou` LDAP check | Rename hostname; remove stale computer object; fix OU DN |
 | Disk verify fail / `pagefile_pending_reboot` | Volume/pagefile not ready (legacy) | Prefer builds that wait for `setup.done` after pagefile reboot; check serials/letters |
 | Wrong data/pagefile roles on multi-disk template | Plan used bus order without `source_key` | Use disk planner; bind `source_key`; match sizes |
 

@@ -1,9 +1,6 @@
 """Unit tests for AD domain-join operational preflight."""
 
-import pytest
-
 from app.domain_preflight import check_domain_join_preflight
-from app.validators import ValidationError
 
 
 def test_preflight_skips_when_join_not_requested():
@@ -11,13 +8,14 @@ def test_preflight_skips_when_join_not_requested():
     assert check_domain_join_preflight({}) is None
 
 
-def test_preflight_requires_targets_when_joining():
-    with pytest.raises(ValidationError, match='no dns_servers'):
-        check_domain_join_preflight({
-            'join_domain': True,
-            'domain_name': '',
-            'dns_servers': '',
-        })
+def test_preflight_warns_when_no_targets():
+    warn = check_domain_join_preflight({
+        'join_domain': True,
+        'domain_name': '',
+        'dns_servers': '',
+    })
+    assert warn is not None
+    assert 'in-clone' in warn.lower() or 'continuing' in warn.lower()
 
 
 def test_preflight_passes_when_any_port_open(monkeypatch):
@@ -36,14 +34,16 @@ def test_preflight_passes_when_any_port_open(monkeypatch):
     assert ('10.0.0.2', 389) in calls
 
 
-def test_preflight_fails_when_all_unreachable(monkeypatch):
+def test_preflight_warns_when_all_unreachable(monkeypatch):
     monkeypatch.setattr(
         'app.domain_preflight._tcp_reachable',
         lambda *_a, **_k: False,
     )
-    with pytest.raises(ValidationError, match='no domain controller'):
-        check_domain_join_preflight({
-            'join_domain': True,
-            'dns_servers': '10.0.0.99',
-            'domain_name': 'lab.test',
-        })
+    warn = check_domain_join_preflight({
+        'join_domain': True,
+        'dns_servers': '10.0.0.99',
+        'domain_name': 'lab.test',
+    })
+    assert warn is not None
+    assert 'not reachable' in warn.lower() or 'continuing' in warn.lower()
+    assert 'in-clone' in warn.lower()

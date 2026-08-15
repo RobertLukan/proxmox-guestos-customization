@@ -36,6 +36,8 @@ def request_has_valid_api_token():
 
 def require_csrf_unless_api_token():
     """Validate CSRF for browser/session callers; no-op when API token auth."""
+    if request.method == 'OPTIONS':
+        return None
     if getattr(g, 'auth_via_api_token', False):
         return None
     token = (

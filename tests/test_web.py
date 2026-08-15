@@ -203,6 +203,8 @@ def test_sysprep_form_wizard_includes_csrf_and_payload_fields(client, monkeypatc
     assert b'id="domain_password_confirm"' in html
     assert b'id="test_domain_credentials_btn"' in html
     assert b'id="test_domain_profile_btn"' in html
+    assert b'id="domain_cred_test_continue_note"' in html
+    assert b'dns_servers_join_hint' in html
     assert b'Locks DNS and VLAN to the selected profile' in html
     assert b'js/validate.js' in html
     assert b'js/wizard.js' in html
