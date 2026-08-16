@@ -188,9 +188,48 @@ def classify_ldap_error(exc: BaseException | str) -> tuple[str, str]:
     return 'other', msg
 
 
+def _uses_profile_credentials(data: dict) -> bool:
+    """True when join secrets come from ``DOMAIN_PROFILES``, not the request."""
+    from app.util import as_bool as _as_bool
+
+    if not (data.get('domain_profile') or '').strip():
+        return False
+    return _as_bool(data.get('use_domain_profile_credentials'), True)
+
+
+def credential_dns_servers(data: dict | None) -> list[str]:
+    """DNS IPs used to reach AD for LDAP bind, ODJ, and the in-guest probe.
+
+    When profile credentials are in use, this is **always** the profile's
+    ``dns_servers`` from server config — never caller-supplied DNS. Guest NIC
+    DNS (``data['dns_servers']``) is unchanged and may still come from the form.
+    """
+    payload = data if isinstance(data, dict) else {}
+    if _uses_profile_credentials(payload):
+        name = (payload.get('domain_profile') or '').strip()
+        profile = {}
+        try:
+            from flask import current_app
+
+            profile = (current_app.config.get('DOMAIN_PROFILES') or {}).get(name) or {}
+        except RuntimeError:
+            profile = {}
+        raw = (profile.get('dns_servers') or '').strip()
+        if not raw:
+            return []
+        try:
+            return validate_dns_servers(raw, allow_ipv6=True)
+        except ValidationError:
+            return []
+    try:
+        return validate_dns_servers(payload.get('dns_servers'), allow_ipv6=True)
+    except ValidationError:
+        return []
+
+
 def _ldap_server_candidates(data: dict) -> list[str]:
     try:
-        dns = validate_dns_servers(data.get('dns_servers'), allow_ipv6=True)
+        dns = credential_dns_servers(data)
     except ValidationError:
         dns = []
     out = list(dns)
@@ -233,14 +272,15 @@ def host_ldap_bind(
             'domain': domain,
             'username': username,
         }
-    # Prefer explicit DNS/DC IPs from the Network step. Binding only to the
-    # domain FQDN often fails inside the GuestOS container (no domain DNS).
+    # Prefer DC IPs from credential_dns_servers (profile DNS when using stored
+    # passwords). Binding only to the domain FQDN often fails inside the
+    # GuestOS container (no domain DNS).
     dns_list = []
     try:
-        dns_list = validate_dns_servers(data.get('dns_servers'), allow_ipv6=True)
+        dns_list = credential_dns_servers(data)
     except ValidationError:
         dns_list = []
-    if not dns_list:
+    if not dns_list and not _uses_profile_credentials(data):
         return {
             'ok': False,
             'class': 'unreachable',

@@ -72,8 +72,9 @@ Credential layers:
    warning (does not block admit). Wrong join password while LDAP *is* reachable
    still fails admit.
 4. **Profile / manual Test credentials** (`POST /api/domain/test_credentials`) —
-   host LDAP bind from the GuestOS instance using DNS servers from the Network step
-   (required for a meaningful manual test; profile test may fall back to profile DNS).
+   host LDAP bind from the GuestOS instance. **Profile credentials always bind
+   to that profile's `dns_servers`** (never request DNS). Manual credentials use
+   Network-step DNS (required for a meaningful manual test).
    A failed UI test is advisory only — the wizard can continue; failure often means
    routing/firewall between GuestOS and DNS/AD, not necessarily bad passwords.
    In-clone probe remains authoritative for the guest network path.

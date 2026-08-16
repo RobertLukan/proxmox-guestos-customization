@@ -7,8 +7,12 @@ WORKDIR /app
 
 # samba-common-bin provides /usr/bin/net, used for Offline Domain Join
 # provisioning (djoin.exe equivalent). Client tooling only; no daemons run.
+# Reinstall util-linux/mount so Debian security updates (Trivy image CVEs)
+# land even when the python:3.12-slim snapshot is a few days behind.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends samba-common-bin \
+    && apt-get install -y --no-install-recommends \
+         util-linux mount libblkid1 libmount1 libuuid1 libfdisk1 libsmartcols1 bsdutils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies first for better layer caching.

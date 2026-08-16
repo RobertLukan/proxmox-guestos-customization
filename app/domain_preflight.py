@@ -5,7 +5,7 @@ import logging
 import socket
 
 from app.util import as_bool as _as_bool
-from app.validators import ValidationError, validate_dns_servers
+from app.validators import ValidationError
 
 
 def _tcp_reachable(host: str, port: int, timeout: float) -> bool:
@@ -17,10 +17,15 @@ def _tcp_reachable(host: str, port: int, timeout: float) -> bool:
 
 
 def _collect_join_targets(data) -> list[str]:
-    """Return host/IP targets to probe for domain join (DNS list first)."""
+    """Return host/IP targets to probe for domain join (DNS list first).
+
+    Profile-stored join passwords use the profile's DNS, not request DNS.
+    """
+    from app.domain_credentials import credential_dns_servers
+
     targets: list[str] = []
     try:
-        dns = validate_dns_servers(data.get('dns_servers'), allow_ipv6=True)
+        dns = credential_dns_servers(data)
     except ValidationError:
         dns = []
     for item in dns:

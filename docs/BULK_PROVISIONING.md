@@ -27,8 +27,9 @@ In **New VM with Sysprep** on a **Windows 11** template (`windows11` tag), choos
 2. On **Network**, pick the bridge (and skip the single-customize profile DNS/VLAN
    controls — they are hidden in bulk).
 3. On **Domain** (optional), enable Join domain. Profile credentials use a Domain-step
-   profile select (credentials only; does not fill DNS/VLAN). Or enter manual join
-   credentials.
+   profile select (credentials only; does not fill guest DNS/VLAN). LDAP, ODJ, and
+   the credential probe always use the profile's DNS so join passwords never go to
+   caller-supplied resolvers. Or enter manual join credentials.
 4. Submit. GuestOS creates a `batch_id` and enqueues one task per row.
 5. Jobs page can be filtered by `batch_id`.
 

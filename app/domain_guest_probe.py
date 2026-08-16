@@ -167,7 +167,12 @@ def probe_domain_credentials_in_guest(vmid, data, *, on_progress=None) -> dict:
     if on_progress:
         on_progress('Checking domain credentials…')
 
-    dns = (payload.get('dns_servers') or '').strip()
+    from app.domain_credentials import credential_dns_servers
+
+    try:
+        dns = ','.join(credential_dns_servers(payload))
+    except ValidationError:
+        dns = ''
     guest_blob = {
         'domain': blob['domain'],
         'username': blob['username'],

@@ -1463,7 +1463,11 @@ def api_domain_test_credentials():
         data['domain_name'] = profile.get('domain_name')
         data['domain_username'] = profile.get('domain_username')
         data['domain_password'] = profile.get('domain_password')
-        if not (data.get('dns_servers') or '').strip() and profile.get('dns_servers'):
+        data['use_domain_profile_credentials'] = True
+        # Bind/ODJ always use profile DNS (credential_dns_servers). Overwrite
+        # request dns_servers on this test-only payload so a rogue listener
+        # cannot be named here either.
+        if profile.get('dns_servers'):
             data['dns_servers'] = profile.get('dns_servers')
     try:
         from app.domain_credentials import host_ldap_bind, format_cred_probe_failure

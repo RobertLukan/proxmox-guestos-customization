@@ -137,7 +137,8 @@ def test_resolve_bulk_skips_profile_dns_vlan(app):
     assert data['domain_ou'] == 'OU=Servers,DC=lab,DC=example,DC=com'
 
 
-def test_resolve_bulk_keeps_explicit_dns(app):
+def test_resolve_bulk_keeps_explicit_guest_dns(app):
+    """Guest NIC DNS may stay caller-supplied; bind/ODJ still use profile DNS."""
     flask_app.config['DOMAIN_PROFILES'] = PROFILES
     data = {
         'join_domain': True,
@@ -151,6 +152,10 @@ def test_resolve_bulk_keeps_explicit_dns(app):
     assert data['dns_servers'] == '192.168.123.191'
     assert data['vlan'] == ''
     assert data['domain_password'] == 's3cret!'
+    from app.domain_credentials import credential_dns_servers, _ldap_server_candidates
+    with app.app_context():
+        assert credential_dns_servers(data) == ['10.0.0.10', '10.0.0.11']
+        assert _ldap_server_candidates(data)[0] == '10.0.0.10'
 
 
 def test_resolve_domain_join_manual_credentials(app):

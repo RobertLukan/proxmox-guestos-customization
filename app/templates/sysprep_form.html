@@ -205,9 +205,9 @@
             <input type="text" name="dns_servers" id="dns_servers" class="form-control" data-validate="dns_list"
                    placeholder="Optional under DHCP; recommended when joining a domain">
             <div class="form-text" id="dns_servers_join_hint">
-                When joining a domain, set DNS here (usually the DC or domain DNS IPs).
-                The Domain step <strong>Test credentials</strong> button uses these addresses
-                to bind from the GuestOS host.
+                Guest NIC DNS. When <strong>Use Domain Profile Credentials</strong> is
+                checked, Test credentials / LDAP / ODJ use the profile's DNS, not this
+                field, so join passwords never go to a caller-supplied resolver.
             </div>
             <div class="invalid-feedback"></div>
         </div>

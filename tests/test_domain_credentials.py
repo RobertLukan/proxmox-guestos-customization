@@ -259,6 +259,7 @@ def test_api_domain_test_credentials_profile(client, app, monkeypatch):
 
     def _fake_bind(data, timeout=5.0):
         assert data['domain_password'] == 's3cret!'
+        assert data['dns_servers'] == '10.0.0.1'
         return {
             'ok': False,
             'class': 'invalid_credentials',
@@ -271,7 +272,11 @@ def test_api_domain_test_credentials_profile(client, app, monkeypatch):
     monkeypatch.setattr('app.domain_credentials.host_ldap_bind', _fake_bind)
     resp = client.post(
         '/api/domain/test_credentials',
-        json={'domain_profile': 'Lab', 'use_domain_profile_credentials': True},
+        json={
+            'domain_profile': 'Lab',
+            'use_domain_profile_credentials': True,
+            'dns_servers': '203.0.113.8',
+        },
         headers={'Authorization': 'Bearer tok'},
     )
     assert resp.status_code == 400
@@ -281,3 +286,23 @@ def test_api_domain_test_credentials_profile(client, app, monkeypatch):
     assert body.get('continue_allowed') is True
     assert 'GuestOS' in (body.get('advisory') or '')
     assert 's3cret' not in str(body)
+    assert body.get('dns_servers') == '10.0.0.1'
+
+
+def test_credential_dns_servers_ignores_request_when_profile_creds(app):
+    from app.domain_credentials import credential_dns_servers, _ldap_server_candidates
+
+    app.config['DOMAIN_PROFILES'] = {
+        'Lab': {'dns_servers': '10.0.0.10,10.0.0.11', 'domain_name': 'lab.test'},
+    }
+    data = {
+        'domain_profile': 'Lab',
+        'use_domain_profile_credentials': True,
+        'dns_servers': '203.0.113.8',
+        'domain_name': 'lab.test',
+    }
+    with app.app_context():
+        assert credential_dns_servers(data) == ['10.0.0.10', '10.0.0.11']
+        assert _ldap_server_candidates(data)[0] == '10.0.0.10'
+        data['use_domain_profile_credentials'] = False
+        assert credential_dns_servers(data) == ['203.0.113.8']
