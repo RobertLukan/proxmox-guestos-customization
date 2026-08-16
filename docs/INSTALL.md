@@ -263,7 +263,7 @@ Compose **v2** required (see [Packages / tools](#packages--tools-guestos-host)).
 **Preferred — pull from GHCR** (image published on each `v*` release):
 
 ```bash
-export GUESTOS_VERSION=2.7.1   # pin; both 2.7.1 and v2.7.1 tags exist on GHCR
+export GUESTOS_VERSION=2.8.0   # pin; both 2.8.0 and v2.8.0 tags exist on GHCR
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 # Podman: podman compose -f docker-compose.yml -f docker-compose.ghcr.yml …

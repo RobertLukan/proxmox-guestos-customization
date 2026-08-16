@@ -14,7 +14,7 @@ profile select is used for join credentials only.
 For the full **OS / edition** lab matrix (not only AD), see
 [VALIDATED_MATRIX.md](VALIDATED_MATRIX.md).
 
-## Lab status (2026-08-12 — GuestOS 2.7.1)
+## Lab status (2026-08-16 — GuestOS 2.8.0)
 
 | Check | Result |
 |-------|--------|

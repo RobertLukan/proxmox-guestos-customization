@@ -8,7 +8,7 @@ needs community reports**.
 **GuestOS release when this matrix was last updated:** see [VERSION](../VERSION)
 (matrix date below). Prefer current `main` / latest GHCR tag when testing.
 
-**Matrix date:** 2026-08-16 (GuestOS **2.7.1** lab; Win11 static+AD via ODJ)
+**Matrix date:** 2026-08-16 (GuestOS **2.8.0** lab; Win11 static+AD via ODJ)
 
 ## What “lab OK” means
 

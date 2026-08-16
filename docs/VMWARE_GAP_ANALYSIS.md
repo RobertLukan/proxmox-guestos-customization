@@ -3,7 +3,7 @@
 **Audience:** operators and reviewers comparing Proxmox GuestOS customization to
 vSphere Guest Customization Specifications.
 
-**GuestOS baseline:** 2.7.1+ current tree (SYSTEM scheduled task `GuestOS-Setup`;
+**GuestOS baseline:** 2.8.0 (SYSTEM scheduled task `GuestOS-Setup`;
 no AutoLogon; host DC preflight advisory; in-clone cred probe is the hard gate).
 
 **VMware baseline:** vSphere **Guest Customization Specification** for Windows
