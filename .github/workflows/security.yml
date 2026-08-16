@@ -94,8 +94,26 @@ jobs:
           push: false
           load: true
           tags: guestos-security:ci
+          # Buildx SBOM/provenance lists python:3.12-slim's bundled
+          # setuptools 70.3 / msgpack 1.1 even after we replace them.
+          provenance: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Flatten image for Trivy
+        run: |
+          # Overlay whiteouts do not hide deleted wheels from Trivy's
+          # per-layer Python scanner. Re-import as a single layer.
+          cid=$(docker create guestos-security:ci)
+          docker export "$cid" | docker import \
+            --change 'ENV PYTHONUNBUFFERED=1' \
+            --change 'ENV PYTHONDONTWRITEBYTECODE=1' \
+            --change 'WORKDIR /app' \
+            --change 'EXPOSE 5001' \
+            --change 'CMD ["gunicorn","--bind","0.0.0.0:5001","wsgi:app"]' \
+            - guestos-security:ci
+          docker rm "$cid"
 
       - name: Run Trivy (image)
         uses: aquasecurity/trivy-action@v0.36.0
