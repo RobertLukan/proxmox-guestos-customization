@@ -9,7 +9,11 @@
       Client OOBE (Win10/11) requires a LocalAccounts entry when AutoLogon is
       absent; HideLocalAccountScreen only applies to Server. A short-lived
       GuestOSOobe admin satisfies the "Who's going to use this device?" page;
-      setup.ps1 removes it after enabling built-in Administrator.
+      setup.ps1 removes it after enabling built-in Administrator. Specialize
+      sets EnableFirstLogonAnimation=0 so client SKUs land on LogonUI instead
+      of hanging on "Just a moment" (FirstLogonAnim) after a no-reboot ODJ, and
+      FilterAdministratorToken=1 so a first logon as RID 500 (local or domain
+      Administrator) gets a split token and Explorer starts.
 
       Evaluation vs volume-license is one template with Jinja branches — not separate files:
       - VL Server: optional Shell-Setup ProductKey (GVLK) so OOBE skips Enter product key
@@ -40,23 +44,27 @@
                 </RunSynchronousCommand>
                 <RunSynchronousCommand wcm:action="add">
                     <Order>3</Order>
+                    <Description>GuestOS: disable first-logon animation; UAC for built-in Administrator</Description>
+                    <Path>cmd.exe /c reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableFirstLogonAnimation /t REG_DWORD /d 0 /f &amp; reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v FilterAdministratorToken /t REG_DWORD /d 1 /f</Path>
+                </RunSynchronousCommand>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>4</Order>
                     <Description>GuestOS: register SYSTEM AtStartup setup task</Description>
                     <Path>cmd.exe /c C:\Windows\System32\GuestOS-RegisterSetup.cmd</Path>
                 </RunSynchronousCommand>
             </RunSynchronous>
         </component>
-        {# DHCP-only: join during specialize while the NIC still has DHCP/DNS.
-           Static guests keep late Add-Computer in setup.ps1. #}
-        {% if unattend_join %}
+        {# Offline Domain Join: the blob carries domain, machine account and its
+           password, so no credentials appear here and no DC contact is needed.
+           Omitted when provisioning was not possible — setup.ps1 then joins with
+           Add-Computer after OOBE. Credential-based JoinDomain is not used; see
+           docs/UNATTENDED_JOIN_INVESTIGATION.md. #}
+        {% if odj_account_data %}
         <component name="Microsoft-Windows-UnattendedJoin" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <Identification>
-                <JoinDomain>{{ unattend_join_domain }}</JoinDomain>
-                {% if unattend_join_ou %}<MachineObjectOU>{{ unattend_join_ou }}</MachineObjectOU>{% endif %}
-                <Credentials>
-                    <Domain>{{ unattend_join_cred_domain }}</Domain>
-                    <Username>{{ unattend_join_username }}</Username>
-                    <Password>{{ unattend_join_password }}</Password>
-                </Credentials>
+                <Provisioning>
+                    <AccountData>{{ odj_account_data }}</AccountData>
+                </Provisioning>
             </Identification>
         </component>
         {% endif %}

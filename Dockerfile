@@ -5,6 +5,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# samba-common-bin provides /usr/bin/net, used for Offline Domain Join
+# provisioning (djoin.exe equivalent). Client tooling only; no daemons run.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends samba-common-bin \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Python dependencies first for better layer caching.
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade 'pip>=26.1.2' \

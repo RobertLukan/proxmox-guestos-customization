@@ -26,12 +26,15 @@ def test_preflight_passes_when_any_port_open(monkeypatch):
         return host == '10.0.0.2' and port == 389
 
     monkeypatch.setattr('app.domain_preflight._tcp_reachable', _reachable)
-    assert check_domain_join_preflight({
+    data = {
         'join_domain': True,
         'dns_servers': '10.0.0.2',
         'domain_name': 'lab.test',
-    }) is None
+    }
+    assert check_domain_join_preflight(data) is None
     assert ('10.0.0.2', 389) in calls
+    assert data['host_dc_reachable'] is True
+    assert data['host_dc_target'] == '10.0.0.2:389'
 
 
 def test_preflight_warns_when_all_unreachable(monkeypatch):
@@ -39,11 +42,13 @@ def test_preflight_warns_when_all_unreachable(monkeypatch):
         'app.domain_preflight._tcp_reachable',
         lambda *_a, **_k: False,
     )
-    warn = check_domain_join_preflight({
+    data = {
         'join_domain': True,
         'dns_servers': '10.0.0.99',
         'domain_name': 'lab.test',
-    })
+    }
+    warn = check_domain_join_preflight(data)
     assert warn is not None
     assert 'not reachable' in warn.lower() or 'continuing' in warn.lower()
     assert 'in-clone' in warn.lower()
+    assert data['host_dc_reachable'] is False

@@ -69,7 +69,7 @@ flowchart LR
 | Generalize | Sysprep + generated unattend | Sysprep + GuestOS-rendered [`unattended.xml`](../app/templates/sysprep/unattended.xml) |
 | Post-OOBE work | Often AutoLogon / GuiRunOnce / FirstLogonCommands; domain may join via Spec | **No** AutoLogon; SYSTEM task `GuestOS-Setup` → [`setup.ps1`](../app/templates/sysprep/setup.ps1) |
 | Network | Spec NIC settings applied during customization | Applied in `setup.ps1` after OOBE (DHCP/static/DNS/multi-NIC) |
-| Domain join | Spec “Windows Server Domain” (+ OU); typically unattend/UnattendedJoin | Late `Add-Computer` in `setup.ps1` (native unattend `JoinDomain` **not** enabled yet) |
+| Domain join | Spec “Windows Server Domain” (+ OU); credential-based unattend/UnattendedJoin | **Offline Domain Join** blob at specialize when provisioning succeeds (`DOMAIN_JOIN_ODJ`), else late `Add-Computer` in `setup.ps1` |
 | Verify | Customization status in vCenter | QGA markers / HKLM `SetupStatus` ([`sysprep_verify.py`](../app/sysprep_verify.py)) |
 
 ---
@@ -88,7 +88,7 @@ flowchart LR
 | AutoLogon as Administrator | Optional (`auto_logon` / count) | **Removed** — SYSTEM task runner | **Ahead** (security); **Different** (ops) |
 | FirstLogonCommands / GuiRunOnce | Supported in Spec / API | Not used; `GuestOS-Setup` replaces that role | **Different** |
 | Workgroup | Yes | Yes | **Parity** |
-| Domain join + OU | Yes (domain + credentials + OU path) | Yes (`Add-Computer`, optional `domain_ou`) | **Parity** (outcome); join **mechanism** **Gap** (no UnattendedJoin) — [Appendix A](#appendix-a-unattendedjoin-vs-late-add-computer) |
+| Domain join + OU | Yes (domain + credentials + OU path) | Yes (ODJ blob at specialize, else `Add-Computer`; optional `domain_ou`) | **Parity** (outcome); join **mechanism** **Ahead** (no credentials in the answer file) — [Appendix A](#appendix-a-unattendedjoin-vs-late-add-computer) |
 | DHCP / static IPv4 + DNS | Yes | Yes | **Parity** |
 | Multi-NIC | Yes | Yes (≤8; MAC then order) | **Parity** (code); lab matrix incomplete for Windows multi-NIC |
 | IPv6 | Spec-dependent | Supported in validators / setup | **Parity** (code); limited Windows lab |
@@ -130,7 +130,7 @@ The in-clone probe answers “can this guest path bind?” If that passes and
 | Where deploy passwords live | Encrypted in vCenter DB as part of Spec / secret fields | Per-task stash (Redis/SQLite via [`task_secrets.py`](../app/task_secrets.py)); **not** on Celery broker; Specs omit passwords | **Different**; GuestOS Specs are stricter; vCenter encryption is mature platform crypto |
 | AD join account at rest on control plane | Encrypted in Spec / VCDB | `DOMAIN_PROFILES_JSON` in `.env` (plaintext on GuestOS host) — see [SECURITY.md](../SECURITY.md) | **Gap** |
 | Unattend admin password encoding | Typically Base64 in generated unattend | `<PlainText>true</PlainText>` in [`unattended.xml`](../app/templates/sysprep/unattended.xml) (admin + temporary `GuestOSOobe`) | **Gap** |
-| Domain join secret on guest | Often UnattendedJoin / shorter answer-file window | Packed into `domain_join_b64` inside `SetupPs1B64` (HKLM) until final scrub; **kept** across `pending_reboot` | **Gap** |
+| Domain join secret on guest | Join account password in the unattend answer file | ODJ path ships only a machine-account blob (no join account anywhere in the guest); `Add-Computer` fallback packs `domain_join_b64` into `SetupPs1B64` (HKLM) until final scrub, **kept** across `pending_reboot` | **Ahead** when ODJ provisions; **Gap** on the fallback |
 | Winlogon `DefaultPassword` / AutoAdminLogon | Optional AutoLogon writes admin password for N logons | Explicitly cleared; no AutoLogon in unattend ([`setup.ps1`](../app/templates/sysprep/setup.ps1) `Clear-GuestOsWinlogonSecrets`) | **Ahead** |
 | Brief guest disk during cred probe | N/A (host-side checks) | `cred.json` under `ProgramData\GuestOS\credprobe\` then deleted in `finally` | **Different** (acceptable with scrub) |
 | API / RBAC | vCenter roles | Flask session+CSRF, Bearer `GUESTOS_API_TOKEN`, PDM HMAC launch | **Different** |
@@ -143,7 +143,7 @@ The in-clone probe answers “can this guest path bind?” If that passes and
 **P1**
 
 1. **Plaintext unattend passwords** — Administrator and `GuestOSOobe` use `PlainText>true` until `setup.ps1` deletes answer files / Panther copies.
-2. **Join secrets durable in HKLM** — `SetupPs1B64` can contain `domain_join_b64` from first boot through domain-join reboot until final `done` scrub.
+2. **Join secrets durable in HKLM** — on the `Add-Computer` fallback path, `SetupPs1B64` can contain `domain_join_b64` from first boot through domain-join reboot until final `done` scrub. The ODJ path avoids this entirely.
 
 **P2**
 
@@ -173,7 +173,7 @@ Not implemented by this document.
 |----------|------|--------|
 | P1 | Encode unattend admin / `GuestOSOobe` passwords as Base64 (`PlainText>false`) | Shrink answer-file exposure window |
 | P1 | Split join secrets from durable `SetupPs1B64`, or scrub join blob earlier after successful `Add-Computer` | Shorten HKLM secret lifetime |
-| P1 | Optional Microsoft-Windows-UnattendedJoin after runner stability | Closer Spec-parity join *timing*; attribute failures carefully |
+| P1 | ~~Optional Microsoft-Windows-UnattendedJoin~~ — done as Offline Domain Join (`DOMAIN_JOIN_ODJ`) | Spec-parity join *timing* without credentials in the guest |
 | P2 | Encrypt-at-rest for `DOMAIN_PROFILES_JSON` (or external secret store) | Reduce GuestOS-host plaintext AD creds |
 | P3 | Lab: Win11 + 2022 static+AD rows; Windows multi-NIC smoke | Close matrix gaps |
 
@@ -185,30 +185,43 @@ A configurable “SUCCESS with WARNING when only join fails” flag is **not** r
 
 GuestOS reaches **functional parity** with a classic vSphere Windows Customization Spec for the common path: hostname, Sysprep SID, network, domain/workgroup, Linux cloud-init-style customize. It is **ahead** on avoiding AutoLogon, on layered AD checks that treat the **guest VLAN** as authoritative, and on Server disk/pagefile automation.
 
-The main **security gaps** vs a well-operated vCenter Spec are: plaintext unattend password encoding, plaintext AD profiles on the GuestOS host, and a longer on-guest lifetime for domain-join material inside `SetupPs1B64`. The main **functional gap** is lack of native UnattendedJoin (deferred) — join *outcome* is still achieved via late `Add-Computer`. Join failure fails the **job**; it does not leave customization marked SUCCESS.
+The main **security gaps** vs a well-operated vCenter Spec are: plaintext unattend password encoding, plaintext AD profiles on the GuestOS host, and — on the `Add-Computer` fallback path — a longer on-guest lifetime for domain-join material inside `SetupPs1B64`. The join *mechanism* is no longer a gap: GuestOS joins during specialize using an Offline Domain Join blob, which is stronger than the credential-based UnattendedJoin a Spec drives, and falls back to late `Add-Computer` when the host cannot provision the account. Join failure fails the **job**; it does not leave customization marked SUCCESS.
 
 ---
 
 ## Appendix A — UnattendedJoin vs late Add-Computer
 
 **Microsoft-Windows-UnattendedJoin** is an unattend component that joins AD during
-**specialize** (early Sysprep), using domain + credentials (and often OU) in the
-answer file — before a normal logon or late PowerShell script. vSphere Customization
-Specs typically drive this when “Windows Server Domain” is selected.
+**specialize** (early Sysprep). It supports two modes: `Credentials` (domain user
+and password in the answer file) and `Provisioning` (an Offline Domain Join blob).
+vSphere Customization Specs drive the **credential** mode when “Windows Server
+Domain” is selected.
 
-**GuestOS** joins **after OOBE**: SYSTEM task `GuestOS-Setup` applies network
-(DHCP/static/DNS), then `Add-Computer`, then often reboots (`pending_reboot`).
+GuestOS tried the credential mode and abandoned it: it failed with `0x52e` on
+every lab attempt while the same account authenticated fine over the same SMB
+path from a booted guest, and a failed attempt costs ~15 minutes because
+`TimeoutPeriodInMinutes` is ignored. Full evidence is in
+[UNATTENDED_JOIN_INVESTIGATION.md](UNATTENDED_JOIN_INVESTIGATION.md). Note this
+is not a Proxmox-specific problem — vSphere drives the same `DJOIN.EXE` and
+Broadcom documents the same retry-loop symptom.
 
-| Topic | UnattendedJoin (specialize) | GuestOS late `Add-Computer` |
-|-------|----------------------------|-----------------------------|
-| When | During specialize | After OOBE + network in `setup.ps1` |
-| Network | Must already reach DC (IP/DNS may still be in flux) | Static IP/DNS applied first — better for static+AD |
-| Secrets | In unattend during specialize (Panther copies until cleaned) | In HKLM `SetupPs1B64` until scrub (longer across `pending_reboot`) |
-| Failure | Specialize/join failure can stall customization hard | Guest marks `domain-join-failed`; verify **FAILURE** |
+GuestOS now uses **Provisioning / `AccountData`** instead
+([OFFLINE_DOMAIN_JOIN.md](OFFLINE_DOMAIN_JOIN.md)), falling back to
+`Add-Computer` after OOBE when the computer account cannot be provisioned.
 
-UnattendedJoin does **not** remove secrets from disk; it moves them into the
-answer-file window. GuestOS deferred native JoinDomain until the SYSTEM runner
-was stable. Adding both paths later needs careful failure attribution.
+| Topic | Credential UnattendedJoin | GuestOS ODJ (specialize) | GuestOS late `Add-Computer` |
+|-------|---------------------------|--------------------------|-----------------------------|
+| When | During specialize | During specialize | After OOBE + network in `setup.ps1` |
+| Network | Must already reach the DC | None needed — the blob is self-contained | Static IP/DNS applied first |
+| Secrets | Domain join password in the answer file | Machine account password in the answer file | In HKLM `SetupPs1B64` until scrub |
+| Blast radius of a leak | The join account | One computer account | The join account |
+| DHCP/static | DC must be reachable, so DHCP-only in practice | Both | Both |
+| Failure | Stalls specialize ~15 min, then continues | Provisioning fails on the host; guest never sees it | Guest marks `domain-join-failed`; verify **FAILURE** |
+
+The trade-off ODJ introduces is a dependency the other two do not have: the
+**GuestOS host** must reach a DC to provision. That is why it degrades to
+`Add-Computer` rather than failing the job — host-to-AD reachability stays
+advisory, per [AD_VALIDATION.md](AD_VALIDATION.md).
 
 ---
 
@@ -233,7 +246,9 @@ scope for this assessment.
 ### GuestOS
 
 - [SECURITY.md](../SECURITY.md) — threat model
-- [AD_VALIDATION.md](AD_VALIDATION.md) — join layers, deferred UnattendedJoin
+- [AD_VALIDATION.md](AD_VALIDATION.md) — join layers
+- [OFFLINE_DOMAIN_JOIN.md](OFFLINE_DOMAIN_JOIN.md) — specialize join design
+- [UNATTENDED_JOIN_INVESTIGATION.md](UNATTENDED_JOIN_INVESTIGATION.md) — why credential UnattendedJoin was dropped
 - [FAILURE_RUNBOOK.md](FAILURE_RUNBOOK.md) — runner, scrub, probe timing
 - [WINDOWS_TEMPLATE.md](WINDOWS_TEMPLATE.md) — template requirements
 - [VALIDATED_MATRIX.md](VALIDATED_MATRIX.md) — lab coverage

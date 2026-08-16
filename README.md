@@ -235,6 +235,8 @@ Full list and comments: [`.env.example`](.env.example). Summary by necessity:
 | `DOMAIN_PROFILES_JSON` | `{}` | Named AD / DNS / VLAN profiles for domain join |
 | `DOMAIN_JOIN_CRED_PROBE` | `true` | Pre-Sysprep in-clone QGA LDAP/ADSI credential check |
 | `DOMAIN_JOIN_CRED_PROBE_WAIT_SECONDS` | `90` | Max wait for guest IP during cred probe |
+| `DOMAIN_JOIN_ODJ` | `false` | Provision the computer account here and join during Sysprep specialize ([docs](docs/OFFLINE_DOMAIN_JOIN.md)); falls back to `Add-Computer` |
+| `DOMAIN_JOIN_ODJ_TIMEOUT_SECONDS` | `60` | Max wait for `net offlinejoin provision` |
 | `GUESTOS_PATH_PREFIX` | empty | Subpath mount (e.g. `/guestos`); leave empty at site root |
 | `DATABASE_URL` | `sqlite:///site.db` | SQLAlchemy URL |
 | `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | local Redis | Compose overrides to the `redis` service |

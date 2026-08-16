@@ -52,6 +52,8 @@ class Task(db.Model):
     error_details = db.Column(db.Text, nullable=True)
     # Sanitized customization snapshot (no passwords) for Jobs history.
     options_json = db.Column(db.Text, nullable=True)
+    # Append-only operator timeline (progress, AD join path, DC reachability).
+    event_log = db.Column(db.Text, nullable=True)
 
     def __repr__(self):
         return '<Task {}> '.format(self.name)
@@ -69,8 +71,13 @@ class Task(db.Model):
 
         return options_summary_chips(self.options())
 
-    def to_dict(self):
-        return {
+    def join_summary_lines(self):
+        from app.task_options import join_summary_lines
+
+        return join_summary_lines(self.options())
+
+    def to_dict(self, include_log=False):
+        payload = {
             'id': self.id,
             'name': self.name,
             'description': self.description,
@@ -94,7 +101,11 @@ class Task(db.Model):
             'error_details': self.error_details,
             'options': self.options(),
             'options_chips': self.options_chips(),
+            'join_summary': self.join_summary_lines(),
         }
+        if include_log:
+            payload['event_log'] = self.event_log or ''
+        return payload
 
     def update_status(self, status, progress=None, message=None, result_vmid=None, result_ip_address=None, vm_uuid=None, redirect_url=None, error_code=None, error_details=None):
         self.status = status
@@ -103,6 +114,9 @@ class Task(db.Model):
             self.progress = progress
         if message is not None:
             self.message = message
+            from app.task_progress import append_task_log
+
+            append_task_log(self, message)
         if result_vmid is not None:
             self.result_vmid = result_vmid
         if result_ip_address is not None:

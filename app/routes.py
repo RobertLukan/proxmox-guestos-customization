@@ -17,6 +17,7 @@ from app.proxmox import (
 )
 from app.celery_app import sysprep_workflow_task, linux_cloudinit_workflow_task
 from app.models import Task, User, BatchRequest, CustomizationSpec
+from app.task_progress import append_task_log
 from app.specs import resolve_spec_from_request, sanitize_spec_payload
 from app.windows_identity import (
     WINDOWS_TIMEZONES,
@@ -470,7 +471,7 @@ def select_linux_template():
 def task_status(task_id):
     task = Task.query.get(task_id)
     if task:
-        return jsonify(task.to_dict())
+        return jsonify(task.to_dict(include_log=True))
     return jsonify({'error': 'Task not found'}), 404
 
 @app.route('/api/health')
@@ -625,7 +626,7 @@ def api_get_task(task_id):
     task = Task.query.get(task_id)
     if not task:
         return jsonify({'error': 'Task not found'}), 404
-    return jsonify(task.to_dict())
+    return jsonify(task.to_dict(include_log=True))
 
 
 @app.route('/jobs')
@@ -1328,6 +1329,7 @@ def api_cancel_batch(batch_id):
         task.status = 'CANCELLED'
         task.progress = 100
         task.message = 'Cancelled by operator.'
+        append_task_log(task, task.message)
     batch.status = 'CANCELLED'
     batch.cancelled_items = len(cancellable)
     batch.message = 'Batch cancelled; running tasks marked cancelled best-effort.'

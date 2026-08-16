@@ -17,6 +17,12 @@ and [AD_VALIDATION.md](AD_VALIDATION.md).
 
 | ID | Item | Confirmed |
 |----|------|-----------|
+| `odj-fallback` | Fallback when GuestOS cannot reach the DC | 2026-08-16 — `W11FB193536` VMID 121 SUCCESS. Worker `join-path: host_dc=unreachable` and `provision=add-computer`; guest `pending_reboot (domain-join)`; verify `domain[lab.test]: joined (lab.test, add-computer, host DC unreachable)`; DHCP `192.168.123.164`. |
+| `odj-static-win11` | Offline Domain Join on Win11 + static IP + AD | 2026-08-16 — guestos-lab `W11ST191727` VMID 121 SUCCESS. `join-path: provision=odj`; verify `IP 192.168.123.211 present`; `domain[lab.test]: joined (lab.test, odj, host DC reachable)`; `already-joined` then `setup.done`. |
+| `uac-rid500-logon` | First console logon as `LAB\Administrator` after `FilterAdministratorToken=1` | 2026-08-16 — `W11ODJ185325` VMID 121. `FilterAdministratorToken=1`; first logon as `LAB\Administrator` got a desktop (`explorer.exe` session 1). |
+| `odj-static-s2019` | Offline Domain Join on Server 2019 Eval + static IP + AD | 2026-08-16 — guestos-lab `S19ODJ152322` VMID 123 SUCCESS. Worker `ODJ: provisioned`; `already-joined` then `setup.done`; static `192.168.123.210`; disks P:/D:/E: ok. |
+| `odj-dhcp-s2022` | Offline Domain Join on Server 2022 VL + DHCP + AD | 2026-08-16 — guestos-lab `S22ODJ151539` VMID 123 SUCCESS (fast waits 30s/15s; 24h first-boot trigger, no task kick). Worker `ODJ: provisioned`; guest `already-joined` then `setup.done`; DHCP `192.168.123.162`; disks P:/D:/E: ok. First console logon as `administrator@lab.test` worked. Earlier `S22ODJ145513` needed a manual `schtasks /Run` after the 2h window expired. |
+| `odj-dhcp-win11` | Offline Domain Join on Win11 + DHCP + AD | 2026-08-16 — `W11ODJ111506` join; `W11ODJ114420` LogonUI; `W11ODJ120940` VMID 121 SUCCESS with `pending_reboot`/`already-joined` then `ok-after-reboot`. Console `LogonUI`, no `FirstLogonAnim`. |
 | `win11-bulk-ad` | Win11 bulk 2× VDI DHCP + AD (`lab_bulk_win11_ad_smoke.py`) | 2026-08-02 — `VDI698941A`→144, `VDI698941B`→142 SUCCESS (domain joined) |
 | `secrets-stash-2022` | Admin/domain secrets side-channel + 2022 VL full smoke | 2026-08-02 — `S22S185146` SUCCESS |
 | `eval-failclosed-2019` | Eval skip GVLK + fail-closed unknown edition | 2026-08-02 — `S19S185702` SUCCESS |
@@ -31,3 +37,4 @@ and [AD_VALIDATION.md](AD_VALIDATION.md).
 1. Optionally set Proxmox `localtime=1` on Windows templates and re-check (**`ntp-pve-localtime`**).
 2. Optionally re-check Recycle Bin on D:/E: after disk smoke.
 3. Update this file: move open → done with host/VMID/date.
+5. Update this file: move open → done with host/VMID/date.

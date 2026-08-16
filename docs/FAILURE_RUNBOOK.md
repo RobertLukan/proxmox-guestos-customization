@@ -16,6 +16,8 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 | `verification failed` / `setup.done missing` | SYSTEM `GuestOS-Setup` task never finished `setup.ps1` | Guest `C:\ProgramData\GuestOS\` markers + transcript; `schtasks /Query /TN GuestOS-Setup`; on **Eval** Server check InstallPid / GVLK regression below |
 | Stuck ~98% on `pending reboot` | Pagefile/domain reboot never finalized `setup.done` | `setup.pending_reboot` present; task still registered and fires at next startup? |
 | Stuck ~98% waiting for `setup.ps1` after Sysprep | OOBE never completed / task never ran (often Eval+GVLK) | Console: product-key / InstallPid `0xC004F015` → see Evaluation vs GVLK; confirm `GuestOS-Setup` task exists |
+| Stuck ~98% after ODJ, `SetupStatus` missing, task Last Result `267011` | First-boot Once trigger registered on stale CMOS; DC NTP jump expired the 2h window; AtStartup already missed | Guest `schtasks /Query /TN GuestOS-Setup /V`; if Last Run is 1999/`267011`, `schtasks /Run /TN GuestOS-Setup`. RegisterSetup duration is 24h to survive the jump. |
+| Console stuck on “Just a moment” after SUCCESS | Win11 `FirstLogonAnim` after OOBE; ODJ path does not reboot | Confirm `EnableFirstLogonAnimation=0` in unattend specialize; reboot once to recover an already-customized guest |
 | `setup.ps1 failed` | Network, disk serial, pagefile, domain join | `setup.failed` contents; guest event log |
 | DHCP verify fail after `setup.done` | No lease on expected NIC | Bridge/VLAN; DHCP server; MAC match |
 | Domain verify fail / `WARNING: domain join failed` | Join failed (DC down, bad creds/DNS) or slow | Guest marker `domain-join-failed` shortens verify; check DC/DNS; `PartOfDomain` via QGA |
@@ -121,6 +123,11 @@ OOBE still asks “Who's going to use this device?” unless unattend creates a
 `LocalAccounts` entry. GuestOS creates a short-lived `GuestOSOobe` admin for
 that page; `setup.ps1` removes it after enabling built-in Administrator.
 `UnattendCreatedUser` is set for all SKUs as an extra OOBE marker.
+Specialize also sets `EnableFirstLogonAnimation=0` so Win10/11 does not sit on
+the “Just a moment” splash (`FirstLogonAnim`) after OOBE — Offline Domain Join
+no longer reboots to dismiss it. `FilterAdministratorToken=1` puts the built-in
+Administrator (local or domain RID 500) in Admin Approval Mode so first logon
+starts Explorer instead of leaving `CreateExplorerShellUnelevatedTask` queued.
 
 **Fail closed (2.6.5+):** If the guest-agent edition probe returns empty (WMI/QGA
 glitch), GuestOS does **not** invent a Standard GVLK. Worker log:
@@ -149,7 +156,12 @@ payloads), then falls back to guest-exec PowerShell. Common failures:
 2. **Staged `setup.ps1` missing after write** — older chunked exec overload;
    upgrade so native file-write is used. Confirm `GuestOS-FirstLogon.cmd` exists
    under `C:\Windows\System32\` before Sysprep.
-3. Re-run Customize on a fresh clone after fixing the template agent.
+3. **`being used by another process` on `GuestOS-RegisterSetup.ps1`** — leftover
+   `GuestOS-Setup` from a previously customized template still has PowerShell
+   `-File` on that script. GuestOS now unregisters the task and retries the
+   write; if it still fails, generalize the template without a leftover
+   GuestOS-Setup task.
+4. Re-run Customize on a fresh clone after fixing the template agent.
 
 ## Verify failed but Sysprep ran
 

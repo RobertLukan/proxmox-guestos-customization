@@ -34,3 +34,51 @@ def test_build_task_options_strips_secrets():
     raw = options_to_json(data)
     assert 'nope' not in raw
     assert 'svc@lab.test' in raw
+
+
+def test_build_task_options_join_path_chips():
+    opts = build_task_options({
+        'network_mode': 'dhcp',
+        'join_domain': True,
+        'domain_join_method': 'odj',
+        'host_dc_reachable': True,
+        'host_dc_target': '192.168.123.191:389',
+    })
+    assert opts['domain_join_method'] == 'odj'
+    assert opts['host_dc_reachable'] is True
+    chips = options_summary_chips(opts)
+    assert 'ODJ' in chips
+    assert 'host-DC-down' not in chips
+
+    late = build_task_options({
+        'join_domain': True,
+        'domain_join_method': 'add-computer',
+        'host_dc_reachable': False,
+    })
+    chips = options_summary_chips(late)
+    assert 'late-AD' in chips
+    assert 'host-DC-down' in chips
+
+
+def test_join_summary_lines_odj_and_late():
+    from app.task_options import join_summary_lines
+
+    odj = join_summary_lines({
+        'join_domain': True,
+        'domain_name': 'lab.test',
+        'domain_join_method': 'odj',
+        'host_dc_reachable': True,
+        'host_dc_target': '192.168.123.191:389',
+    })
+    assert odj[0] == 'Domain lab.test'
+    assert 'Offline Domain Join (ODJ) at specialize' in odj
+    assert 'GuestOS host DC reachable (192.168.123.191:389)' in odj
+
+    late = join_summary_lines({
+        'join_domain': True,
+        'domain_join_method': 'add-computer',
+        'host_dc_reachable': False,
+    })
+    assert 'late Add-Computer after OOBE' in late
+    assert any('unreachable' in line for line in late)
+    assert join_summary_lines({'join_domain': False}) == []

@@ -42,6 +42,7 @@ def _patch_verify_deps(monkeypatch, interfaces, cmd_fn=None, marker=('done', Non
     monkeypatch.setattr(sv, '_get_vm_node', lambda vmid: 'node1')
     monkeypatch.setattr(sv.time, 'sleep', lambda _s: None)
     monkeypatch.setattr(sv, '_guest_setup_marker', lambda _vmid: marker)
+    monkeypatch.setattr(sv, '_read_setup_join_method', lambda _vmid: None)
     if cmd_fn is not None:
         monkeypatch.setattr(sv, 'run_command_in_guest', cmd_fn)
     else:
@@ -192,6 +193,37 @@ def test_verify_domain_joined_via_powershell_json(monkeypatch):
     )
     assert ok is True
     assert 'domain[lab.test]: joined' in summary
+
+
+def test_verify_domain_summary_includes_join_path(monkeypatch):
+    interfaces = {
+        'result': [{
+            'ip-addresses': [
+                {'ip-address-type': 'ipv4', 'ip-address': '192.168.123.181'},
+            ],
+        }],
+    }
+
+    def _cmd(_vmid, command, **_kw):
+        if 'hostname' in command:
+            return 'WIn11ADTest\n'
+        if 'ConvertTo-Json' in command or 'Win32_ComputerSystem' in command:
+            return '{"Domain":"lab.test","PartOfDomain":true}\n'
+        raise AssertionError(command)
+
+    _patch_verify_deps(monkeypatch, interfaces, cmd_fn=_cmd)
+    monkeypatch.setattr(sv, '_read_setup_join_method', lambda _vmid: 'odj')
+
+    summary, ok = ca._verify_sysprep_result(
+        123,
+        'WIn11ADTest',
+        expected_ip='192.168.123.181',
+        expected_domain='lab.test',
+        timeout=30,
+        join_meta={'host_dc_reachable': True, 'domain_join_method': 'odj'},
+    )
+    assert ok is True
+    assert 'domain[lab.test]: joined (lab.test, odj, host DC reachable)' in summary
 
 
 def test_verify_domain_unknown_fails_when_expected(monkeypatch):

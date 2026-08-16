@@ -98,6 +98,12 @@ def build_task_options(data: dict | None) -> dict:
             out['enable_ipv6'] = bool(v6)
     if raw.get('product_key'):
         out['product_key_set'] = True
+    if 'host_dc_reachable' in raw:
+        out['host_dc_reachable'] = bool(raw.get('host_dc_reachable'))
+    _set('host_dc_target', (raw.get('host_dc_target') or '').strip() or None)
+    method = (raw.get('domain_join_method') or '').strip().lower()
+    if method in ('odj', 'add-computer'):
+        out['domain_join_method'] = method
     return out
 
 
@@ -114,6 +120,13 @@ def options_summary_chips(options: dict | None) -> list[str]:
         chips.append(mode.upper() if mode == 'dhcp' else 'static')
     if o.get('join_domain'):
         chips.append('AD')
+        method = (o.get('domain_join_method') or '').lower()
+        if method == 'odj':
+            chips.append('ODJ')
+        elif method == 'add-computer':
+            chips.append('late-AD')
+        if o.get('host_dc_reachable') is False:
+            chips.append('host-DC-down')
     elif o.get('workgroup'):
         chips.append('WG')
     if o.get('os_family') == 'linux':
@@ -134,6 +147,32 @@ def options_summary_chips(options: dict | None) -> list[str]:
     if o.get('spec_id'):
         chips.append('spec')
     return chips or ['—']
+
+
+def join_summary_lines(options: dict | None) -> list[str]:
+    """Human-readable AD join / DC lines for the job details page."""
+    o = options or {}
+    if not o.get('join_domain'):
+        return []
+    lines = []
+    domain = (o.get('domain_name') or '').strip()
+    if domain:
+        lines.append(f'Domain {domain}')
+    method = (o.get('domain_join_method') or '').lower()
+    if method == 'odj':
+        lines.append('Offline Domain Join (ODJ) at specialize')
+    elif method == 'add-computer':
+        lines.append('late Add-Computer after OOBE')
+    else:
+        lines.append('requested (path not recorded yet)')
+    if o.get('host_dc_reachable') is True:
+        tgt = (o.get('host_dc_target') or '').strip()
+        lines.append('GuestOS host DC reachable' + (f' ({tgt})' if tgt else ''))
+    elif o.get('host_dc_reachable') is False:
+        lines.append(
+            'GuestOS host DC unreachable from this worker (guest VLAN may still reach AD)'
+        )
+    return lines
 
 
 def parse_options_json(raw: str | None) -> dict:

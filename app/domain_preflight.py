@@ -54,15 +54,19 @@ def check_domain_join_preflight(data, timeout: float = 2.0):
     Returns ``None`` when join is not requested, a target is reachable, or
     nothing to warn about.
     """
-    if not _as_bool((data or {}).get('join_domain'), False):
+    payload = data if isinstance(data, dict) else {}
+    if not _as_bool(payload.get('join_domain'), False):
         return None
 
-    targets = _collect_join_targets(data or {})
+    targets = _collect_join_targets(payload)
     if not targets:
+        payload['host_dc_reachable'] = False
+        payload['host_dc_target'] = ''
         msg = (
             'Domain join: no dns_servers (or resolvable domain_name) for GuestOS-host '
             'DC preflight; continuing — in-clone probe / guest DNS will validate the path.'
         )
+        logging.warning('join-path: host_dc=unreachable reason=no-targets')
         logging.warning(msg)
         return msg
 
@@ -70,16 +74,20 @@ def check_domain_join_preflight(data, timeout: float = 2.0):
     for host in targets:
         for port in ports:
             if _tcp_reachable(host, port, timeout=timeout):
-                logging.info(
-                    'domain preflight: %s:%s reachable', host, port
-                )
+                payload['host_dc_reachable'] = True
+                payload['host_dc_target'] = f'{host}:{port}'
+                logging.info('join-path: host_dc=reachable target=%s:%s', host, port)
+                logging.info('domain preflight: %s:%s reachable', host, port)
                 return None
 
     tried = ', '.join(f'{h}:53/88/389' for h in targets)
+    payload['host_dc_reachable'] = False
+    payload['host_dc_target'] = ''
     msg = (
         'Domain join: DC/DNS not reachable from the GuestOS host '
         f'(probed {tried}). Continuing — the guest VLAN may still reach AD; '
         'in-clone credential probe is authoritative before Sysprep.'
     )
+    logging.warning('join-path: host_dc=unreachable probed=%s', tried)
     logging.warning(msg)
     return msg

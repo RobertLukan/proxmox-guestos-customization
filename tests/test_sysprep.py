@@ -81,6 +81,8 @@ def test_unattend_sets_hostname_and_timezone():
     assert '<LocalAccounts>' in xml
     assert '<Name>GuestOSOobe</Name>' in xml
     assert '<HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>' in xml
+    assert 'EnableFirstLogonAnimation' in xml
+    assert 'FilterAdministratorToken' in xml
 
 
 def test_unattend_evaluation_skips_product_key_and_marks_oobe():
@@ -100,6 +102,8 @@ def test_unattend_evaluation_skips_product_key_and_marks_oobe():
     assert '<Name>GuestOSOobe</Name>' in xml
     assert '<AutoLogon>' not in xml
     assert '<FirstLogonCommands>' not in xml
+    assert 'EnableFirstLogonAnimation' in xml
+    assert 'FilterAdministratorToken' in xml
 
 
 def test_unattend_includes_product_key_when_set():
@@ -356,6 +360,7 @@ def test_write_sysprep_files_registers_task_launcher(monkeypatch):
         'run_command_in_guest',
         lambda *a, **k: None,
     )
+    monkeypatch.setattr(sr, '_unlock_guest_path', lambda *a, **k: None)
     with flask_app.app_context():
         sr._write_sysprep_files(1, b'<xml/>', b'# ps1', b'@echo off')
     assert r'C:\Windows\System32\GuestOS-FirstLogon.cmd' in written
@@ -373,6 +378,7 @@ def test_register_setup_ps1_has_startup_and_first_boot_triggers():
     assert 'New-ScheduledTaskTrigger -AtStartup' in ps1
     assert 'RepetitionInterval' in ps1
     assert '-Once' in ps1
+    assert 'Hours 24' in ps1
     assert 'first boot' in ps1.lower() or 'Once+2m' in ps1
 
 
@@ -487,12 +493,12 @@ def test_domain_join_password_is_not_interpolated_raw():
     assert decoded['password'] == nasty
 
 
-def test_unattend_join_dhcp_only():
-    """Specialize UnattendedJoin is DHCP-only; static stays late Add-Computer."""
-    dhcp = _base_data()
-    dhcp.pop('ip_address', None)
-    dhcp.pop('gateway', None)
-    dhcp.update(
+def test_unattend_odj_blob_renders_provisioning_only():
+    """An ODJ blob joins during specialize with no credentials in the answer file."""
+    data = _base_data()
+    data.pop('ip_address', None)
+    data.pop('gateway', None)
+    data.update(
         network_mode='dhcp',
         use_dhcp=True,
         join_domain=True,
@@ -502,36 +508,55 @@ def test_unattend_join_dhcp_only():
         domain_ou='OU=Computers,DC=lab,DC=test',
     )
     with flask_app.app_context():
-        _validate_sysprep_network(dhcp)
-        _prepare_domain_join(dhcp)
-        assert dhcp['unattend_join'] is True
-        xml, ps1, _cmd = _render_sysprep_files(dhcp)
+        _validate_sysprep_network(data)
+        _prepare_domain_join(data)
+        data['odj_account_data'] = 'QUJDREVGRw=='
+        xml, ps1, _cmd = _render_sysprep_files(data)
     xml = xml.decode()
     ps1 = ps1.decode()
-    assert '<JoinDomain>lab.test</JoinDomain>' in xml
-    assert '<Username>administrator</Username>' in xml
     assert 'Microsoft-Windows-UnattendedJoin' in xml
-    assert 'OU=Computers,DC=lab,DC=test' in xml
-    assert 'Already domain-joined' in ps1
-    assert 'unattend_join_password' not in dhcp
-
-    static = _base_data()
-    static.update(
-        join_domain=True,
-        domain_name='lab.test',
-        domain_username='administrator@lab.test',
-        domain_password='p@ss',
-    )
-    with flask_app.app_context():
-        _validate_sysprep_network(static)
-        _prepare_domain_join(static)
-        assert static.get('unattend_join') is False
-        xml, ps1, _cmd = _render_sysprep_files(static)
-    xml = xml.decode()
-    ps1 = ps1.decode()
-    assert 'Microsoft-Windows-UnattendedJoin' not in xml
+    assert '<AccountData>QUJDREVGRw==</AccountData>' in xml
+    ident = xml.split('<Identification>', 1)[1].split('</Identification>', 1)[0]
+    assert '<Credentials>' not in ident
+    assert '<JoinDomain>' not in ident
+    assert 'p@ss' not in xml
+    # setup.ps1 still carries the fallback, skips Add-Computer when already
+    # joined, then reboots once so first interactive logon is a clean session.
     assert 'Add-Computer' in ps1
     assert 'Already domain-joined' in ps1
+    assert 'join-path method=odj' in ps1
+    assert "SetupJoinMethod -Value 'odj'" in ps1
+    assert "SetupJoinMethod -Value 'add-computer'" in ps1
+    assert 'Restarting so first interactive logon is a clean session.' in ps1
+    assert 'Domain membership already in place; marking setup done.' not in ps1
+    # The blob holds the machine account password; it must not linger in data.
+    assert 'odj_account_data' not in data
+
+
+def test_unattend_without_odj_blob_has_no_join_component():
+    """Without a blob the component is omitted so specialize cannot stall."""
+    for mode in ('dhcp', 'static'):
+        data = _base_data()
+        if mode == 'dhcp':
+            data.pop('ip_address', None)
+            data.pop('gateway', None)
+            data.update(network_mode='dhcp', use_dhcp=True)
+        data.update(
+            join_domain=True,
+            domain_name='lab.test',
+            domain_username='administrator@lab.test',
+            domain_password='p@ss',
+        )
+        with flask_app.app_context():
+            _validate_sysprep_network(data)
+            _prepare_domain_join(data)
+            xml, ps1, _cmd = _render_sysprep_files(data)
+        xml = xml.decode()
+        ps1 = ps1.decode()
+        assert 'Microsoft-Windows-UnattendedJoin' not in xml, mode
+        assert 'Add-Computer' in ps1
+        assert 'Already domain-joined' in ps1
+        assert 'Restarting so first interactive logon is a clean session.' in ps1
 
 
 def test_domain_join_rejects_bare_username():

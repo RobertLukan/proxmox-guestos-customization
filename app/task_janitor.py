@@ -15,6 +15,7 @@ from flask import current_app
 
 from app import app, db
 from app.models import BatchRequest, Task, _utcnow
+from app.task_progress import append_task_log
 
 _INFLIGHT = frozenset({'PENDING', 'STARTED', 'PROGRESS'})
 _TERMINAL = frozenset({'SUCCESS', 'FAILURE', 'CANCELLED', 'REJECTED'})
@@ -104,6 +105,7 @@ def reap_stale_inflight_tasks(stale_after_seconds=None, limit=100):
         task.error_code = 'stale'
         task.error_details = msg
         task.message = msg if len(msg) <= 512 else (msg[:509] + '...')
+        append_task_log(task, msg)
         task.updated_at = _utcnow()
         reaped.append({
             'task_id': task.id,

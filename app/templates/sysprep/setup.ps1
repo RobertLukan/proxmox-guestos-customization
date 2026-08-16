@@ -97,6 +97,12 @@ function Write-GuestOsSetupMarker {
     Set-ItemProperty -Path $reg -Name SetupStatus -Value $Status -ErrorAction SilentlyContinue
     Set-ItemProperty -Path $reg -Name SetupDetail -Value $Detail -ErrorAction SilentlyContinue
     Set-ItemProperty -Path $reg -Name SetupUtc -Value ((Get-Date).ToUniversalTime().ToString('o')) -ErrorAction SilentlyContinue
+    # Durable join path for verify/logs. Keep across pending_reboot → done.
+    if ($Detail -eq 'already-joined') {
+        Set-ItemProperty -Path $reg -Name SetupJoinMethod -Value 'odj' -ErrorAction SilentlyContinue
+    } elseif ($Detail -eq 'domain-join') {
+        Set-ItemProperty -Path $reg -Name SetupJoinMethod -Value 'add-computer' -ErrorAction SilentlyContinue
+    }
     if ($Status -eq 'done') {
         $Detail | Set-Content -Path 'C:\ProgramData\GuestOS\setup.done' -Encoding ASCII
         $Detail | Set-Content -Path 'C:\Windows\GuestOS\setup.done' -Encoding ASCII
@@ -689,6 +695,7 @@ try {
     $alreadyJoined = [bool]$cs.PartOfDomain
     if ($alreadyJoined) {
         Write-Output "setup.ps1: Already domain-joined ($($cs.Domain)); skipping Add-Computer."
+        Write-Output "setup.ps1: join-path method=odj"
         try {
             w32tm /resync /force 2>&1 | ForEach-Object { Write-Output "setup.ps1: w32tm: $_" }
         } catch {
@@ -709,6 +716,7 @@ for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
         {% endif %}
         $joined = $true
         Write-Output "setup.ps1: Joined domain $($j.domain) as $($j.username)."
+        Write-Output "setup.ps1: join-path method=add-computer"
         # Best-effort: pull time from the domain (PDC) before the membership reboot.
         # Does not fail the job if the DC clock/NTP is wrong — that is an AD/lab issue.
         try {
@@ -725,10 +733,19 @@ for ($i = 0; $i -lt 10 -and -not $joined; $i++) {
 
 # Do not scrub SetupPs1B64 before an intentional reboot — the AtStartup task must
 # re-extract setup.ps1 to mark done. Scrub only on final done paths.
-if ($joined -and -not $alreadyJoined) {
-    Write-Output "setup.ps1: Restarting to finalize domain membership."
+# Always reboot once after a successful join, including Offline Domain Join
+# (already a member before this script). That second boot is the first
+# interactive logon, so Explorer is not left queued on the OOBE session.
+if ($joined) {
+    if ($alreadyJoined) {
+        Write-Output "setup.ps1: Restarting so first interactive logon is a clean session."
+        $rebootDetail = 'already-joined'
+    } else {
+        Write-Output "setup.ps1: Restarting to finalize domain membership."
+        $rebootDetail = 'domain-join'
+    }
     Ensure-GuestOsSetupTask
-    Write-GuestOsSetupMarker -Status pending_reboot -Detail 'domain-join'
+    Write-GuestOsSetupMarker -Status pending_reboot -Detail $rebootDetail
     try { Stop-Transcript | Out-Null } catch {}
     shutdown /r /t 5
 } elseif ($pagefileLetter) {
@@ -737,14 +754,6 @@ if ($joined -and -not $alreadyJoined) {
     Write-GuestOsSetupMarker -Status pending_reboot -Detail 'pagefile'
     try { Stop-Transcript | Out-Null } catch {}
     shutdown /r /t 5
-} elseif ($joined) {
-    Write-Output "setup.ps1: Domain membership already in place; marking setup done."
-    Write-GuestOsSetupMarker -Status done -Detail 'ok'
-    Scrub-GuestOsSetupArtifacts
-    Disable-GuestOsSetupTask
-    Clear-GuestOsWinlogonSecrets
-    try { Stop-Transcript | Out-Null } catch {}
-    Invoke-GuestOsSessionEnd
 } else {
     Write-Output "setup.ps1: Domain join FAILED after retries domain=$($j.domain) username=$($j.username) last=$lastJoinErr; leaving machine in workgroup."
     Write-GuestOsSetupMarker -Status done -Detail 'domain-join-failed'

@@ -18,6 +18,7 @@ _TASK_EXTRA_COLUMNS = (
     ('error_code', 'VARCHAR(64)'),
     ('error_details', 'TEXT'),
     ('options_json', 'TEXT'),
+    ('event_log', 'TEXT'),
 )
 
 

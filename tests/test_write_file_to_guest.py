@@ -105,3 +105,35 @@ def test_write_file_to_guest_exec_fallback_chunks(monkeypatch):
     assert any('Add-Content' in c for c in calls)
     full_b64 = base64.b64encode(payload).decode()
     assert not any(full_b64 in c for c in calls)
+
+
+def test_write_file_to_guest_retries_share_violation(monkeypatch):
+    calls = {'write': 0, 'unlock': 0}
+
+    monkeypatch.setattr(proxmox_mod, '_ensure_guest_parent_dir', lambda *a, **k: None)
+
+    def _fw(*a, **k):
+        raise Exception('Permission denied (file-write)')
+
+    def _once(vmid, raw, file_path):
+        calls['write'] += 1
+        if calls['write'] == 1:
+            raise Exception(
+                'Command failed with exit code 1: Exception calling "WriteAllBytes" '
+                'with "2" argument(s): "The process cannot access the file '
+                "'C:\\Windows\\System32\\GuestOS-RegisterSetup.ps1' because it is "
+                'being used by another process."'
+            )
+        return None
+
+    def _unlock(vmid, file_path):
+        calls['unlock'] += 1
+
+    monkeypatch.setattr(proxmox_mod, '_agent_file_write', _fw)
+    monkeypatch.setattr(proxmox_mod, '_write_file_to_guest_via_exec_once', _once)
+    monkeypatch.setattr(proxmox_mod, '_unlock_guest_path', _unlock)
+    monkeypatch.setattr(proxmox_mod.time, 'sleep', lambda *a, **k: None)
+
+    write_file_to_guest(42, b'hello-guestos', r'C:\Windows\System32\GuestOS-RegisterSetup.ps1')
+    assert calls['write'] == 2
+    assert calls['unlock'] == 1

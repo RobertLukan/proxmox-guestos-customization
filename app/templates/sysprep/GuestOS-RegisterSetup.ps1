@@ -20,13 +20,15 @@ $startup = New-ScheduledTaskTrigger -AtStartup
 # Delay so OOBE/network stack can settle before setup.ps1 runs.
 try { $startup.Delay = 'PT45S' } catch {}
 
-# First-boot catch-up: fire soon, then retry every 2 minutes for up to 2 hours.
+# First-boot catch-up: fire soon, then retry every 2 minutes. Duration must
+# survive an ODJ/NTP clock jump (template CMOS can be hours behind the DC).
+# A 2-hour window registered at the stale clock expires immediately after sync.
 $onceAt = (Get-Date).AddMinutes(2)
 $once = New-ScheduledTaskTrigger `
     -Once `
     -At $onceAt `
     -RepetitionInterval (New-TimeSpan -Minutes 2) `
-    -RepetitionDuration (New-TimeSpan -Hours 2)
+    -RepetitionDuration (New-TimeSpan -Hours 24)
 
 $principal = New-ScheduledTaskPrincipal `
     -UserId 'SYSTEM' `
@@ -51,4 +53,4 @@ Register-ScheduledTask `
     -Settings $settings `
     -Force | Out-Null
 
-Write-Output "GuestOS-RegisterSetup: registered task $taskName (SYSTEM AtStartup +45s; Once+2m repeat for first boot)."
+Write-Output "GuestOS-RegisterSetup: registered task $taskName (SYSTEM AtStartup +45s; Once+2m repeat/24h for first boot)."

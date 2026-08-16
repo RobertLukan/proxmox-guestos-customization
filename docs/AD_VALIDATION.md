@@ -86,10 +86,18 @@ usually still template/DHCP, not the final unattend static address.
 Jobs history stores `domain_username` (and profile/domain) but never
 `domain_password` / `domain_join_b64`.
 
-Optional native unattend `JoinDomain` (specialize) is an **experiment on DHCP
-guests only** (`unattend_join`): `Microsoft-Windows-UnattendedJoin` in
-`unattended.xml`. Static IP still uses late `Add-Computer` in `setup.ps1`.
+Joining during **specialize** uses **Offline Domain Join** (`DOMAIN_JOIN_ODJ`,
+default off): the GuestOS host provisions the computer account with Samba's
+`net offlinejoin provision` and ships the blob as
+`Microsoft-Windows-UnattendedJoin/Identification/Provisioning/AccountData`, so
+no credentials go into the answer file and the guest needs no DC contact to
+join. Unlike the old credential-based experiment this is **not** DHCP-only.
+When provisioning is not possible (host cannot reach a DC, missing rights,
+Samba error) the component is omitted and late `Add-Computer` runs as before;
 `setup.ps1` skips `Add-Computer` when `PartOfDomain` is already true.
+See [OFFLINE_DOMAIN_JOIN.md](OFFLINE_DOMAIN_JOIN.md) for the design and
+[UNATTENDED_JOIN_INVESTIGATION.md](UNATTENDED_JOIN_INVESTIGATION.md) for why the
+credential-based `JoinDomain` path was abandoned (always `0x52e`, ~15 min cost).
 
 ## What “validated” means here
 

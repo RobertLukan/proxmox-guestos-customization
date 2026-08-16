@@ -32,7 +32,12 @@ from app.remotes import attach_pve_override
 from app.task_secrets import load_task_secrets, scrub_workflow_secrets
 from app.util import as_bool as _as_bool
 from app.validators import ValidationError, validate_mac
-from app.task_progress import update_task_progress
+from app.task_progress import (
+    append_task_log,
+    record_domain_join_method,
+    record_host_dc_preflight,
+    update_task_progress,
+)
 from app.sysprep_render import (
     _validate_sysprep_network,
     _prepare_domain_join,
@@ -184,6 +189,7 @@ def _abandon_cancelled_clone(task_id, vmid=None, hostname=None, data=None):
             task.message = f"{task.message} Clone abandoned after cancel."
         elif not task.message:
             task.message = 'Cancelled; clone abandoned (tagged failed-customization).'
+        append_task_log(task, task.message)
         db.session.commit()
     if vmid:
         _mark_clone_failed(vmid, hostname=hostname or (task.hostname if task else None), data=data, stop=True)
@@ -203,6 +209,7 @@ def _fail_sysprep_task(task_id, message, vmid=None, hostname=None, error_code=No
     task.error_details = full
     # Short badge / list text (DB column historically VARCHAR(512)).
     task.message = full if len(full) <= 512 else (full[:509] + '...')
+    append_task_log(task, full)
     if error_code:
         task.error_code = error_code
     if vmid is not None:
@@ -268,6 +275,7 @@ def sysprep_workflow_task(self, task_id, data):
                     from app.domain_preflight import check_domain_join_preflight
                     # Host DC reachability is advisory; in-clone probe is the hard gate.
                     check_domain_join_preflight(data)
+                    record_host_dc_preflight(task_id, data)
                     if _as_bool(data.get('manage_disks')):
                         if not is_windows_server_template(data['template_vmid']):
                             raise ValidationError(
@@ -390,6 +398,22 @@ def sysprep_workflow_task(self, task_id, data):
                         return
                 set_lifecycle_tag(new_vmid, 'lifecycle-customizing')
                 update_task_progress(task_id, 80, "Resolving product key and writing sysprep files...")
+                # Provision the AD computer account now that the clone exists, so
+                # specialize can join offline. Soft-fails to late Add-Computer.
+                if _as_bool(data.get('join_domain'), False):
+                    from app.domain_odj import provision_odj_blob
+                    from app.task_options import options_to_json
+                    odj_blob = provision_odj_blob(data, hostname)
+                    if odj_blob:
+                        data['odj_account_data'] = odj_blob
+                        data['domain_join_method'] = 'odj'
+                    else:
+                        data['domain_join_method'] = 'add-computer'
+                    join_task = Task.query.get(task_id)
+                    if join_task:
+                        join_task.options_json = options_to_json(data)
+                        record_domain_join_method(join_task, data.get('domain_join_method'))
+                        db.session.commit()
                 _ensure_server_product_key(data, new_vmid)
                 # Re-render after MAC attach + optional Server GVLK injection.
                 unattended_xml, setup_ps1, setup_complete = _render_sysprep_files(data)
@@ -511,6 +535,10 @@ def sysprep_verify_task(self, task_id, vmid, data):
                     expected_ipv6=expected_ipv6,
                     on_progress=lambda msg: update_task_progress(task_id, 98, msg),
                     expect_setup_reboot=expect_setup_reboot,
+                    join_meta={
+                        'host_dc_reachable': data.get('host_dc_reachable'),
+                        'domain_join_method': data.get('domain_join_method'),
+                    },
                 )
                 if data.get('manage_disks') and data.get('disk_guest_plan'):
                     disk_summary, disk_ok = _verify_disks(
@@ -535,6 +563,7 @@ def sysprep_verify_task(self, task_id, vmid, data):
                         f"Sysprep workflow for {data['hostname']} completed. "
                         f"Verify: {verify_summary}"
                     )
+                    append_task_log(task, task.message)
                     batch_id = task.batch_id
                     db.session.commit()
                     _finalize_batch_if_done(batch_id)
@@ -585,6 +614,7 @@ def sysprep_existing_vm_task(self, task_id, data):
                 'Clone from a Windows template instead.'
             )
             task.error_code = 'inplace_disabled'
+            append_task_log(task, task.message)
             db.session.commit()
 
 
@@ -793,6 +823,7 @@ def linux_verify_task(self, task_id, vmid, data):
                         f"Linux cloud-init workflow for {data.get('hostname')} completed. "
                         f"Verify: {verify_summary}{extra}"
                     )
+                    append_task_log(task, task.message)
                     batch_id = task.batch_id
                     db.session.commit()
                     _finalize_batch_if_done(batch_id)

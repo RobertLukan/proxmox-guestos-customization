@@ -145,6 +145,17 @@ try:
 except ValueError:
     DOMAIN_JOIN_CRED_PROBE_WAIT_SECONDS = 90
 
+# Offline Domain Join: provision the computer account from the GuestOS host and
+# ship an AccountData blob in the answer file so specialize joins without
+# credentials. Falls back to late Add-Computer when provisioning is not possible.
+DOMAIN_JOIN_ODJ = _env_bool('DOMAIN_JOIN_ODJ', False)
+try:
+    DOMAIN_JOIN_ODJ_TIMEOUT_SECONDS = max(
+        10, int(os.environ.get('DOMAIN_JOIN_ODJ_TIMEOUT_SECONDS') or '60')
+    )
+except ValueError:
+    DOMAIN_JOIN_ODJ_TIMEOUT_SECONDS = 60
+
 # Bulk / provisioning safeguards (no superadmin bypass — use PVE for exceptions).
 try:
     BULK_MAX_ITEMS = max(1, int(os.environ.get('BULK_MAX_ITEMS') or '10'))

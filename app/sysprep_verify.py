@@ -104,6 +104,33 @@ def _read_domain_membership(vmid):
         return None, None
 
 
+def _guestos_reg_value(vmid, name):
+    """Read HKLM\\SOFTWARE\\GuestOS\\<name> via QGA. Returns None if missing."""
+    try:
+        out = run_command_in_guest(
+            vmid,
+            f'cmd.exe /c reg query "HKLM\\SOFTWARE\\GuestOS" /v {name}',
+        ) or ''
+    except Exception as e:  # noqa: BLE001
+        app.logger.info(f"VM {vmid} setup registry {name} read failed: {e}")
+        return None
+    for line in out.splitlines():
+        if name in line and 'REG_' in line:
+            if 'REG_SZ' in line:
+                return line.split('REG_SZ', 1)[-1].strip()
+            parts = line.split()
+            return parts[-1].strip() if parts else None
+    return None
+
+
+def _read_setup_join_method(vmid):
+    """Return 'odj' | 'add-computer' | None from the guest SetupJoinMethod key."""
+    raw = (_guestos_reg_value(vmid, 'SetupJoinMethod') or '').strip().lower()
+    if raw in ('odj', 'add-computer'):
+        return raw
+    return None
+
+
 def _guest_setup_marker(vmid):
     """Return ('done'|'failed'|None, detail) from GuestOS markers.
 
@@ -112,22 +139,7 @@ def _guest_setup_marker(vmid):
     ProgramData and ``C:\\Windows\\GuestOS``.
     """
     def _reg_value(name):
-        try:
-            out = run_command_in_guest(
-                vmid,
-                f'cmd.exe /c reg query "HKLM\\SOFTWARE\\GuestOS" /v {name}',
-            ) or ''
-        except Exception as e:  # noqa: BLE001
-            app.logger.info(f"VM {vmid} setup registry {name} read failed: {e}")
-            return None
-        for line in out.splitlines():
-            if name in line and 'REG_' in line:
-                # REG_SZ value is the last token (detail may contain spaces — take after REG_SZ).
-                if 'REG_SZ' in line:
-                    return line.split('REG_SZ', 1)[-1].strip()
-                parts = line.split()
-                return parts[-1].strip() if parts else None
-        return None
+        return _guestos_reg_value(vmid, name)
 
     status = (_reg_value('SetupStatus') or '').lower()
     if status == 'failed':
@@ -182,7 +194,7 @@ def _is_domain_join_failed_marker(setup_detail):
 def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
                            expected_domain=None, expected_ipv6=None,
                            timeout=None, on_progress=None,
-                           expect_setup_reboot=False):
+                           expect_setup_reboot=False, join_meta=None):
     """Best-effort post-sysprep verification via the QEMU guest agent.
 
     Returns ``(summary, ok)``. ``ok`` is False when setup.ps1 never completed
@@ -192,6 +204,10 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
 
     ``expect_setup_reboot`` extends the wait when setup.ps1 will reboot for
     pagefile and/or domain join (``pending_reboot`` → ``done``).
+
+    ``join_meta`` may include ``host_dc_reachable`` (bool) and planned
+    ``domain_join_method`` (``odj`` / ``add-computer``) from the clone worker.
+    Guest ``SetupJoinMethod`` wins when present.
 
     When setup marks ``domain-join-failed``, domain polling is shortened and the
     summary includes an explicit WARNING so operators see join failure quickly.
@@ -385,31 +401,53 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
             ipv6_ok = False
 
     domain_ok = True
+    join_meta = join_meta or {}
+    guest_method = None
     if expected_domain:
+        guest_method = _read_setup_join_method(vmid)
+        planned = join_meta.get('domain_join_method')
+        method = guest_method or (
+            planned if planned in ('odj', 'add-computer') else None
+        )
+        host_dc = join_meta.get('host_dc_reachable')
+        extras = []
+        if method:
+            extras.append(method)
+        if host_dc is True:
+            extras.append('host DC reachable')
+        elif host_dc is False:
+            extras.append('host DC unreachable')
+        suffix = (', ' + ', '.join(extras)) if extras else ''
+        app.logger.info(
+            'join-path: guest method=%s planned=%s host_dc=%s',
+            guest_method or '(unread)',
+            planned or '(none)',
+            host_dc if host_dc is not None else '(unset)',
+        )
         if join_failed_soft:
             parts.append(
                 f"WARNING: domain join failed (guest setup marked domain-join-failed); "
                 f"domain[{expected_domain}]: not joined "
-                f"(workgroup/domain={domain_name or 'WORKGROUP'})"
+                f"(workgroup/domain={domain_name or 'WORKGROUP'}{suffix})"
             )
             domain_ok = False
         elif part_of_domain and _domains_match(domain_name, expected_domain):
-            parts.append(f"domain[{expected_domain}]: joined ({domain_name})")
+            parts.append(f"domain[{expected_domain}]: joined ({domain_name}{suffix})")
             domain_ok = True
         elif part_of_domain is False:
             parts.append(
                 f"WARNING: domain join failed; domain[{expected_domain}]: not joined "
-                f"(workgroup/domain={domain_name or '?'})"
+                f"(workgroup/domain={domain_name or '?'}{suffix})"
             )
             domain_ok = False
         elif domain_name and _domains_match(domain_name, expected_domain):
             # Domain string matches but PartOfDomain missing/odd — treat as ok.
-            parts.append(f"domain[{expected_domain}]: joined ({domain_name})")
+            parts.append(f"domain[{expected_domain}]: joined ({domain_name}{suffix})")
             domain_ok = True
         else:
             parts.append(
                 f"WARNING: domain join failed; domain[{expected_domain}]: unknown "
-                f"(read Domain={domain_name or '?'}, PartOfDomain={part_of_domain})"
+                f"(read Domain={domain_name or '?'}, PartOfDomain={part_of_domain}{suffix})"
             )
             domain_ok = False
 

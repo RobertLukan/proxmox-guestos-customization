@@ -1569,7 +1569,42 @@ def _agent_file_write(vmid, raw, file_path, retries=8, retry_delay=15):
     raise last_err
 
 
-def _write_file_to_guest_via_exec(vmid, raw, file_path):
+def _is_share_violation(exc):
+    """True when the guest cannot overwrite a file because another process holds it."""
+    msg = str(exc).lower()
+    return (
+        'being used by another process' in msg
+        or 'cannot access the file' in msg
+        or 'sharing violation' in msg
+    )
+
+
+def _unlock_guest_path(vmid, file_path):
+    """Drop leftover GuestOS-Setup / PowerShell that may be locking ``file_path``.
+
+    Win11 templates that were themselves customized keep GuestOS-Setup and
+    ``GuestOS-RegisterSetup.ps1``. After clone boot the leftover task can still
+    be running ``-File`` on that script when we try to overwrite it.
+    """
+    leaf = file_path.replace('/', '\\').rsplit('\\', 1)[-1]
+    run_command_in_guest(
+        vmid,
+        "powershell -NoProfile -Command \""
+        "$ErrorActionPreference='SilentlyContinue'; "
+        "Unregister-ScheduledTask -TaskName 'GuestOS-Setup' -Confirm:$false; "
+        f"$leaf='{leaf}'; "
+        "Get-CimInstance Win32_Process | Where-Object { "
+        "  $_.Name -match 'powershell|pwsh' -and $_.CommandLine "
+        "  -and $_.CommandLine -like ('*'+$leaf+'*') "
+        "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
+        "Start-Sleep -Seconds 1; "
+        "exit 0\"",
+        retries=2,
+        retry_delay=3,
+    )
+
+
+def _write_file_to_guest_via_exec_once(vmid, raw, file_path):
     """Fallback: write via PowerShell guest-exec (inline or chunked base64)."""
     content_b64 = base64.b64encode(raw).decode('ascii')
     max_inline_b64 = 8000
@@ -1608,6 +1643,31 @@ def _write_file_to_guest_via_exec(vmid, raw, file_path):
         f"[System.Convert]::FromBase64String($b)); "
         f"Remove-Item -LiteralPath '{b64_path}' -Force -ErrorAction SilentlyContinue\"",
     )
+
+
+def _write_file_to_guest_via_exec(vmid, raw, file_path):
+    """Fallback write with retries when the destination is locked."""
+    last_err = None
+    for attempt in range(1, 6):
+        try:
+            _write_file_to_guest_via_exec_once(vmid, raw, file_path)
+            return
+        except Exception as e:
+            last_err = e
+            if not _is_share_violation(e) or attempt == 5:
+                raise
+            logging.warning(
+                'VM %s: guest file %s locked (attempt %s/5): %s',
+                vmid, file_path, attempt, e,
+            )
+            try:
+                _unlock_guest_path(vmid, file_path)
+            except Exception as unlock_err:
+                logging.warning(
+                    'VM %s: unlock %s failed: %s', vmid, file_path, unlock_err,
+                )
+            time.sleep(2 * attempt)
+    raise last_err
 
 
 def write_file_to_guest(vmid, content, file_path):

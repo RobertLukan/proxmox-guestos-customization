@@ -7,7 +7,7 @@ import logging
 
 from flask import render_template
 
-from app.proxmox import run_command_in_guest, write_file_to_guest
+from app.proxmox import _unlock_guest_path, run_command_in_guest, write_file_to_guest
 from app.util import as_bool as _as_bool
 from app.validators import (
     ValidationError,
@@ -181,28 +181,6 @@ def _prepare_domain_join(data):
     ).decode('ascii')
     # Do not keep the raw secret around once it is packed into the blob.
     data.pop('domain_password', None)
-    # DHCP-only experiment: UnattendedJoin during specialize can find a DC if
-    # the NIC already has DHCP/DNS. Static IP is applied later in setup.ps1.
-    dhcp = _as_bool(data.get('use_dhcp'), False) or (
-        str(data.get('network_mode') or '').lower() == 'dhcp'
-    )
-    if dhcp:
-        user = blob['username']
-        cred_domain = blob['domain']
-        cred_user = user
-        if '@' in user:
-            cred_user, cred_domain = user.rsplit('@', 1)
-        elif '\\' in user:
-            cred_domain, cred_user = user.split('\\', 1)
-        data['unattend_join'] = True
-        data['unattend_join_domain'] = blob['domain']
-        data['unattend_join_cred_domain'] = cred_domain
-        data['unattend_join_username'] = cred_user
-        data['unattend_join_password'] = blob['password']
-        data['unattend_join_ou'] = blob.get('ou') or ''
-    else:
-        data['unattend_join'] = False
-        data.pop('unattend_join_password', None)
 
 
 def _guess_server_year_from_template(vmid):
@@ -340,8 +318,9 @@ def _render_sysprep_files(data):
     # Template defaults — ``_ensure_server_product_key`` sets this for live jobs.
     data.setdefault('windows_evaluation', False)
     unattended_xml = render_template('sysprep/unattended.xml', **data).encode('utf-8')
-    # Drop after unattend render so Celery/task payloads do not keep a second copy.
-    data.pop('unattend_join_password', None)
+    # The ODJ blob carries the machine account password; drop it after the
+    # unattend render so Celery/task payloads do not keep a second copy.
+    data.pop('odj_account_data', None)
     # UTF-8 BOM so Windows PowerShell 5.1 (-File) does not misread the script as
     # the system ANSI code page (which corrupts non-ASCII and breaks parsing).
     setup_ps1 = render_template('sysprep/setup.ps1', **data).encode('utf-8-sig')
@@ -379,6 +358,10 @@ def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
     lab, so the durable copy is stored in ``HKLM\\SOFTWARE\\GuestOS\\SetupPs1B64``
     (written in-guest from a staged file to avoid guest-agent cmdline limits).
     """
+    try:
+        _unlock_guest_path(vmid, r'C:\Windows\System32\GuestOS-RegisterSetup.ps1')
+    except Exception as e:
+        logging.warning('VM %s: pre-write unlock of GuestOS launchers failed: %s', vmid, e)
     write_file_to_guest(vmid, unattended_xml, r'C:\Windows\System32\Sysprep\unattended.xml')
     # Launcher + task registration (specialize RunSynchronous calls RegisterSetup).
     write_file_to_guest(
@@ -407,8 +390,11 @@ def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
                 "powershell -NoProfile -Command \""
                 "$ErrorActionPreference='Stop'; "
                 f"$staged='{staged}'; "
+                # Single quotes only: nested double quotes do not survive the
+                # guest-agent command line, so the throw text came back mangled
+                # and the retry below could not match on it.
                 "if (-not (Test-Path -LiteralPath $staged)) { "
-                "throw \"GuestOS staged setup.ps1 missing: $staged\" }; "
+                "throw ('GuestOS staged setup.ps1 missing: ' + $staged) }; "
                 "$bytes=[IO.File]::ReadAllBytes($staged); "
                 "$b64=[Convert]::ToBase64String($bytes); "
                 "New-Item -Path 'HKLM:\\SOFTWARE\\GuestOS' -Force | Out-Null; "

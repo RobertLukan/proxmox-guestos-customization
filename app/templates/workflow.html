@@ -25,6 +25,22 @@
           </details>
         {% endif %}
       </dd>
+      {% set opts = task.options() %}
+      {% if opts.join_domain %}
+      <dt class="col-sm-3">AD join</dt>
+      <dd class="col-sm-9" id="join-summary">
+        {% set join_lines = task.join_summary_lines() %}
+        {% if join_lines %}
+          {% for line in join_lines %}{{ line }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+        {% else %}
+          <span class="text-muted">requested</span>
+        {% endif %}
+      </dd>
+      {% endif %}
+      <dt class="col-sm-3">Job log</dt>
+      <dd class="col-sm-9">
+        <pre id="job-event-log" class="small mb-0 p-2 bg-light border rounded" style="max-height: 24rem; overflow: auto; white-space: pre-wrap;">{% if task.event_log %}{{ task.event_log }}{% elif task.status in ['SUCCESS', 'FAILURE', 'CANCELLED'] %}No event log for this job (recorded from this GuestOS version onward).{% else %}No events recorded yet.{% endif %}</pre>
+      </dd>
       {% if task.error_code or task.error_details %}
       <dt class="col-sm-3">Error</dt>
       <dd class="col-sm-9">
@@ -63,6 +79,8 @@
     const resultAlert = document.getElementById('result-alert');
     const resultErrorDetails = document.getElementById('result-error-details');
     const statusContainer = document.getElementById('status-container');
+    const eventLog = document.getElementById('job-event-log');
+    const joinSummary = document.getElementById('join-summary');
 
     const urlParts = window.location.pathname.split('/');
     const taskId = urlParts[urlParts.length - 1];
@@ -79,6 +97,16 @@
             progressBar.style.width = data.progress + '%';
             progressBar.setAttribute('aria-valuenow', data.progress);
             statusMessage.innerText = data.message || '';
+            if (eventLog && data.event_log) {
+                eventLog.textContent = data.event_log;
+            }
+            if (joinSummary && Array.isArray(data.join_summary) && data.join_summary.length) {
+                joinSummary.replaceChildren();
+                data.join_summary.forEach(function (line, i) {
+                    if (i) joinSummary.appendChild(document.createElement('br'));
+                    joinSummary.appendChild(document.createTextNode(line));
+                });
+            }
 
             if (data.status === 'SUCCESS' || data.status === 'FAILURE' || data.status === 'CANCELLED') {
                 clearInterval(pollInterval);
