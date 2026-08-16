@@ -101,26 +101,34 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Flatten image for Trivy
+      - name: Export rootfs for Trivy
         run: |
-          # Overlay whiteouts do not hide deleted wheels from Trivy's
-          # per-layer Python scanner. Re-import as a single layer.
+          # trivy image still consumes Buildx/Docker Hub CycloneDX SBOMs that
+          # list python:3.12-slim's old setuptools 70.3 / msgpack 1.1 even after
+          # we replace those packages. Scan the exported filesystem instead.
+          rootfs="${{ github.workspace }}/image-rootfs"
+          mkdir -p "$rootfs"
           cid=$(docker create guestos-security:ci)
-          docker export "$cid" | docker import \
-            --change 'ENV PYTHONUNBUFFERED=1' \
-            --change 'ENV PYTHONDONTWRITEBYTECODE=1' \
-            --change 'WORKDIR /app' \
-            --change 'EXPOSE 5001' \
-            --change 'CMD ["gunicorn","--bind","0.0.0.0:5001","wsgi:app"]' \
-            - guestos-security:ci
+          docker export "$cid" | tar -x -C "$rootfs"
           docker rm "$cid"
+          docker rmi guestos-security:ci
+          find "$rootfs" \( \
+            -name '*.cdx' -o -name '*.cdx.json' \
+            -o -name '*.spdx' -o -name '*.spdx.json' \
+            -o -name 'bom.json' -o -name 'sbom.json' \
+          \) -delete 2>/dev/null || true
 
       - name: Run Trivy (image)
         uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          # Skip in-tree SBOM files; scan installed OS/Python packages only.
+          TRIVY_DISABLED_ANALYZERS: sbom
         with:
-          scan-type: image
-          image-ref: guestos-security:ci
+          scan-type: rootfs
+          scan-ref: ${{ github.workspace }}/image-rootfs
+          scanners: vuln
           severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
           ignore-unfixed: true
           # Image base OS CVEs change often; publish SARIF, don't hard-fail CI.
           exit-code: '0'

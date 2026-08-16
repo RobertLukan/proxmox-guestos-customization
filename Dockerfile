@@ -17,16 +17,21 @@ RUN apt-get update \
 
 # Install Python dependencies first for better layer caching.
 COPY requirements.txt .
-# Drop CPython ensurepip copies (setuptools 70.3.x / older msgpack) so Trivy
-# does not keep reporting CVEs against wheels that are not what we run.
-RUN rm -rf /usr/local/lib/python*/ensurepip \
-    && pip install --no-cache-dir --upgrade 'pip>=26.1.2' \
+# python:3.12-slim and `pip install --upgrade pip` leave ensurepip wheels and
+# sometimes a CycloneDX/SPDX file that Trivy prefers over the runtime pins.
+# Purge those copies after the final install, not before (pip restores them).
+RUN pip install --no-cache-dir --upgrade 'pip>=26.1.2' \
     && pip uninstall -y setuptools pkg_resources msgpack 2>/dev/null || true \
     && pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir --force-reinstall \
          'setuptools==83.0.0' 'msgpack==1.2.1' \
-    && find /usr/local -type d \( -name 'setuptools-7*' -o -name 'msgpack-1.1*' \) \
-         -prune -exec rm -rf {} + 2>/dev/null || true \
+    && rm -rf /usr/local/lib/python*/ensurepip \
+    && find /usr /root /tmp -xdev \( \
+         -name 'setuptools-70*' -o -name 'msgpack-1.1*' \
+         -o -name '*.cdx' -o -name '*.cdx.json' \
+         -o -name '*.spdx' -o -name '*.spdx.json' \
+         -o -name 'bom.json' -o -name 'sbom.json' \
+       \) -exec rm -rf {} + 2>/dev/null || true \
     && python -c "import setuptools, msgpack, importlib.metadata as m; \
 assert m.version('setuptools') >= '83.0.0', m.version('setuptools'); \
 assert m.version('msgpack') >= '1.2.1', m.version('msgpack'); \
