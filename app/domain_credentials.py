@@ -345,6 +345,7 @@ def host_ldap_check_computer_exists(data: dict, hostname: str, *, timeout: float
     """Raise ValidationError if a computer account for ``hostname`` already exists."""
     from ldap3 import Connection, Server, ALL, SUBTREE
     from ldap3.core.exceptions import LDAPException
+    from ldap3.utils.conv import escape_filter_chars
 
     host = (hostname or '').strip().split('.')[0]
     if not host:
@@ -353,10 +354,10 @@ def host_ldap_check_computer_exists(data: dict, hostname: str, *, timeout: float
     username = normalize_domain_username(data.get('domain_username'))
     password, _ = normalize_domain_password(data.get('domain_password'))
     targets = _ldap_server_candidates(data)
-    sam = f'{host}$'
-    # Build base DN from domain DNS name
-    base = ','.join(f'DC={p}' for p in domain.split('.'))
-    filt = f'(&(objectClass=computer)(|(sAMAccountName={sam})(cn={host})))'
+    safe_host = escape_filter_chars(host)
+    sam = f'{safe_host}$'
+    base = ','.join(f'DC={escape_filter_chars(p)}' for p in domain.split('.') if p)
+    filt = f'(&(objectClass=computer)(|(sAMAccountName={sam})(cn={safe_host})))'
     tmo = _ldap_timeout_seconds(timeout)
     last_err = None
     for ldap_host in targets:
@@ -400,10 +401,15 @@ def host_ldap_validate_ou(data: dict, *, timeout: float = 5.0) -> None:
     """Raise ValidationError if domain_ou is set but not readable via LDAP."""
     from ldap3 import Connection, Server, ALL, BASE
     from ldap3.core.exceptions import LDAPException
+    from ldap3.utils.dn import safe_dn
 
     ou = (data.get('domain_ou') or '').strip()
     if not ou:
         return
+    try:
+        ou = safe_dn(ou)
+    except Exception as e:  # noqa: BLE001
+        raise ValidationError(f'domain_ou is not a valid DN: {ou!r}') from e
     username = normalize_domain_username(data.get('domain_username'))
     password, _ = normalize_domain_password(data.get('domain_password'))
     targets = _ldap_server_candidates(data)

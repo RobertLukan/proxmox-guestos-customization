@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from app.linux_cloudinit import prepare_linux_payload, render_linux_vendor_data
+from app.linux_disks import _mountpoint
 from app.validators import ValidationError, validate_linux_hostname
 
 
@@ -222,6 +223,16 @@ def test_prepare_linux_ipv6_dhcp_mode():
     nic = data['nics'][0]
     assert nic['ipv6_mode'] == 'dhcp'
     assert nic['ipv6_address'] == ''
+
+
+def test_linux_mountpoint_accepts_absolute_paths():
+    assert _mountpoint('/') == '/'
+    assert _mountpoint('/data') == '/data'
+    assert _mountpoint('/var/lib/app/') == '/var/lib/app'
+    with pytest.raises(ValidationError):
+        _mountpoint('relative')
+    with pytest.raises(ValidationError):
+        _mountpoint('/foo bar')
 
 
 def test_render_vendor_data_with_data_disk():

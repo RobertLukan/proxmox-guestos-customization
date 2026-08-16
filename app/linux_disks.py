@@ -8,7 +8,7 @@ from app.validators import ValidationError
 
 DISK_ROLES = frozenset({'os', 'data', 'swap'})
 SOURCE_KEY_RE = re.compile(r'^(scsi|virtio|sata|ide)\d+$')
-MOUNT_RE = re.compile(r'^/(?:[A-Za-z0-9._-]+/?)*$')
+_MOUNT_SEGMENT = re.compile(r'^[A-Za-z0-9._-]+$')
 FSTYPES = frozenset({'ext4', 'xfs', 'swap'})
 
 COPYABLE_DISK_OPTS = frozenset({
@@ -35,14 +35,24 @@ def _int_gb(value, field):
     return n
 
 
+def _valid_linux_mount(path: str) -> bool:
+    """Absolute mount path with safe segments (no nested-quantifier regex)."""
+    if path == '/':
+        return True
+    if not path.startswith('/') or '//' in path:
+        return False
+    parts = [p for p in path.split('/') if p]
+    return bool(parts) and all(_MOUNT_SEGMENT.fullmatch(p) for p in parts)
+
+
 def _mountpoint(value, field='mountpoint'):
     if value in (None, ''):
         return None
     v = str(value).strip()
-    if v != '/' and not MOUNT_RE.match(v.rstrip('/') or '/'):
-        raise ValidationError(f'{field} must be an absolute path: {value!r}')
     if v != '/':
         v = v.rstrip('/') or '/'
+    if not _valid_linux_mount(v):
+        raise ValidationError(f'{field} must be an absolute path: {value!r}')
     return v
 
 

@@ -232,32 +232,27 @@ def provision_odj_blob(data: dict, hostname: str) -> str | None:
         if proc.returncode == 0:
             blob = _extract_blob(proc.stdout)
             if blob:
-                logging.info(
-                    'ODJ: provisioned %s in %s (dc=%s, ou=%s)',
-                    machine, domain, dc_name or '(auto)', ou or '(default)',
-                )
-                logging.info(
-                    'join-path: provision=odj hostname=%s domain=%s dc=%s',
-                    machine, domain, dc_name or '(auto)',
-                )
+                # Log only the hostname argument — not domain/OU from the
+                # credential tuple (CodeQL py/clear-text-logging).
+                logging.info('ODJ: provisioned hostname=%s', machine)
+                logging.info('join-path: provision=odj hostname=%s', machine)
                 return blob
             last_error = 'no blob in output'
             logging.warning('ODJ: provisioning returned 0 but no blob was printed')
             continue
 
-        # stderr can echo the machine/domain but never the password (PASSWD env).
-        last_error = (proc.stderr or proc.stdout or '').strip().replace('\n', ' ')[:240]
+        last_error = f'rc={proc.returncode}'
         logging.warning(
-            'ODJ: provisioning failed via dc=%s (rc=%s): %s',
-            dc_name or '(auto)', proc.returncode, last_error,
+            'ODJ: provisioning failed hostname=%s %s',
+            machine, last_error,
         )
 
     logging.warning(
-        'ODJ: could not provision %s in %s (%s); falling back to Add-Computer',
-        machine, domain, last_error or 'no DC targets',
+        'ODJ: could not provision hostname=%s; falling back to Add-Computer',
+        machine,
     )
     logging.info(
         'join-path: provision=add-computer hostname=%s reason=%s',
-        machine, last_error or 'no DC targets',
+        machine, last_error or 'no-targets',
     )
     return None

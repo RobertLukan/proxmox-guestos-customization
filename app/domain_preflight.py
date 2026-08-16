@@ -42,7 +42,12 @@ def _collect_join_targets(data) -> list[str]:
                 if addr and addr not in targets:
                     targets.append(addr)
         except OSError as e:
-            logging.info('domain preflight: could not resolve %s: %s', domain, e)
+            safe_domain = str(domain).replace('\r', '').replace('\n', '')[:253]
+            logging.info(
+                'domain preflight: could not resolve %s (%s)',
+                safe_domain,
+                type(e).__name__,
+            )
     return targets
 
 

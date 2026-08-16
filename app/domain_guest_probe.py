@@ -228,10 +228,8 @@ def probe_domain_credentials_in_guest(vmid, data, *, on_progress=None) -> dict:
     parsed = _parse_probe_line(line)
     if parsed['ok']:
         logging.info(
-            'VM %s domain cred probe OK domain=%s user=%s bind=%s guest_ip=%s',
-            vmid,
-            blob['domain'],
-            blob['username'],
+            'VM %s domain cred probe OK bind=%s guest_ip=%s',
+            int(vmid),
             parsed.get('bind_target'),
             parsed.get('guest_ip'),
         )
