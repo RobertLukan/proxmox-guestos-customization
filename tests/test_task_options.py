@@ -36,6 +36,31 @@ def test_build_task_options_strips_secrets():
     assert 'svc@lab.test' in raw
 
 
+def test_build_task_options_records_effective_ou():
+    """Job history must show the OU actually used (profile backfill included)."""
+    from app.task_options import join_summary_lines
+
+    opts = build_task_options({
+        'join_domain': True,
+        'domain_name': 'test.test.org',
+        'domain_profile': 'prod',
+        'domain_ou': 'CN=Computers,DC=test,DC=test,DC=org',
+        'domain_join_method': 'add-computer',
+    })
+    assert opts['domain_ou'] == 'CN=Computers,DC=test,DC=test,DC=org'
+    lines = join_summary_lines(opts)
+    assert 'Target OU CN=Computers,DC=test,DC=test,DC=org' in lines
+    assert any('default Computers container' in ln for ln in lines)
+
+    blank = build_task_options({
+        'join_domain': True,
+        'domain_name': 'lab.test',
+        'domain_join_method': 'add-computer',
+    })
+    assert 'domain_ou' not in blank
+    assert 'Target OU (none) — default computer container' in join_summary_lines(blank)
+
+
 def test_build_task_options_join_path_chips():
     opts = build_task_options({
         'network_mode': 'dhcp',

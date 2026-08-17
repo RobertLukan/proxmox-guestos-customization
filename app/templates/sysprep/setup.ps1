@@ -133,6 +133,17 @@ function Clear-GuestOsWinlogonSecrets {
         Remove-ItemProperty -Path $winlogon -Name DefaultPassword -ErrorAction SilentlyContinue
     } catch {}
 }
+function Invoke-GuestOsHidden([string]$CommandLine) {
+    # wscript.exe is a Windows-subsystem host; Run style 0 creates no console.
+    $vbs = 'C:\Windows\System32\GuestOS-RunHidden.vbs'
+    $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    if ((Test-Path -LiteralPath $vbs) -and (Test-Path -LiteralPath $wscript)) {
+        $p = Start-Process -FilePath $wscript -ArgumentList @('//B', '//nologo', $vbs, $CommandLine) -Wait -PassThru -WindowStyle Hidden
+        return $p.ExitCode
+    }
+    cmd.exe /c $CommandLine | Out-Null
+    return $LASTEXITCODE
+}
 function Ensure-GuestOsSetupTask {
     # Leave / re-register GuestOS-Setup so AtStartup re-runs after pending_reboot.
     try {
@@ -140,7 +151,7 @@ function Ensure-GuestOsSetupTask {
         if (-not $existing) {
             $reg = 'C:\Windows\System32\GuestOS-RegisterSetup.cmd'
             if (Test-Path -LiteralPath $reg) {
-                & cmd.exe /c "`"$reg`""
+                Invoke-GuestOsHidden $reg | Out-Null
             }
         } else {
             Enable-ScheduledTask -TaskName 'GuestOS-Setup' -ErrorAction SilentlyContinue | Out-Null
@@ -295,7 +306,7 @@ function Clear-GuestOsDriveLetter([string]$Letter) {
         $_.DriveLetter -and ($_.DriveLetter.ToString().ToUpper() -eq $L)
     } | ForEach-Object {
         Write-Output "setup.ps1: Freeing drive ${L}: ('$($_.FileSystemLabel)' type=$($_.DriveType))."
-        cmd.exe /c "mountvol ${L}: /d" | Out-Null
+        Invoke-GuestOsHidden "cmd.exe /c mountvol ${L}: /d" | Out-Null
     }
 }
 
@@ -517,8 +528,14 @@ function Set-GuestOsNicConfig {
         }
         Write-Output "setup.ps1: Renewing DHCP lease on '$($Adapter.Name)' (60s timeout)."
         $renewLog = 'C:\ProgramData\GuestOS\dhcprenew.txt'
-        $renewArgs = "/c ipconfig /renew `"$($Adapter.Name)`" >`"$renewLog`" 2>&1"
-        $renewProc = Start-Process -FilePath 'cmd.exe' -ArgumentList $renewArgs -PassThru -WindowStyle Hidden
+        $renewCmd = "cmd.exe /c ipconfig /renew `"$($Adapter.Name)`" >`"$renewLog`" 2>&1"
+        $vbs = 'C:\Windows\System32\GuestOS-RunHidden.vbs'
+        $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+        if ((Test-Path -LiteralPath $vbs) -and (Test-Path -LiteralPath $wscript)) {
+            $renewProc = Start-Process -FilePath $wscript -ArgumentList @('//B', '//nologo', $vbs, $renewCmd) -PassThru -WindowStyle Hidden
+        } else {
+            $renewProc = Start-Process -FilePath 'cmd.exe' -ArgumentList "/c ipconfig /renew `"$($Adapter.Name)`" >`"$renewLog`" 2>&1" -PassThru -WindowStyle Hidden
+        }
         if (-not $renewProc.WaitForExit(60000)) {
             Write-Output "setup.ps1: WARNING: ipconfig /renew timed out after 60s; killing."
             try { Stop-Process -Id $renewProc.Id -Force -ErrorAction SilentlyContinue } catch {}
@@ -670,6 +687,10 @@ function Format-DomainJoinError([string]$msg) {
   if ($m -match 'logon failure|username or password is incorrect|0x8007052e|52e') {
     return "invalid_credentials: $msg"
   }
+  # 24H2 NetJoin treats CN=Computers as an OU, then refuses SAMR/downlevel (0x2).
+  if ($m -match 'is not an ou|cannot retry downlevel|netpgetcomputerobjectdn|cannot find the file specified|0x80070002') {
+    return "not_an_ou: $msg"
+  }
   if ($m -match 'already a member|already exists|0x80071392|directory object') {
     return "computer_account: $msg"
   }
@@ -685,7 +706,82 @@ function Format-DomainJoinError([string]$msg) {
   return "other: $msg"
 }
 
-Write-Output "setup.ps1: Domain join starting domain=$($j.domain) username=$($j.username)$(if ($j.ou) { " ou=$($j.ou)" } else { '' })."
+function Write-GuestOsJoinDiag {
+  param([string]$LastErr)
+  $lines = New-Object System.Collections.Generic.List[string]
+  $cv = $null
+  try { $cv = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' } catch {}
+  $caption = '?'
+  try { $caption = [string](Get-CimInstance Win32_OperatingSystem).Caption } catch {}
+  $cs = $null
+  try { $cs = Get-CimInstance Win32_ComputerSystem } catch {}
+  $ouVal = if ($j.ou) { [string]$j.ou } else { '(empty)' }
+  $ouPath = if ($j.ou) { 'yes' } else { 'no' }
+  $runner = if (Test-GuestOsRunningAsSystem) { 'SYSTEM' } else { 'interactive' }
+  $display = if ($cv) { [string]$cv.DisplayVersion } else { '?' }
+  $build = if ($cv) { [string]$cv.CurrentBuild } else { '?' }
+  $ubr = if ($cv -and $null -ne $cv.UBR) { [string]$cv.UBR } else { '?' }
+  $lines.Add("guestos-join-diag utc=$((Get-Date).ToUniversalTime().ToString('o'))")
+  $lines.Add("hostname=$(if ($cs) { $cs.Name } else { '?' })")
+  $lines.Add("runner=$runner")
+  $lines.Add("part_of_domain=$(if ($cs) { [bool]$cs.PartOfDomain } else { '?' })")
+  $lines.Add("workgroup_or_domain=$(if ($cs) { $cs.Domain } else { '?' })")
+  $lines.Add("join_domain=$($j.domain)")
+  $lines.Add("join_username=$($j.username)")
+  $lines.Add("target_ou=$ouVal")
+  $lines.Add("add_computer_oupath=$ouPath")
+  $lines.Add("os_caption=$caption")
+  $lines.Add("os_display=$display build=$build.$ubr")
+  $lines.Add("last_error=$LastErr")
+  $net = 'C:\Windows\Debug\NetSetup.LOG'
+  if (Test-Path -LiteralPath $net) {
+    $pat = 'is not an OU|CN=Computers|NetpGetComputerObjectDn|downlevel|0x2|NetpCreateComputerObject|LDAP creation failed|Account does not exist|Account already exists|NetpJoinDomain|NetpDoDomainJoin'
+    try {
+      $hits = @(Select-String -LiteralPath $net -Pattern $pat | Select-Object -Last 40)
+      if ($hits.Count -eq 0) {
+        $lines.Add('netsetup: (no matching lines; file present)')
+      } else {
+        foreach ($h in $hits) {
+          $lines.Add(('netsetup: ' + ([string]$h.Line).Trim()))
+        }
+      }
+    } catch {
+      $lines.Add("netsetup: (read failed: $($_.Exception.Message))")
+    }
+  } else {
+    $lines.Add('netsetup: (missing C:\Windows\Debug\NetSetup.LOG)')
+  }
+  foreach ($p in @(
+      'C:\ProgramData\GuestOS\join-diag.txt',
+      'C:\Windows\GuestOS\join-diag.txt'
+  )) {
+    try {
+      New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($p)) | Out-Null
+      $lines | Set-Content -LiteralPath $p -Encoding ASCII
+    } catch {}
+  }
+  $errStore = $LastErr
+  if ($errStore.Length -gt 400) { $errStore = $errStore.Substring(0, 400) }
+  try {
+    $reg = 'HKLM:\SOFTWARE\GuestOS'
+    if (-not (Test-Path -LiteralPath $reg)) { New-Item -Path $reg -Force | Out-Null }
+    Set-ItemProperty -Path $reg -Name SetupJoinError -Value $errStore -ErrorAction SilentlyContinue
+  } catch {}
+  foreach ($ln in $lines) { Write-Output "setup.ps1: join-diag $ln" }
+}
+
+$ouVal = if ($j.ou) { [string]$j.ou } else { '(empty)' }
+$ouPath = if ($j.ou) { 'yes' } else { 'no' }
+$runner = if (Test-GuestOsRunningAsSystem) { 'SYSTEM' } else { 'interactive' }
+$cv = $null
+try { $cv = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' } catch {}
+$caption = '?'
+try { $caption = [string](Get-CimInstance Win32_OperatingSystem).Caption } catch {}
+$display = if ($cv) { [string]$cv.DisplayVersion } else { '?' }
+$build = if ($cv) { [string]$cv.CurrentBuild } else { '?' }
+$ubr = if ($cv -and $null -ne $cv.UBR) { [string]$cv.UBR } else { '?' }
+Write-Output "setup.ps1: os caption=$caption display=$display build=$build.$ubr runner=$runner"
+Write-Output "setup.ps1: Domain join starting domain=$($j.domain) username=$($j.username) ou=$ouVal oupath=$ouPath"
 
 # Wait for the network/DNS to be usable, then join with a few retries.
 # UnattendedJoin (DHCP specialize) may already have joined; skip Add-Computer.
@@ -756,7 +852,10 @@ if ($joined) {
     shutdown /r /t 5
 } else {
     Write-Output "setup.ps1: Domain join FAILED after retries domain=$($j.domain) username=$($j.username) last=$lastJoinErr; leaving machine in workgroup."
-    Write-GuestOsSetupMarker -Status done -Detail 'domain-join-failed'
+    Write-GuestOsJoinDiag -LastErr $lastJoinErr
+    $joinClass = 'other'
+    if ($lastJoinErr -match '^([^:]+):') { $joinClass = $Matches[1] }
+    Write-GuestOsSetupMarker -Status done -Detail ("domain-join-failed:" + $joinClass)
     Scrub-GuestOsSetupArtifacts
     Disable-GuestOsSetupTask
     Clear-GuestOsWinlogonSecrets

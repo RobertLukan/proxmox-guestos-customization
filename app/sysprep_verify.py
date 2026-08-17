@@ -191,6 +191,56 @@ def _is_domain_join_failed_marker(setup_detail):
     return detail == 'domain-join-failed' or detail.startswith('domain-join-failed')
 
 
+def _join_fail_class(setup_detail):
+    """Return ``not_an_ou`` / ``invalid_credentials`` / … from the marker, else ''."""
+    detail = str(setup_detail or '').strip()
+    if not _is_domain_join_failed_marker(detail):
+        return ''
+    if ':' not in detail:
+        return ''
+    return detail.split(':', 1)[-1].strip()
+
+
+JOIN_DIAG_MAX_CHARS = 2400
+
+
+def _read_join_diag(vmid):
+    """Return GuestOS join-diag.txt text, or None if missing."""
+    cmd = (
+        'cmd.exe /c '
+        'if exist C:\\ProgramData\\GuestOS\\join-diag.txt '
+        '(type C:\\ProgramData\\GuestOS\\join-diag.txt) '
+        'else if exist C:\\Windows\\GuestOS\\join-diag.txt '
+        '(type C:\\Windows\\GuestOS\\join-diag.txt) '
+        'else (echo MISSING)'
+    )
+    try:
+        out = (run_command_in_guest(vmid, cmd) or '').strip()
+    except Exception as e:  # noqa: BLE001
+        app.logger.info('VM %s join-diag read failed: %s', vmid, e)
+        return None
+    if not out:
+        return None
+    first = out.splitlines()[0].strip().upper()
+    if first == 'MISSING':
+        return None
+    if len(out) > JOIN_DIAG_MAX_CHARS:
+        out = out[:JOIN_DIAG_MAX_CHARS] + '\n… (truncated)'
+    return out
+
+
+def _emit_join_diag(vmid, progress):
+    """Copy join-diag.txt into the job event_log (one line per diag line)."""
+    diag = _read_join_diag(vmid)
+    if not diag:
+        progress('join-diag: (missing on guest)')
+        return
+    for line in diag.splitlines()[:30]:
+        text = line.strip()
+        if text:
+            progress(f'join-diag: {text}')
+
+
 def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
                            expected_domain=None, expected_ipv6=None,
                            timeout=None, on_progress=None,
@@ -211,6 +261,8 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
 
     When setup marks ``domain-join-failed``, domain polling is shortened and the
     summary includes an explicit WARNING so operators see join failure quickly.
+    ``join_meta`` may also include ``domain_ou``. On a soft join failure,
+    ``join-diag.txt`` is pulled into the job event log.
     """
     # Always wait for FirstLogon setup.ps1 — specialize hostname alone is not enough.
     # Domain join / pagefile trigger an extra reboot after setup — allow more time.
@@ -266,6 +318,7 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
         _progress(
             "WARNING: guest marked domain-join-failed — skipping long domain wait."
         )
+        _emit_join_diag(vmid, _progress)
 
     # Hostname is set in the specialize pass; refresh after setup / possible reboot.
     actual_hostname = None
@@ -417,16 +470,24 @@ def _verify_sysprep_result(vmid, expected_hostname, expected_ip=None,
             extras.append('host DC reachable')
         elif host_dc is False:
             extras.append('host DC unreachable')
+        ou = (join_meta.get('domain_ou') or '').strip()
+        extras.append('ou=' + (ou[:80] if ou else '(empty)'))
+        fail_class = _join_fail_class(setup_detail)
+        if fail_class:
+            extras.append(f'class={fail_class}')
         suffix = (', ' + ', '.join(extras)) if extras else ''
         app.logger.info(
-            'join-path: guest method=%s planned=%s host_dc=%s',
+            'join-path: guest method=%s planned=%s host_dc=%s ou=%s class=%s',
             guest_method or '(unread)',
             planned or '(none)',
             host_dc if host_dc is not None else '(unset)',
+            ou or '(empty)',
+            fail_class or '(none)',
         )
         if join_failed_soft:
+            marked = setup_detail or 'domain-join-failed'
             parts.append(
-                f"WARNING: domain join failed (guest setup marked domain-join-failed); "
+                f"WARNING: domain join failed (guest setup marked {marked}); "
                 f"domain[{expected_domain}]: not joined "
                 f"(workgroup/domain={domain_name or 'WORKGROUP'}{suffix})"
             )

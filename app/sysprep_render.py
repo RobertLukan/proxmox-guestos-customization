@@ -332,7 +332,7 @@ def _render_sysprep_files(data):
 _FIRSTLOGON_CMD = (
     '@echo off\r\n'
     'rem GuestOS: extract setup.ps1 from HKLM and run it (SYSTEM scheduled task).\r\n'
-    'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+    'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command '
     "\"$ErrorActionPreference='Stop'; "
     "$b=(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\GuestOS' -Name SetupPs1B64 -ErrorAction Stop).SetupPs1B64; "
     "$out=$env:TEMP+'\\GuestOS-setup.ps1'; "
@@ -343,10 +343,32 @@ _FIRSTLOGON_CMD = (
 _REGISTER_SETUP_CMD = (
     '@echo off\r\n'
     'REM Register GuestOS-Setup: SYSTEM AtStartup task that runs GuestOS-FirstLogon.cmd.\r\n'
-    'powershell.exe -NoProfile -ExecutionPolicy Bypass -File '
+    'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File '
     '"%SystemRoot%\\System32\\GuestOS-RegisterSetup.ps1"\r\n'
     'exit /b %ERRORLEVEL%\r\n'
 )
+
+# wscript.exe is a Windows-subsystem host (no console). Run style 0 hides cmd.
+_RUN_HIDDEN_VBS = '\r\n'.join([
+    "' GuestOS: run a command with no visible window and wait.",
+    "' Usage: wscript.exe //B //nologo GuestOS-RunHidden.vbs <command> [args...]",
+    'Option Explicit',
+    'Dim sh, cmd, i, a0, low',
+    'If WScript.Arguments.Count < 1 Then WScript.Quit 1',
+    'a0 = WScript.Arguments(0)',
+    'low = LCase(a0)',
+    'If WScript.Arguments.Count = 1 And (Right(low, 4) = ".cmd" Or Right(low, 4) = ".bat") Then',
+    '  cmd = "cmd.exe /c """ & a0 & """"',
+    'Else',
+    '  cmd = a0',
+    '  For i = 1 To WScript.Arguments.Count - 1',
+    '    cmd = cmd & " " & WScript.Arguments(i)',
+    '  Next',
+    'End If',
+    'Set sh = CreateObject("WScript.Shell")',
+    'WScript.Quit sh.Run(cmd, 0, True)',
+    '',
+])
 
 
 def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
@@ -373,6 +395,11 @@ def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
         vmid,
         _REGISTER_SETUP_CMD.encode('ascii'),
         r'C:\Windows\System32\GuestOS-RegisterSetup.cmd',
+    )
+    write_file_to_guest(
+        vmid,
+        _RUN_HIDDEN_VBS.encode('ascii'),
+        r'C:\Windows\System32\GuestOS-RunHidden.vbs',
     )
     register_ps1 = render_template('sysprep/GuestOS-RegisterSetup.ps1').encode('utf-8-sig')
     write_file_to_guest(

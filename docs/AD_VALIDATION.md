@@ -91,7 +91,11 @@ At probe time the Proxmox NIC (bridge/VLAN) is already configured; the guest IP 
 usually still template/DHCP, not the final unattend static address.
 
 Jobs history stores `domain_username` (and profile/domain) but never
-`domain_password` / `domain_join_b64`.
+`domain_password` / `domain_join_b64`. A failed live join writes
+`C:\ProgramData\GuestOS\join-diag.txt` (OS build, Target OU, error class,
+`NetSetup.LOG` hits — no password) and copies those lines into the job event
+log so operators can diagnose without using the join account. See
+[FAILURE_RUNBOOK.md](FAILURE_RUNBOOK.md).
 
 Joining during **specialize** uses **Offline Domain Join** (`DOMAIN_JOIN_ODJ`,
 default off): the GuestOS host provisions the computer account with Samba's

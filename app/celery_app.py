@@ -538,6 +538,7 @@ def sysprep_verify_task(self, task_id, vmid, data):
                     join_meta={
                         'host_dc_reachable': data.get('host_dc_reachable'),
                         'domain_join_method': data.get('domain_join_method'),
+                        'domain_ou': data.get('domain_ou'),
                     },
                 )
                 if data.get('manage_disks') and data.get('disk_guest_plan'):

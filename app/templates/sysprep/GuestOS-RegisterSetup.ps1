@@ -14,7 +14,9 @@ if (-not (Test-Path -LiteralPath $launcher)) {
     Write-Output "GuestOS-RegisterSetup: missing $launcher (will still register task)."
 }
 
-$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/c "' + $launcher + '"')
+$action = New-ScheduledTaskAction `
+    -Execute 'wscript.exe' `
+    -Argument ('//B //nologo C:\Windows\System32\GuestOS-RunHidden.vbs "' + $launcher + '"')
 
 $startup = New-ScheduledTaskTrigger -AtStartup
 # Delay so OOBE/network stack can settle before setup.ps1 runs.

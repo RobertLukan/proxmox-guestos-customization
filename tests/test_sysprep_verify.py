@@ -43,6 +43,7 @@ def _patch_verify_deps(monkeypatch, interfaces, cmd_fn=None, marker=('done', Non
     monkeypatch.setattr(sv.time, 'sleep', lambda _s: None)
     monkeypatch.setattr(sv, '_guest_setup_marker', lambda _vmid: marker)
     monkeypatch.setattr(sv, '_read_setup_join_method', lambda _vmid: None)
+    monkeypatch.setattr(sv, '_read_join_diag', lambda _vmid: None)
     if cmd_fn is not None:
         monkeypatch.setattr(sv, 'run_command_in_guest', cmd_fn)
     else:
@@ -223,7 +224,7 @@ def test_verify_domain_summary_includes_join_path(monkeypatch):
         join_meta={'host_dc_reachable': True, 'domain_join_method': 'odj'},
     )
     assert ok is True
-    assert 'domain[lab.test]: joined (lab.test, odj, host DC reachable)' in summary
+    assert 'domain[lab.test]: joined (lab.test, odj, host DC reachable, ou=(empty))' in summary
 
 
 def test_verify_domain_unknown_fails_when_expected(monkeypatch):
@@ -284,13 +285,76 @@ def test_verify_domain_join_failed_marker_short_wait_and_warning(monkeypatch):
     assert 'WARNING: domain join failed (guest setup marked domain-join-failed)' in summary
     assert 'domain[lab.test]: not joined' in summary
     assert any('skipping long domain wait' in m for m in progress)
+    assert any('join-diag: (missing on guest)' in m for m in progress)
     net_checks = [m for m in progress if m.startswith('Checking guest network')]
     assert len(net_checks) <= 3
     assert not any('Checking domain membership' in m for m in progress)
 
 
+def test_verify_domain_join_failed_includes_diag_and_class(monkeypatch):
+    interfaces = {
+        'result': [{
+            'ip-addresses': [
+                {'ip-address-type': 'ipv4', 'ip-address': '192.168.123.50'},
+            ],
+        }],
+    }
+    progress = []
+
+    def _cmd(_vmid, command, **_kw):
+        if 'hostname' in command:
+            return 'WINJOINFAIL\n'
+        if 'ConvertTo-Json' in command or 'Win32_ComputerSystem' in command:
+            return '{"Domain":"WORKGROUP","PartOfDomain":false}\n'
+        raise AssertionError(command)
+
+    _patch_verify_deps(
+        monkeypatch, interfaces, cmd_fn=_cmd,
+        marker=('done', 'domain-join-failed:not_an_ou'),
+    )
+    monkeypatch.setattr(
+        sv, '_read_join_diag',
+        lambda _vmid: (
+            'target_ou=(empty)\n'
+            'add_computer_oupath=no\n'
+            "netsetup: Specified path 'CN=Computers,DC=corp' is not an OU\n"
+        ),
+    )
+
+    summary, ok = ca._verify_sysprep_result(
+        126,
+        'WINJOINFAIL',
+        expected_ip='192.168.123.50',
+        expected_domain='corp.example.com',
+        timeout=60,
+        on_progress=progress.append,
+        join_meta={'domain_ou': '', 'domain_join_method': 'add-computer'},
+    )
+    assert ok is False
+    assert 'guest setup marked domain-join-failed:not_an_ou' in summary
+    assert 'class=not_an_ou' in summary
+    assert 'ou=(empty)' in summary
+    assert any('join-diag: target_ou=(empty)' in m for m in progress)
+    assert any("is not an OU" in m for m in progress)
+
+
 def test_is_domain_join_failed_marker():
     assert sv._is_domain_join_failed_marker('domain-join-failed')
     assert sv._is_domain_join_failed_marker('domain-join-failed: LDAP')
+    assert sv._is_domain_join_failed_marker('domain-join-failed:not_an_ou')
     assert not sv._is_domain_join_failed_marker('ok')
     assert not sv._is_domain_join_failed_marker(None)
+    assert sv._join_fail_class('domain-join-failed:not_an_ou') == 'not_an_ou'
+    assert sv._join_fail_class('domain-join-failed') == ''
+
+
+def test_read_join_diag_missing_and_text(monkeypatch):
+    monkeypatch.setattr(sv, 'run_command_in_guest', lambda *_a, **_k: 'MISSING\n')
+    assert sv._read_join_diag(1) is None
+    monkeypatch.setattr(
+        sv, 'run_command_in_guest',
+        lambda *_a, **_k: "target_ou=(empty)\nnetsetup: is not an OU\n",
+    )
+    text = sv._read_join_diag(1)
+    assert 'target_ou=(empty)' in text
+    assert 'is not an OU' in text

@@ -66,6 +66,8 @@ def test_unattend_sets_hostname_and_timezone():
     assert '<TimeZone>Central European Standard Time</TimeZone>' in xml
     assert '<InputLocale>en-US</InputLocale>' in xml
     assert 'GuestOS-RegisterSetup.cmd' in xml
+    assert 'GuestOS-RunHidden.vbs' in xml
+    assert 'wscript.exe //B //nologo' in xml
     assert 'register SYSTEM AtStartup setup task' in xml
     assert '<FirstLogonCommands>' not in xml
     assert '<AutoLogon>' not in xml
@@ -277,6 +279,7 @@ def test_setup_ps1_resets_recycle_bin_on_data_volumes():
     assert 'Reset-GuestOsRecycleBin' in ps1
     assert 'pending_reboot' in ps1
     assert 'Ensure-GuestOsSetupTask' in ps1
+    assert 'Invoke-GuestOsHidden' in ps1
     assert 'Disable-GuestOsSetupTask' in ps1
     assert 'Wait-GuestOsNetworkReady' in ps1
     assert 'Keep-GuestOsAutoLogonForReboot' not in ps1
@@ -366,6 +369,7 @@ def test_write_sysprep_files_registers_task_launcher(monkeypatch):
     assert r'C:\Windows\System32\GuestOS-FirstLogon.cmd' in written
     assert r'C:\Windows\System32\GuestOS-RegisterSetup.cmd' in written
     assert r'C:\Windows\System32\GuestOS-RegisterSetup.ps1' in written
+    assert r'C:\Windows\System32\GuestOS-RunHidden.vbs' in written
     assert r'C:\Windows\Setup\Scripts\SetupComplete.cmd' in written
 
 
@@ -380,6 +384,9 @@ def test_register_setup_ps1_has_startup_and_first_boot_triggers():
     assert '-Once' in ps1
     assert 'Hours 24' in ps1
     assert 'first boot' in ps1.lower() or 'Once+2m' in ps1
+    assert "Execute 'wscript.exe'" in ps1
+    assert 'GuestOS-RunHidden.vbs' in ps1
+    assert "Execute 'cmd.exe'" not in ps1
 
 
 def test_static_allows_empty_gateway():
@@ -488,6 +495,11 @@ def test_domain_join_password_is_not_interpolated_raw():
     assert 'Add-Computer' in ps1
     assert 'w32tm /resync /force' in ps1
     assert 'Format-DomainJoinError' in ps1
+    assert 'not_an_ou' in ps1
+    assert 'Write-GuestOsJoinDiag' in ps1
+    assert r'C:\ProgramData\GuestOS\join-diag.txt' in ps1
+    assert 'oupath=' in ps1
+    assert 'CurrentBuild' in ps1
     # The blob still round-trips to the correct password.
     decoded = json.loads(base64.b64decode(data['domain_join_b64']))
     assert decoded['password'] == nasty

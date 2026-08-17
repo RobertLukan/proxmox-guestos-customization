@@ -42,6 +42,9 @@ def build_task_options(data: dict | None) -> dict:
     _set('domain_name', (raw.get('domain_name') or '').strip() or None)
     _set('domain_username', (raw.get('domain_username') or '').strip() or None)
     _set('domain_profile', (raw.get('domain_profile') or '').strip() or None)
+    # Effective OU (form value, or backfilled from the profile). Not a secret,
+    # and it is the difference between a working join and NetJoin 0x2.
+    _set('domain_ou', (raw.get('domain_ou') or '').strip() or None)
     if 'use_domain_profile_credentials' in raw:
         upc = raw.get('use_domain_profile_credentials')
         if isinstance(upc, str):
@@ -165,6 +168,17 @@ def join_summary_lines(options: dict | None) -> list[str]:
         lines.append('late Add-Computer after OOBE')
     else:
         lines.append('requested (path not recorded yet)')
+    ou = (o.get('domain_ou') or '').strip()
+    if ou:
+        lines.append(f'Target OU {ou}')
+        if ou.lower().startswith('cn=computers,'):
+            lines.append(
+                'WARNING: Target OU is the default Computers container, not an '
+                'OU — Add-Computer cannot create there and will not retry '
+                'downlevel. Use a real OU=… DN.'
+            )
+    else:
+        lines.append('Target OU (none) — default computer container')
     if o.get('host_dc_reachable') is True:
         tgt = (o.get('host_dc_target') or '').strip()
         lines.append('GuestOS host DC reachable' + (f' ({tgt})' if tgt else ''))

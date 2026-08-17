@@ -17,6 +17,7 @@ and [AD_VALIDATION.md](AD_VALIDATION.md).
 
 | ID | Item | Confirmed |
 |----|------|-----------|
+| `win11-25h2-empty-ou` | Win11 **25H2** DHCP+AD, blank Target OU, ODJ off | 2026-08-17 — guestos-lab template `121` `WIn1125H2-1`; clone `W25E190624` VMID **123** SUCCESS. GuestOS 2.7.1; `join-path: add-computer`; DHCP `192.168.123.161`; `DisplayVersion=25H2` build `26200.8894`. Empty OU created `CN=W25E190624,CN=Computers,DC=lab,DC=test` (no “is not an OU”). Join user was lab `administrator@lab.test` (Domain Admin) — does **not** reproduce production `SCCMJoin` + 24H2 `0x2`. Clone left running. |
 | `odj-fallback` | Fallback when GuestOS cannot reach the DC | 2026-08-16 — `W11FB193536` VMID 121 SUCCESS. Worker `join-path: host_dc=unreachable` and `provision=add-computer`; guest `pending_reboot (domain-join)`; verify `domain[lab.test]: joined (lab.test, add-computer, host DC unreachable)`; DHCP `192.168.123.164`. |
 | `odj-static-win11` | Offline Domain Join on Win11 + static IP + AD | 2026-08-16 — guestos-lab `W11ST191727` VMID 121 SUCCESS. `join-path: provision=odj`; verify `IP 192.168.123.211 present`; `domain[lab.test]: joined (lab.test, odj, host DC reachable)`; `already-joined` then `setup.done`. |
 | `uac-rid500-logon` | First console logon as `LAB\Administrator` after `FilterAdministratorToken=1` | 2026-08-16 — `W11ODJ185325` VMID 121. `FilterAdministratorToken=1`; first logon as `LAB\Administrator` got a desktop (`explorer.exe` session 1). |
@@ -37,4 +38,3 @@ and [AD_VALIDATION.md](AD_VALIDATION.md).
 1. Optionally set Proxmox `localtime=1` on Windows templates and re-check (**`ntp-pve-localtime`**).
 2. Optionally re-check Recycle Bin on D:/E: after disk smoke.
 3. Update this file: move open → done with host/VMID/date.
-5. Update this file: move open → done with host/VMID/date.

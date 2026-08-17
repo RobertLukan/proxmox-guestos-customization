@@ -20,7 +20,7 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 | Console stuck on “Just a moment” after SUCCESS | Win11 `FirstLogonAnim` after OOBE; ODJ path does not reboot | Confirm `EnableFirstLogonAnimation=0` in unattend specialize; reboot once to recover an already-customized guest |
 | `setup.ps1 failed` | Network, disk serial, pagefile, domain join | `setup.failed` contents; guest event log |
 | DHCP verify fail after `setup.done` | No lease on expected NIC | Bridge/VLAN; DHCP server; MAC match |
-| Domain verify fail / `WARNING: domain join failed` | Join failed (DC down, bad creds/DNS) or slow | Guest marker `domain-join-failed` shortens verify; check DC/DNS; `PartOfDomain` via QGA |
+| Domain verify fail / `WARNING: domain join failed` | Join failed (DC, creds, DNS, or empty Target OU / `CN=Computers` on 24H2) | Job **event log** `join-diag:` lines; guest `C:\ProgramData\GuestOS\join-diag.txt`; `setup.done` class (`domain-join-failed:not_an_ou`); `C:\Windows\Debug\NetSetup.LOG`. You do **not** need the join account to collect these. |
 | Host DC/DNS unreachable at admit | GuestOS-host TCP preflight (advisory) | Job continues with `warnings[]`; in-clone probe is the hard gate |
 | Admit fails: computer exists / bad OU (LDAP reachable) | Host LDAP directory checks | Rename host or fix OU/creds |
 | Task `FAILURE` `domain_cred_probe` before Sysprep | In-clone LDAP/ADSI bind failed | Read `class=` / `guest_ip=` / `username=` in task message; fix VLAN/DHCP/DNS or join account; never re-run Sysprep on that clone |
@@ -39,7 +39,8 @@ registered during specialize), which extracts the script to
 AutoLogon / FirstLogonCommands. Markers:
 
 - `setup.done` — setup finished; required for SUCCESS
-- `setup.done` with detail `domain-join-failed` — OS/network setup finished but AD join failed (soft); verify emits **WARNING** and skips the long domain wait
+- `setup.done` with detail `domain-join-failed` or `domain-join-failed:<class>` — OS/network setup finished but AD join failed (soft); verify emits **WARNING**, skips the long domain wait, and copies `join-diag.txt` into the job event log
+- `C:\ProgramData\GuestOS\join-diag.txt` (also `C:\Windows\GuestOS\join-diag.txt`) — failed-join snapshot: OS build, SYSTEM vs interactive, Target OU / whether `-OUPath` was passed, last error class, matching `NetSetup.LOG` lines. No password.
 - `setup.failed` — setup threw; verify fails with detail
 - `setup.pending_reboot` — pagefile or domain join scheduled a reboot; verify keeps waiting until `setup.done` after the next AtStartup task run
 - `setup.lock` / transcript — concurrent run / debugging
@@ -57,6 +58,16 @@ is already set, but the guest IP is usually still DHCP (not the final unattend
 static IP). That is intentional: it answers “can this account bind to the DC from
 this L2 path?” Operators can also call `POST /api/domain/test_credentials` (or use
 the UI **Test credentials** buttons) from the GuestOS host without cloning.
+
+**Failed join without the join account:** After one failed clone, the job **event
+log** includes `join-diag:` lines (OS build, Target OU empty vs set, SYSTEM
+runner, last error class, matching `NetSetup.LOG` hits). The same snapshot is on
+the guest at `C:\ProgramData\GuestOS\join-diag.txt`. Ask the other admin to copy
+that file plus `C:\Windows\Debug\NetSetup.LOG` — they do not need to re-run
+`Add-Computer` as `SCCMJoin`. `class=not_an_ou` with `ou=(empty)` is the 24H2
+default-Computers-container failure (set a real `OU=…` Target OU / domain
+profile). From the GuestOS container:
+`TARGET=<hostname-or-vmid> python3 /app/scripts/extract_guest_setup_log.py`.
 
 Also written: `HKLM\SOFTWARE\GuestOS` `SetupStatus=done|failed|pending_reboot` (survives ProgramData cleanup).
 
