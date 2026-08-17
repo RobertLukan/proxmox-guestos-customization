@@ -104,13 +104,16 @@ paths:
           description: Not found
   /api/domain/test_credentials:
     post:
-      summary: Test AD join credentials (host LDAP bind; no clone)
+      summary: Test AD join credentials and Target OU (host LDAP; no clone)
       description: >
         Bind with profile or manual credentials from the GuestOS host using
-        dns_servers (Network-step DNS / DC IPs). A failed bind returns HTTP 400
-        with continue_allowed=true and an advisory — the UI may still submit;
-        in-clone QGA probe remains authoritative for the guest VLAN path.
-        Never returns passwords.
+        dns_servers (Network-step DNS / DC IPs). After a successful bind, the
+        specified domain_ou is checked and must be an organizationalUnit
+        (CN=Computers is rejected). A blank Target OU looks up the domain
+        default computer location and may return ou_warning for Windows 11 24H2.
+        A failed bind or invalid OU returns HTTP 400 with continue_allowed=true
+        and an advisory — the UI may still submit; in-clone QGA probe remains
+        authoritative for the guest VLAN path. Never returns passwords.
       security:
         - bearerAuth: []
         - apiToken: []
@@ -134,6 +137,11 @@ paths:
                   type: string
                 dns_servers:
                   type: string
+                domain_ou:
+                  type: string
+                  description: >
+                    Target OU distinguished name. Blank uses the profile OU when
+                    present, otherwise the domain default computer location.
       responses:
         '200':
           description: Bind succeeded

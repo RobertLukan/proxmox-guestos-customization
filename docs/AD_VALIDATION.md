@@ -72,12 +72,18 @@ Credential layers:
    warning (does not block admit). Wrong join password while LDAP *is* reachable
    still fails admit.
 4. **Profile / manual Test credentials** (`POST /api/domain/test_credentials`) —
-   host LDAP bind from the GuestOS instance. **Profile credentials always bind
-   to that profile's `dns_servers`** (never request DNS). Manual credentials use
-   Network-step DNS (required for a meaningful manual test).
+   host LDAP bind from the GuestOS instance, then an OU check on the same bind
+   path. **Profile credentials always bind to that profile's `dns_servers`**
+   (never request DNS). Manual credentials use Network-step DNS (required for a
+   meaningful manual test). After a successful bind:
+   - a specified `domain_ou` must exist and be an `organizationalUnit`
+     (`CN=Computers` is rejected — Windows 11 24H2 cannot join a container);
+   - a blank Target OU looks up the domain default computer location
+     (`wellKnownObjects` / `redircmp`) and returns `ou_warning` when it is
+     still `CN=Computers`.
    A failed UI test is advisory only — the wizard can continue; failure often means
    routing/firewall between GuestOS and DNS/AD, not necessarily bad passwords.
-   In-clone probe remains authoritative for the guest network path.
+   The in-clone probe remains authoritative for the guest network path.
 5. **In-clone QGA probe** after agent-up, before Sysprep write: wait for a non–link-local
    IPv4, then ADSI bind. Kill-switch: `DOMAIN_JOIN_CRED_PROBE=false`.
 

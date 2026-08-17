@@ -4,6 +4,8 @@ import pytest
 from app.domain_credentials import (
     classify_ldap_error,
     format_cred_probe_failure,
+    host_ldap_check_join_ou,
+    is_computers_container_dn,
     normalize_domain_password,
     normalize_domain_username,
     prepare_join_credentials,
@@ -214,6 +216,196 @@ def test_host_ldap_ou_unreachable_is_soft(monkeypatch):
     dc.host_ldap_validate_ou(data)  # does not raise
 
 
+class _FakeAttr:
+    def __init__(self, value):
+        self.value = value
+        self.values = list(value) if isinstance(value, (list, tuple)) else [value]
+
+
+class _FakeEntry:
+    def __init__(self, dn='', **attrs):
+        self.entry_dn = dn
+        for key, val in attrs.items():
+            setattr(self, key, _FakeAttr(val))
+
+
+def _patch_ldap_conn(monkeypatch, conn_factory):
+    import ldap3
+
+    class FakeServer:
+        def __init__(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(ldap3, 'Server', FakeServer)
+    monkeypatch.setattr(ldap3, 'Connection', lambda *a, **k: conn_factory())
+
+
+def _sample_join_data(**extra):
+    data = {
+        'domain_name': 'lab.test',
+        'domain_username': 'svc@lab.test',
+        'domain_password': 'x',
+        'dns_servers': '10.0.0.1',
+    }
+    data.update(extra)
+    return data
+
+
+def test_is_computers_container_dn():
+    assert is_computers_container_dn('CN=Computers,DC=lab,DC=test') is True
+    assert is_computers_container_dn('cn=computers,DC=LAB,DC=TEST') is True
+    assert is_computers_container_dn('OU=Computers,DC=lab,DC=test') is False
+    assert is_computers_container_dn('OU=Servers,DC=lab,DC=test') is False
+
+
+def test_host_ldap_ou_rejects_computers_container(monkeypatch):
+    from app import domain_credentials as dc
+
+    class FakeConn:
+        def search(self, *a, **k):
+            self.entries = [
+                _FakeEntry(
+                    dn='CN=Computers,DC=lab,DC=test',
+                    objectClass=['top', 'container'],
+                    distinguishedName='CN=Computers,DC=lab,DC=test',
+                )
+            ]
+            return True
+
+        def unbind(self):
+            pass
+
+    _patch_ldap_conn(monkeypatch, FakeConn)
+    with pytest.raises(ValidationError, match='not an OU'):
+        dc.host_ldap_validate_ou(
+            _sample_join_data(domain_ou='CN=Computers,DC=lab,DC=test')
+        )
+
+
+def test_host_ldap_ou_accepts_organizational_unit(monkeypatch):
+    from app import domain_credentials as dc
+
+    class FakeConn:
+        def search(self, *a, **k):
+            self.entries = [
+                _FakeEntry(
+                    dn='OU=Servers,DC=lab,DC=test',
+                    objectClass=['top', 'organizationalUnit'],
+                    distinguishedName='OU=Servers,DC=lab,DC=test',
+                )
+            ]
+            return True
+
+        def unbind(self):
+            pass
+
+    _patch_ldap_conn(monkeypatch, FakeConn)
+    dc.host_ldap_validate_ou(
+        _sample_join_data(domain_ou='OU=Servers,DC=lab,DC=test')
+    )
+
+
+def test_host_ldap_check_join_ou_empty_warns_default_container(monkeypatch):
+    class FakeConn:
+        def search(self, base, filt, search_scope=None, attributes=None, **k):
+            attrs = list(attributes or [])
+            base = str(base or '')
+            if base == '':
+                self.entries = [
+                    _FakeEntry(dn='', defaultNamingContext='DC=lab,DC=test')
+                ]
+                return True
+            if base.lower() == 'dc=lab,dc=test' and 'wellKnownObjects' in attrs:
+                self.entries = [
+                    _FakeEntry(
+                        dn=base,
+                        wellKnownObjects=[
+                            'B:32:AA312825768811D1ADED00C04FD8D5CD:'
+                            'CN=Computers,DC=lab,DC=test'
+                        ],
+                    )
+                ]
+                return True
+            if base.lower() == 'cn=computers,dc=lab,dc=test':
+                self.entries = [
+                    _FakeEntry(
+                        dn=base,
+                        objectClass=['top', 'container'],
+                        distinguishedName=base,
+                    )
+                ]
+                return True
+            self.entries = []
+            return False
+
+        def unbind(self):
+            pass
+
+    _patch_ldap_conn(monkeypatch, FakeConn)
+    info = host_ldap_check_join_ou(_sample_join_data(domain_ou=''))
+    assert info['ok'] is True
+    assert info['class'] == 'empty_default_container'
+    assert info['default_computer_container'] == 'CN=Computers,DC=lab,DC=test'
+    assert '24H2' in (info.get('warning') or '')
+
+
+def test_host_ldap_check_join_ou_empty_ok_when_redircmp(monkeypatch):
+    redirected = 'OU=Workstations,DC=lab,DC=test'
+
+    class FakeConn:
+        def search(self, base, filt, search_scope=None, attributes=None, **k):
+            attrs = list(attributes or [])
+            base = str(base or '')
+            if base == '':
+                self.entries = [
+                    _FakeEntry(dn='', defaultNamingContext='DC=lab,DC=test')
+                ]
+                return True
+            if base.lower() == 'dc=lab,dc=test' and 'wellKnownObjects' in attrs:
+                self.entries = [
+                    _FakeEntry(
+                        dn=base,
+                        wellKnownObjects=[
+                            f'B:32:AA312825768811D1ADED00C04FD8D5CD:{redirected}'
+                        ],
+                    )
+                ]
+                return True
+            if base == redirected:
+                self.entries = [
+                    _FakeEntry(
+                        dn=base,
+                        objectClass=['top', 'organizationalUnit'],
+                        distinguishedName=base,
+                    )
+                ]
+                return True
+            self.entries = []
+            return False
+
+        def unbind(self):
+            pass
+
+    _patch_ldap_conn(monkeypatch, FakeConn)
+    info = host_ldap_check_join_ou(_sample_join_data(domain_ou=''))
+    assert info['ok'] is True
+    assert info.get('warning') is None
+    assert info['default_computer_container'] == redirected
+
+
+def _ok_ou_info(data, timeout=5.0):
+    ou = (data.get('domain_ou') or '').strip() or None
+    return {
+        'ok': True,
+        'class': 'ok',
+        'result': 'OK',
+        'skipped': False,
+        'domain_ou': ou,
+        'default_computer_container': None,
+        'warning': None,
+    }
+
+
 def test_api_domain_test_credentials_manual(client, app, monkeypatch):
     app.config['API_TOKENS'] = frozenset({'tok'})
 
@@ -228,6 +420,7 @@ def test_api_domain_test_credentials_manual(client, app, monkeypatch):
         }
 
     monkeypatch.setattr('app.domain_credentials.host_ldap_bind', _fake_bind)
+    monkeypatch.setattr('app.domain_credentials.host_ldap_check_join_ou', _ok_ou_info)
     resp = client.post(
         '/api/domain/test_credentials',
         json={
@@ -287,6 +480,160 @@ def test_api_domain_test_credentials_profile(client, app, monkeypatch):
     assert 'GuestOS' in (body.get('advisory') or '')
     assert 's3cret' not in str(body)
     assert body.get('dns_servers') == '10.0.0.1'
+
+
+def test_api_domain_test_credentials_rejects_computers_container(client, app, monkeypatch):
+    app.config['API_TOKENS'] = frozenset({'tok'})
+
+    def _fake_bind(data, timeout=5.0):
+        return {
+            'ok': True,
+            'class': 'ok',
+            'result': 'OK',
+            'bind_target': '10.0.0.1:389',
+            'domain': 'lab.test',
+            'username': 'svc@lab.test',
+        }
+
+    def _fake_ou(data, timeout=5.0):
+        return {
+            'ok': False,
+            'class': 'not_an_ou',
+            'result': (
+                "domain_ou 'CN=Computers,DC=lab,DC=test' is the default "
+                'Computers container, not an OU.'
+            ),
+            'skipped': False,
+            'domain_ou': 'CN=Computers,DC=lab,DC=test',
+            'default_computer_container': None,
+            'warning': 'not an OU',
+        }
+
+    monkeypatch.setattr('app.domain_credentials.host_ldap_bind', _fake_bind)
+    monkeypatch.setattr('app.domain_credentials.host_ldap_check_join_ou', _fake_ou)
+    resp = client.post(
+        '/api/domain/test_credentials',
+        json={
+            'use_domain_profile_credentials': False,
+            'domain_name': 'lab.test',
+            'domain_username': 'svc@lab.test',
+            'domain_password': 'x',
+            'dns_servers': '10.0.0.1',
+            'domain_ou': 'CN=Computers,DC=lab,DC=test',
+        },
+        headers={'Authorization': 'Bearer tok'},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body['ok'] is False
+    assert body['class'] == 'not_an_ou'
+    assert body.get('continue_allowed') is True
+    assert 'organizationalUnit' in (body.get('advisory') or '')
+    assert body.get('domain_ou') == 'CN=Computers,DC=lab,DC=test'
+
+
+def test_api_domain_test_credentials_empty_ou_warns(client, app, monkeypatch):
+    app.config['API_TOKENS'] = frozenset({'tok'})
+
+    def _fake_bind(data, timeout=5.0):
+        return {
+            'ok': True,
+            'class': 'ok',
+            'result': 'OK',
+            'bind_target': '10.0.0.1:389',
+            'domain': 'lab.test',
+            'username': 'svc@lab.test',
+        }
+
+    def _fake_ou(data, timeout=5.0):
+        assert not (data.get('domain_ou') or '').strip()
+        return {
+            'ok': True,
+            'class': 'empty_default_container',
+            'result': 'warning',
+            'skipped': False,
+            'domain_ou': None,
+            'default_computer_container': 'CN=Computers,DC=lab,DC=test',
+            'warning': (
+                'Target OU is empty; domain default computer location is '
+                'CN=Computers,DC=lab,DC=test (a container, not an OU). '
+                'Windows 11 24H2 Add-Computer will fail.'
+            ),
+        }
+
+    monkeypatch.setattr('app.domain_credentials.host_ldap_bind', _fake_bind)
+    monkeypatch.setattr('app.domain_credentials.host_ldap_check_join_ou', _fake_ou)
+    resp = client.post(
+        '/api/domain/test_credentials',
+        json={
+            'use_domain_profile_credentials': False,
+            'domain_name': 'lab.test',
+            'domain_username': 'svc@lab.test',
+            'domain_password': 'x',
+            'dns_servers': '10.0.0.1',
+            'domain_ou': '',
+        },
+        headers={'Authorization': 'Bearer tok'},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body['ok'] is True
+    assert '24H2' in (body.get('ou_warning') or '')
+    assert body.get('default_computer_container') == 'CN=Computers,DC=lab,DC=test'
+
+
+def test_api_domain_test_credentials_uses_profile_ou(client, app, monkeypatch):
+    app.config['API_TOKENS'] = frozenset({'tok'})
+    app.config['DOMAIN_PROFILES'] = {
+        'Lab': {
+            'dns_servers': '10.0.0.1',
+            'domain_name': 'lab.test',
+            'domain_username': 'svc@lab.test',
+            'domain_password': 's3cret!',
+            'domain_ou': 'OU=VDI,DC=lab,DC=test',
+        }
+    }
+
+    def _fake_bind(data, timeout=5.0):
+        return {
+            'ok': True,
+            'class': 'ok',
+            'result': 'OK',
+            'bind_target': '10.0.0.1:389',
+            'domain': 'lab.test',
+            'username': 'svc@lab.test',
+        }
+
+    seen = {}
+
+    def _fake_ou(data, timeout=5.0):
+        seen['ou'] = data.get('domain_ou')
+        return {
+            'ok': True,
+            'class': 'ok',
+            'result': 'OU OK',
+            'skipped': False,
+            'domain_ou': data.get('domain_ou'),
+            'default_computer_container': None,
+            'warning': None,
+        }
+
+    monkeypatch.setattr('app.domain_credentials.host_ldap_bind', _fake_bind)
+    monkeypatch.setattr('app.domain_credentials.host_ldap_check_join_ou', _fake_ou)
+    resp = client.post(
+        '/api/domain/test_credentials',
+        json={
+            'domain_profile': 'Lab',
+            'use_domain_profile_credentials': True,
+            'domain_ou': '',
+        },
+        headers={'Authorization': 'Bearer tok'},
+    )
+    assert resp.status_code == 200
+    assert seen.get('ou') == 'OU=VDI,DC=lab,DC=test'
+    body = resp.get_json()
+    assert body.get('domain_ou') == 'OU=VDI,DC=lab,DC=test'
+    assert 's3cret' not in str(body)
 
 
 def test_credential_dns_servers_ignores_request_when_profile_creds(app):

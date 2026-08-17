@@ -278,6 +278,17 @@
                 </div>
                 <div class="invalid-feedback"></div>
             </div>
+            <div class="mb-3">
+                <label for="domain_ou" class="form-label">Target OU (optional)</label>
+                <input type="text" class="form-control" id="domain_ou" name="domain_ou" placeholder="OU=Servers,DC=corp,DC=example,DC=com">
+                <div class="form-text">
+                    Must be a real <code>OU=…</code> distinguished name.
+                    <code>CN=Computers</code> is a container, not an OU, and
+                    Windows 11 24H2 cannot join there. Leave blank only for
+                    23H2 / Server 2019, or if <code>redircmp</code> already
+                    points at an OU. Test credentials checks this path.
+                </div>
+            </div>
             <div id="domain_credentials_fields" hidden>
                 <div class="mb-3">
                     <label for="domain_name" class="form-label">Domain Name</label>
@@ -312,7 +323,8 @@
                     </button>
                     <span class="form-text ms-2" id="test_domain_credentials_status" aria-live="polite"></span>
                     <div class="form-text mt-1" id="test_domain_credentials_dns_hint">
-                        Uses DNS servers from the <strong>Network</strong> step. Set those IPs before testing.
+                        Uses DNS servers from the <strong>Network</strong> step, and
+                        checks Target OU when set.
                     </div>
                 </div>
             </div>
@@ -323,7 +335,7 @@
                 <span class="form-text ms-2" id="test_domain_profile_status" aria-live="polite"></span>
                 <div class="form-text mt-1" id="test_domain_profile_dns_hint">
                     Uses DNS from the <strong>Network</strong> step when set; otherwise the profile’s DNS.
-                    Prefer setting Network DNS to the DC/domain DNS IPs you expect the guest to use.
+                    Also checks Target OU (form value, or the profile OU if the field is blank).
                 </div>
             </div>
             <div class="alert alert-warning py-2 mb-3" id="domain_cred_test_continue_note" hidden role="status">
@@ -331,10 +343,6 @@
                 You can continue — the in-clone probe still runs after the VM has network.
                 A failed host test can also mean traffic is not allowed between the GuestOS
                 instance and your DNS/AD servers (firewall, routing, or VLAN isolation).
-            </div>
-            <div class="mb-3">
-                <label for="domain_ou" class="form-label">Target OU (optional)</label>
-                <input type="text" class="form-control" id="domain_ou" name="domain_ou" placeholder="OU=Servers,DC=corp,DC=example,DC=com">
             </div>
         </div>
         <p class="form-text mb-0">You can skip this step if the VM should remain workgroup-joined.</p>

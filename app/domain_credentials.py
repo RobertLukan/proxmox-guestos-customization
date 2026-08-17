@@ -104,6 +104,7 @@ def format_cred_probe_failure(
     guest_ip: str | None = None,
     result: str | None = None,
     domain_profile: str | None = None,
+    domain_ou: str | None = None,
 ) -> str:
     """Build operator-facing failure text (never includes password)."""
     if isinstance(dns_servers, (list, tuple)):
@@ -123,6 +124,8 @@ def format_cred_probe_failure(
         lines.append(f'  guest_ip={guest_ip}')
     if domain_profile:
         lines.append(f'  domain_profile={domain_profile}')
+    if domain_ou:
+        lines.append(f'  domain_ou={domain_ou}')
     if result:
         # Scrub accidental password echoes
         safe = str(result).replace('\r', ' ').replace('\n', ' ')
@@ -245,6 +248,102 @@ def _ldap_timeout_seconds(timeout: float | int) -> int:
         return max(1, int(timeout))
     except (TypeError, ValueError):
         return 5
+
+
+# Domain wellKnownObjects GUID for the default computer location (redircmp).
+_COMPUTERS_WKGUID = 'AA312825768811D1ADED00C04FD8D5CD'
+
+
+def _ldap_attr_values(entry: Any, name: str) -> list[str]:
+    """Read a multi-value LDAP attribute from an ldap3 Entry or a test fake."""
+    attr = getattr(entry, name, None)
+    if attr is None:
+        return []
+    if isinstance(attr, (list, tuple)):
+        return [str(v) for v in attr if v is not None]
+    vals = getattr(attr, 'values', None)
+    if vals is not None:
+        return [str(v) for v in vals if v is not None]
+    val = getattr(attr, 'value', None)
+    if val is None:
+        return []
+    if isinstance(val, (list, tuple)):
+        return [str(v) for v in val if v is not None]
+    return [str(val)]
+
+
+def is_computers_container_dn(dn: str) -> bool:
+    """True when the DN's first RDN is the built-in Computers container."""
+    first = (dn or '').split(',', 1)[0].strip()
+    return first.lower() == 'cn=computers'
+
+
+def _entry_object_classes(entry: Any) -> list[str]:
+    return [v.lower() for v in _ldap_attr_values(entry, 'objectClass')]
+
+
+def _parse_well_known_dn(values: list[str], guid: str) -> str | None:
+    needle = guid.replace('-', '').upper()
+    for raw in values:
+        parts = str(raw).split(':', 3)
+        if len(parts) >= 4 and parts[2].replace('-', '').upper() == needle:
+            found = parts[3].strip()
+            if found:
+                return found
+    return None
+
+
+def _ou_not_an_ou_message(dn: str, classes: list[str] | None = None) -> str:
+    shown = ','.join(classes) if classes else 'container'
+    if is_computers_container_dn(dn):
+        return (
+            f'domain_ou {dn!r} is the default Computers container, not an OU. '
+            'Windows 11 24H2 cannot join there — use a real OU=… distinguished name.'
+        )
+    return (
+        f'domain_ou {dn!r} exists but is not an organizationalUnit '
+        f'(objectClass={shown}). NetJoin requires an OU=… path.'
+    )
+
+
+def _empty_ou_default_container_warning(dn: str) -> str:
+    return (
+        f'Target OU is empty; domain default computer location is {dn} '
+        '(a container, not an OU). Windows 11 24H2 Add-Computer will fail — '
+        'set Target OU to a real OU=… DN, or redirect the default with redircmp.'
+    )
+
+
+def _lookup_default_computer_dn(conn) -> str | None:
+    """Return the domain's default computer container/OU DN, or None."""
+    from ldap3 import BASE
+
+    conn.search(
+        '',
+        '(objectClass=*)',
+        search_scope=BASE,
+        attributes=['defaultNamingContext'],
+    )
+    if not conn.entries:
+        return None
+    ncs = _ldap_attr_values(conn.entries[0], 'defaultNamingContext')
+    nc = ncs[0] if ncs else None
+    if not nc:
+        return None
+    conn.search(
+        nc,
+        '(objectClass=*)',
+        search_scope=BASE,
+        attributes=['wellKnownObjects'],
+    )
+    if conn.entries:
+        found = _parse_well_known_dn(
+            _ldap_attr_values(conn.entries[0], 'wellKnownObjects'),
+            _COMPUTERS_WKGUID,
+        )
+        if found:
+            return found
+    return f'CN=Computers,{nc}'
 
 
 def host_ldap_bind(
@@ -397,19 +496,45 @@ def host_ldap_check_computer_exists(data: dict, hostname: str, *, timeout: float
         )
 
 
-def host_ldap_validate_ou(data: dict, *, timeout: float = 5.0) -> None:
-    """Raise ValidationError if domain_ou is set but not readable via LDAP."""
-    from ldap3 import Connection, Server, ALL, BASE
+def host_ldap_check_join_ou(data: dict, *, timeout: float = 5.0) -> dict:
+    """Inspect the join OU for the credential test / admit checks.
+
+    ``ok`` is False only when a *specified* ``domain_ou`` is invalid or not an
+    organizationalUnit. Empty Target OU stays ``ok``; ``warning`` is set when
+    the domain default computer location is ``CN=Computers`` (24H2 join fails).
+    Unreachable LDAP sets ``skipped`` and does not fail the test.
+    """
+    from ldap3 import ALL, BASE, Connection, Server
     from ldap3.core.exceptions import LDAPException
     from ldap3.utils.dn import safe_dn
 
-    ou = (data.get('domain_ou') or '').strip()
-    if not ou:
-        return
-    try:
-        ou = safe_dn(ou)
-    except Exception as e:  # noqa: BLE001
-        raise ValidationError(f'domain_ou is not a valid DN: {ou!r}') from e
+    specified = (data.get('domain_ou') or '').strip()
+    empty = {
+        'ok': True,
+        'class': 'ok',
+        'result': 'OK',
+        'skipped': False,
+        'domain_ou': None,
+        'default_computer_container': None,
+        'warning': None,
+        'object_class': None,
+    }
+    if specified:
+        try:
+            specified = safe_dn(specified)
+        except Exception as e:  # noqa: BLE001
+            return {
+                'ok': False,
+                'class': 'invalid_ou',
+                'result': f'domain_ou is not a valid DN: {specified!r}',
+                'skipped': False,
+                'domain_ou': specified,
+                'default_computer_container': None,
+                'warning': None,
+                'object_class': None,
+                'error': str(e),
+            }
+
     username = normalize_domain_username(data.get('domain_username'))
     password, _ = normalize_domain_password(data.get('domain_password'))
     targets = _ldap_server_candidates(data)
@@ -417,7 +542,13 @@ def host_ldap_validate_ou(data: dict, *, timeout: float = 5.0) -> None:
         logging.warning(
             'domain_ou validation skipped: no dns_servers/domain for GuestOS-host LDAP'
         )
-        return
+        out = dict(empty)
+        out['skipped'] = True
+        out['class'] = 'skipped'
+        out['result'] = 'OU check skipped: no LDAP target'
+        out['domain_ou'] = specified or None
+        return out
+
     tmo = _ldap_timeout_seconds(timeout)
     last_err = None
     for host in targets:
@@ -431,29 +562,128 @@ def host_ldap_validate_ou(data: dict, *, timeout: float = 5.0) -> None:
                 receive_timeout=tmo,
             )
             try:
-                ok = conn.search(ou, '(objectClass=*)', search_scope=BASE, attributes=['distinguishedName'])
-                if not ok or not conn.entries:
-                    raise ValidationError(
-                        f'domain_ou DN was not found or is not readable: {ou!r}'
+                if specified:
+                    ok = conn.search(
+                        specified,
+                        '(objectClass=*)',
+                        search_scope=BASE,
+                        attributes=['distinguishedName', 'objectClass'],
                     )
-                return
+                    if not ok or not conn.entries:
+                        return {
+                            'ok': False,
+                            'class': 'invalid_ou',
+                            'result': (
+                                f'domain_ou DN was not found or is not readable: '
+                                f'{specified!r}'
+                            ),
+                            'skipped': False,
+                            'domain_ou': specified,
+                            'default_computer_container': None,
+                            'warning': None,
+                            'object_class': None,
+                        }
+                    entry = conn.entries[0]
+                    classes = _entry_object_classes(entry)
+                    if 'organizationalunit' not in classes:
+                        msg = _ou_not_an_ou_message(specified, classes)
+                        return {
+                            'ok': False,
+                            'class': 'not_an_ou',
+                            'result': msg,
+                            'skipped': False,
+                            'domain_ou': specified,
+                            'default_computer_container': None,
+                            'warning': msg,
+                            'object_class': ','.join(classes) or None,
+                        }
+                    return {
+                        'ok': True,
+                        'class': 'ok',
+                        'result': f'OU {specified} is an organizationalUnit',
+                        'skipped': False,
+                        'domain_ou': specified,
+                        'default_computer_container': None,
+                        'warning': None,
+                        'object_class': ','.join(classes) or None,
+                    }
+
+                default_dn = _lookup_default_computer_dn(conn)
+                out = dict(empty)
+                out['default_computer_container'] = default_dn
+                if not default_dn:
+                    out['skipped'] = True
+                    out['class'] = 'skipped'
+                    out['result'] = (
+                        'OU check skipped: could not read default computer location'
+                    )
+                    return out
+                ok = conn.search(
+                    default_dn,
+                    '(objectClass=*)',
+                    search_scope=BASE,
+                    attributes=['distinguishedName', 'objectClass'],
+                )
+                classes = (
+                    _entry_object_classes(conn.entries[0])
+                    if ok and conn.entries
+                    else []
+                )
+                out['object_class'] = ','.join(classes) or None
+                if 'organizationalunit' in classes:
+                    out['result'] = (
+                        f'default computer location {default_dn} is an organizationalUnit'
+                    )
+                    return out
+                out['warning'] = _empty_ou_default_container_warning(default_dn)
+                out['class'] = 'empty_default_container'
+                out['result'] = out['warning']
+                return out
             finally:
                 conn.unbind()
-        except ValidationError:
-            raise
         except LDAPException as e:
             last_err = e
             cls, _ = classify_ldap_error(e)
             if cls in ('invalid_credentials', 'account_restricted'):
-                raise ValidationError(f'Cannot validate domain_ou (LDAP auth failed): {e}') from e
+                return {
+                    'ok': False,
+                    'class': cls,
+                    'result': f'Cannot validate domain_ou (LDAP auth failed): {e}',
+                    'skipped': False,
+                    'domain_ou': specified or None,
+                    'default_computer_container': None,
+                    'warning': None,
+                    'object_class': None,
+                }
         except Exception as e:  # noqa: BLE001
             last_err = e
-    # Host cannot reach LDAP — skip OU check; guest path may still work.
+
     logging.warning(
         'domain_ou validation skipped (LDAP unreachable from GuestOS host): %s',
         last_err,
     )
-    return
+    out = dict(empty)
+    out['skipped'] = True
+    out['class'] = 'skipped'
+    out['result'] = f'OU check skipped (LDAP unreachable): {last_err}'
+    out['domain_ou'] = specified or None
+    return out
+
+
+def host_ldap_validate_ou(data: dict, *, timeout: float = 5.0) -> None:
+    """Raise ValidationError if domain_ou is set but missing or not an OU."""
+    ou = (data.get('domain_ou') or '').strip()
+    if not ou:
+        return
+    info = host_ldap_check_join_ou(data, timeout=timeout)
+    if info.get('skipped'):
+        return
+    if info.get('class') in ('invalid_credentials', 'account_restricted'):
+        raise ValidationError(info.get('result') or 'Cannot validate domain_ou')
+    if not info.get('ok'):
+        raise ValidationError(
+            info.get('result') or f'domain_ou is invalid: {ou!r}'
+        )
 
 
 def run_admit_directory_checks(data: dict) -> None:

@@ -3,7 +3,7 @@
 **Audience:** operators and reviewers comparing Proxmox GuestOS customization to
 vSphere Guest Customization Specifications.
 
-**GuestOS baseline:** 2.8.0 (SYSTEM scheduled task `GuestOS-Setup`;
+**GuestOS baseline:** 2.8.1 (SYSTEM scheduled task `GuestOS-Setup`;
 no AutoLogon; host DC preflight advisory; in-clone cred probe is the hard gate).
 
 **VMware baseline:** vSphere **Guest Customization Specification** for Windows
@@ -108,7 +108,7 @@ validation / orchestration.
 
 | When | What | Source | Fail severity |
 |------|------|--------|----------------|
-| Domain step (optional) | **Test credentials** — LDAP bind using Network DNS | GuestOS host → DC | **Advisory** — wizard can continue |
+| Domain step (optional) | **Test credentials** — LDAP bind using Network DNS, then Target OU (`organizationalUnit`; warns if default is `CN=Computers`) | GuestOS host → DC | **Advisory** — wizard can continue |
 | Admit (start job) | Username form (UPN / `DOMAIN\user`); required password | GuestOS app | **Critical** — HTTP 400, no clone |
 | Admit | TCP 53/88/389 to `dns_servers` | GuestOS host → DC/DNS | **Advisory** — `warnings[]`; job still starts (guest VLAN may reach AD) |
 | Admit | LDAP: hostname uniqueness + OU DN | GuestOS host → DC | **Critical** if LDAP is reachable (collision / bad OU / bad password). **Skipped** (log warning) if LDAP unreachable |

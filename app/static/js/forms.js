@@ -229,16 +229,21 @@
         if (r.ok) {
           form.dataset.domainCredTest = 'ok';
           setContinueNote(false);
-          setTestStatus(
-            statusEl,
-            'ok',
-            'OK — bind succeeded' + (r.body.bind_target ? ' (' + r.body.bind_target + ')' : '')
-          );
+          var bindBit =
+            'OK — bind succeeded' +
+            (r.body.bind_target ? ' (' + r.body.bind_target + ')' : '');
+          if (r.body.ou_warning) {
+            setTestStatus(statusEl, 'warn', bindBit + '. ' + r.body.ou_warning);
+          } else if (r.body.domain_ou) {
+            setTestStatus(statusEl, 'ok', bindBit + '; OU ' + r.body.domain_ou);
+          } else {
+            setTestStatus(statusEl, 'ok', bindBit);
+          }
         } else {
           form.dataset.domainCredTest = 'failed';
           setContinueNote(true);
           var msg =
-            (r.body && (r.body.message || r.body.result || r.body.error)) ||
+            (r.body && (r.body.result || r.body.message || r.body.error)) ||
             'Credential test failed';
           if (r.body && r.body.class) {
             msg = '[' + r.body.class + '] ' + msg;
@@ -361,6 +366,7 @@
           domain_username: (form.querySelector('#domain_username') || {}).value || '',
           domain_password: (form.querySelector('#domain_password') || {}).value || '',
           dns_servers: dns,
+          domain_ou: (form.querySelector('#domain_ou') || {}).value || '',
         }, testManualStatus, testManualBtn);
       });
     }
@@ -390,6 +396,7 @@
           use_domain_profile_credentials: true,
           domain_profile: name,
           dns_servers: dns,
+          domain_ou: (form.querySelector('#domain_ou') || {}).value || '',
         }, testProfileStatus, testProfileBtn);
       });
     }

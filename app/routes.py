@@ -1469,8 +1469,15 @@ def api_domain_test_credentials():
         # cannot be named here either.
         if profile.get('dns_servers'):
             data['dns_servers'] = profile.get('dns_servers')
+        # Same as join: blank Target OU is filled from the profile when present.
+        if not (data.get('domain_ou') or '').strip() and profile.get('domain_ou'):
+            data['domain_ou'] = profile.get('domain_ou')
     try:
-        from app.domain_credentials import host_ldap_bind, format_cred_probe_failure
+        from app.domain_credentials import (
+            format_cred_probe_failure,
+            host_ldap_bind,
+            host_ldap_check_join_ou,
+        )
         result = host_ldap_bind(data)
     except ValidationError as e:
         return jsonify({
@@ -1479,6 +1486,7 @@ def api_domain_test_credentials():
             'result': str(e),
             'domain': (data.get('domain_name') or '').strip() or None,
             'username': (data.get('domain_username') or '').strip() or None,
+            'domain_ou': (data.get('domain_ou') or '').strip() or None,
         }), 400
     payload = {
         'ok': bool(result.get('ok')),
@@ -1489,9 +1497,24 @@ def api_domain_test_credentials():
         'username': result.get('username'),
         'dns_servers': (data.get('dns_servers') or '').strip() or None,
         'domain_profile': profile_name or None,
+        'domain_ou': (data.get('domain_ou') or '').strip() or None,
         # UI may continue after a failed host test; in-clone probe is authoritative.
         'continue_allowed': True,
     }
+    if payload['ok']:
+        ou_info = host_ldap_check_join_ou(data)
+        payload['domain_ou'] = ou_info.get('domain_ou') or payload.get('domain_ou')
+        payload['default_computer_container'] = ou_info.get(
+            'default_computer_container'
+        )
+        if ou_info.get('warning'):
+            payload['ou_warning'] = ou_info['warning']
+        if ou_info.get('skipped'):
+            payload['ou_skipped'] = True
+        elif not ou_info.get('ok'):
+            payload['ok'] = False
+            payload['class'] = ou_info.get('class') or 'invalid_ou'
+            payload['result'] = ou_info.get('result')
     if not payload['ok']:
         payload['message'] = format_cred_probe_failure(
             error_class=payload['class'] or 'other',
@@ -1501,13 +1524,21 @@ def api_domain_test_credentials():
             bind_target=payload.get('bind_target'),
             result=payload.get('result'),
             domain_profile=payload.get('domain_profile'),
+            domain_ou=payload.get('domain_ou'),
         )
-        payload['advisory'] = (
-            'Host credential test failed; you may still submit. '
-            'This often means the GuestOS host cannot reach DNS/AD '
-            '(firewall, routing, or VLAN), not only bad passwords. '
-            'The in-clone probe still validates join credentials after the guest has network.'
-        )
+        if payload['class'] in ('not_an_ou', 'invalid_ou'):
+            payload['advisory'] = (
+                'Target OU is not a usable organizationalUnit. '
+                'Windows 11 24H2 cannot join CN=Computers. Set a real OU=… DN. '
+                'You may still submit, but domain join will fail on 24H2.'
+            )
+        else:
+            payload['advisory'] = (
+                'Host credential test failed; you may still submit. '
+                'This often means the GuestOS host cannot reach DNS/AD '
+                '(firewall, routing, or VLAN), not only bad passwords. '
+                'The in-clone probe still validates join credentials after the guest has network.'
+            )
     return jsonify(payload), 200 if payload['ok'] else 400
 
 
