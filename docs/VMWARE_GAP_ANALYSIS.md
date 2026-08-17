@@ -3,8 +3,9 @@
 **Audience:** operators and reviewers comparing Proxmox GuestOS customization to
 vSphere Guest Customization Specifications.
 
-**GuestOS baseline:** 2.8.1 (SYSTEM scheduled task `GuestOS-Setup`;
-no AutoLogon; host DC preflight advisory; in-clone cred probe is the hard gate).
+**GuestOS baseline:** 2.8.2 (SYSTEM scheduled task `GuestOS-Setup`;
+no AutoLogon; host DC preflight advisory; in-clone cred probe is the hard gate;
+failed joins write `join-diag.txt` / job Target OU).
 
 **VMware baseline:** vSphere **Guest Customization Specification** for Windows
 (Sysprep / unattend) and Linux (VMware Tools / scripting), as documented in
