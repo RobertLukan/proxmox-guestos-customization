@@ -3,7 +3,7 @@
 **Audience:** operators and reviewers comparing Proxmox GuestOS customization to
 vSphere Guest Customization Specifications.
 
-**GuestOS baseline:** 2.8.3 (SYSTEM scheduled task `GuestOS-Setup`;
+**GuestOS baseline:** 2.8.4 (SYSTEM scheduled task `GuestOS-Setup`;
 no AutoLogon; host DC preflight advisory; in-clone cred probe is the hard gate;
 admit requires a real `OU=…` Target OU; failed joins write `join-diag.txt` /
 job Target OU).
