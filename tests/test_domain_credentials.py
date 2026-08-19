@@ -347,6 +347,37 @@ def test_host_ldap_ou_accepts_organizational_unit(monkeypatch):
     )
 
 
+def test_host_ldap_ou_search_uses_domain_base_not_user_dn(monkeypatch):
+    """User DN must not be the LDAP search base (CodeQL py/ldap-injection)."""
+    from app import domain_credentials as dc
+
+    seen = {}
+
+    class FakeConn:
+        def search(self, base, filt, search_scope=None, attributes=None, **k):
+            seen['base'] = base
+            seen['filt'] = filt
+            self.entries = [
+                _FakeEntry(
+                    dn='OU=Servers,DC=lab,DC=test',
+                    objectClass=['top', 'organizationalUnit'],
+                    distinguishedName='OU=Servers,DC=lab,DC=test',
+                )
+            ]
+            return True
+
+        def unbind(self):
+            pass
+
+    _patch_ldap_conn(monkeypatch, FakeConn)
+    dc.host_ldap_validate_ou(
+        _sample_join_data(domain_ou='OU=Servers,DC=lab,DC=test')
+    )
+    assert seen['base'] == 'DC=lab,DC=test'
+    assert seen['filt'].startswith('(distinguishedName=')
+    assert 'OU=Servers,DC=lab,DC=test' in seen['filt']
+
+
 def test_host_ldap_check_join_ou_empty_warns_default_container(monkeypatch):
     class FakeConn:
         def search(self, base, filt, search_scope=None, attributes=None, **k):

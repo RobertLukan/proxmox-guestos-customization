@@ -533,8 +533,9 @@ def host_ldap_check_join_ou(data: dict, *, timeout: float = 5.0) -> dict:
     computer location is still ``CN=Computers``. Unreachable LDAP sets
     ``skipped`` and does not fail the test.
     """
-    from ldap3 import ALL, BASE, Connection, Server
+    from ldap3 import ALL, BASE, SUBTREE, Connection, Server
     from ldap3.core.exceptions import LDAPException
+    from ldap3.utils.conv import escape_filter_chars
 
     specified = (data.get('domain_ou') or '').strip()
     empty = {
@@ -577,6 +578,10 @@ def host_ldap_check_join_ou(data: dict, *, timeout: float = 5.0) -> dict:
         out['domain_ou'] = specified or None
         return out
 
+    domain = (data.get('domain_name') or '').strip().rstrip('.')
+    search_base = ','.join(
+        f'DC={escape_filter_chars(p)}' for p in domain.split('.') if p
+    )
     tmo = _ldap_timeout_seconds(timeout)
     last_err = None
     for host in targets:
@@ -591,11 +596,23 @@ def host_ldap_check_join_ou(data: dict, *, timeout: float = 5.0) -> dict:
             )
             try:
                 if specified:
+                    # Search from the domain NC with an escaped DN filter.
+                    # Do not pass the user-supplied DN as the LDAP search base
+                    # (CodeQL py/ldap-injection).
+                    if not search_base:
+                        out = dict(empty)
+                        out['skipped'] = True
+                        out['class'] = 'skipped'
+                        out['result'] = 'OU check skipped: no domain search base'
+                        out['domain_ou'] = specified
+                        return out
+                    dn_filter = escape_filter_chars(specified)
                     ok = conn.search(
-                        specified,
-                        '(objectClass=*)',
-                        search_scope=BASE,
+                        search_base,
+                        f'(distinguishedName={dn_filter})',
+                        search_scope=SUBTREE,
                         attributes=['distinguishedName', 'objectClass'],
+                        size_limit=1,
                     )
                     if not ok or not conn.entries:
                         return {
