@@ -3,6 +3,7 @@ import pytest
 
 from app.domain_credentials import (
     classify_ldap_error,
+    escape_user_ldap_dn,
     format_cred_probe_failure,
     host_ldap_check_join_ou,
     is_computers_container_dn,
@@ -256,6 +257,30 @@ def test_is_computers_container_dn():
     assert is_computers_container_dn('cn=computers,DC=LAB,DC=TEST') is True
     assert is_computers_container_dn('OU=Computers,DC=lab,DC=test') is False
     assert is_computers_container_dn('OU=Servers,DC=lab,DC=test') is False
+
+
+def test_escape_user_ldap_dn_round_trips():
+    assert (
+        escape_user_ldap_dn('OU=Servers,DC=lab,DC=test')
+        == 'OU=Servers,DC=lab,DC=test'
+    )
+    assert (
+        escape_user_ldap_dn('ou=Workstations,dc=lab,dc=test')
+        == 'OU=Workstations,DC=lab,DC=test'
+    )
+
+
+def test_escape_user_ldap_dn_rejects_injection_and_garbage():
+    with pytest.raises(Exception):
+        escape_user_ldap_dn('OU=foo)(|(cn=*,DC=lab,DC=test')
+    with pytest.raises(Exception):
+        escape_user_ldap_dn('not a dn')
+
+
+def test_host_ldap_check_join_ou_invalid_dn_does_not_bind():
+    info = host_ldap_check_join_ou(_sample_join_data(domain_ou='not a dn'))
+    assert info['ok'] is False
+    assert info['class'] == 'invalid_ou'
 
 
 def test_host_ldap_ou_rejects_computers_container(monkeypatch):

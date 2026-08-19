@@ -272,10 +272,36 @@ def _ldap_attr_values(entry: Any, name: str) -> list[str]:
     return [str(val)]
 
 
+# Attribute types we accept in a Target OU DN (constants, not user text).
+_ALLOWED_DN_ATTRS = ('OU', 'CN', 'DC', 'L', 'ST', 'C', 'O', 'UID')
+
+
 def is_computers_container_dn(dn: str) -> bool:
     """True when the DN's first RDN is the built-in Computers container."""
     first = (dn or '').split(',', 1)[0].strip()
     return first.lower() == 'cn=computers'
+
+
+def escape_user_ldap_dn(raw: str) -> str:
+    """Parse a user-supplied DN and rebuild it with escaped RDN values.
+
+    ``ldap3.utils.dn.safe_dn`` is a syntax check only; CodeQL ``py/ldap-injection``
+    requires ``escape_rdn`` on each value, and attribute types must come from
+    constants rather than the raw string. Invalid DNs raise.
+    """
+    from ldap3.utils.dn import escape_rdn, parse_dn
+
+    rdns = parse_dn(raw)
+    if not rdns:
+        raise ValueError('empty distinguished name')
+    parts = []
+    for attr, value, _sep in rdns:
+        attr_u = (attr or '').upper()
+        allowed = next((name for name in _ALLOWED_DN_ATTRS if name == attr_u), None)
+        if allowed is None:
+            raise ValueError(f'invalid DN attribute type: {attr!r}')
+        parts.append(f'{allowed}={escape_rdn(value)}')
+    return ','.join(parts)
 
 
 def _entry_object_classes(entry: Any) -> list[str]:
@@ -509,7 +535,6 @@ def host_ldap_check_join_ou(data: dict, *, timeout: float = 5.0) -> dict:
     """
     from ldap3 import ALL, BASE, Connection, Server
     from ldap3.core.exceptions import LDAPException
-    from ldap3.utils.dn import safe_dn
 
     specified = (data.get('domain_ou') or '').strip()
     empty = {
@@ -524,7 +549,7 @@ def host_ldap_check_join_ou(data: dict, *, timeout: float = 5.0) -> dict:
     }
     if specified:
         try:
-            specified = safe_dn(specified)
+            specified = escape_user_ldap_dn(specified)
         except Exception as e:  # noqa: BLE001
             return {
                 'ok': False,
@@ -696,10 +721,12 @@ def host_ldap_validate_ou(data: dict, *, timeout: float = 5.0) -> None:
     """
     ou = (data.get('domain_ou') or '').strip()
     if not _ou_admit_validate_enabled():
+        # Inline newline strip so CodeQL recognizes py/log-injection sanitization.
+        safe_ou = str(ou or '(empty)').replace('\r', '').replace('\n', '')[:200]
         logging.warning(
             'domain_ou admit validation skipped (DOMAIN_JOIN_VALIDATE_OU=false) '
             'ou=%s',
-            ou or '(empty)',
+            safe_ou,
         )
         return
     info = host_ldap_check_join_ou(data, timeout=timeout)
