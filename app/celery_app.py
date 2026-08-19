@@ -417,7 +417,9 @@ def sysprep_workflow_task(self, task_id, data):
                 _ensure_server_product_key(data, new_vmid)
                 # Re-render after MAC attach + optional Server GVLK injection.
                 unattended_xml, setup_ps1, setup_complete = _render_sysprep_files(data)
-                _write_sysprep_files(new_vmid, unattended_xml, setup_ps1, setup_complete)
+                _write_sysprep_files(
+                    new_vmid, unattended_xml, setup_ps1, setup_complete, data=data
+                )
                 update_task_progress(task_id, 85, "Sysprep files written successfully.")
 
                 if _task_cancelled(task_id):

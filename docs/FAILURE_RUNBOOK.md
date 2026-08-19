@@ -13,6 +13,7 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 | Stuck ~88–92% after Sysprep | Shutdown wait missed / hung generalize | Console; agent bounce; orphaned clone VMID in task; worker logs `[sysprep]:` + Panther probe lines |
 | Task `FAILURE` `sysprep_guest_failed` | Sysprep validate failed in guest (AppX/Copilot/unattend) | Task message includes Panther log excerpt; fix template AppX then re-clone |
 | Fail writing unattend / setup before Sysprep | QGA `file-write` ACL / agent overload | Worker log: `agent file-write` / Permission denied — see [QGA file writes](#qga-file-writes) |
+| Console: specialize “answer file is invalid” (`0x80220005`) | `RunSynchronous` `Path` too long (≳259 chars) after hidden-console wrapper | Panther `setuperr.log` names `Order=N/Path`; keep Paths short (`GuestOS-Specialize.cmd`) |
 | `verification failed` / `setup.done missing` | SYSTEM `GuestOS-Setup` task never finished `setup.ps1` | Guest `C:\ProgramData\GuestOS\` markers + transcript; `schtasks /Query /TN GuestOS-Setup`; on **Eval** Server check InstallPid / GVLK regression below |
 | Stuck ~98% on `pending reboot` | Pagefile/domain reboot never finalized `setup.done` | `setup.pending_reboot` present; task still registered and fires at next startup? |
 | Stuck ~98% waiting for `setup.ps1` after Sysprep | OOBE never completed / task never ran (often Eval+GVLK) | Console: product-key / InstallPid `0xC004F015` → see Evaluation vs GVLK; confirm `GuestOS-Setup` task exists |
@@ -22,7 +23,7 @@ Batch-specific controls and limits are in [BULK_PROVISIONING.md](BULK_PROVISIONI
 | DHCP verify fail after `setup.done` | No lease on expected NIC | Bridge/VLAN; DHCP server; MAC match |
 | Domain verify fail / `WARNING: domain join failed` | Join failed (DC, creds, DNS, or empty Target OU / `CN=Computers` on 24H2) | Job **event log** `join-diag:` lines; guest `C:\ProgramData\GuestOS\join-diag.txt`; `setup.done` class (`domain-join-failed:not_an_ou`); `C:\Windows\Debug\NetSetup.LOG`. You do **not** need the join account to collect these. |
 | Host DC/DNS unreachable at admit | GuestOS-host TCP preflight (advisory) | Job continues with `warnings[]`; in-clone probe is the hard gate |
-| Admit fails: computer exists / bad OU (LDAP reachable) | Host LDAP directory checks | Rename host or fix OU/creds |
+| Admit fails: computer exists / bad OU (LDAP reachable) | Host LDAP directory checks | Rename host or set a real `OU=…` Target OU (`CN=Computers` and a blank field that still maps there are refused). Lab-only: `DOMAIN_JOIN_VALIDATE_OU=false` skips the OU reject (not uniqueness) |
 | Task `FAILURE` `domain_cred_probe` before Sysprep | In-clone LDAP/ADSI bind failed | Read `class=` / `guest_ip=` / `username=` in task message; fix VLAN/DHCP/DNS or join account; never re-run Sysprep on that clone |
 | Disk verify fail / `pagefile_pending_reboot` | Volume/pagefile not ready (legacy) | Prefer builds that wait for `setup.done` after pagefile reboot; check serials/letters |
 | Wrong data/pagefile roles on multi-disk template | Plan used bus order without `source_key` | Use disk planner; bind `source_key`; match sizes |

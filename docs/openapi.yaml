@@ -110,7 +110,8 @@ paths:
         dns_servers (Network-step DNS / DC IPs). After a successful bind, the
         specified domain_ou is checked and must be an organizationalUnit
         (CN=Computers is rejected). A blank Target OU looks up the domain
-        default computer location and may return ou_warning for Windows 11 24H2.
+        default computer location and fails with empty_default_container when
+        that location is still CN=Computers (Windows 11 24H2/25H2).
         A failed bind or invalid OU returns HTTP 400 with continue_allowed=true
         and an advisory — the UI may still submit; in-clone QGA probe remains
         authoritative for the guest VLAN path. Never returns passwords.
@@ -137,11 +138,13 @@ paths:
                   type: string
                 dns_servers:
                   type: string
-                domain_ou:
-                  type: string
-                  description: >
-                    Target OU distinguished name. Blank uses the profile OU when
-                    present, otherwise the domain default computer location.
+        domain_ou:
+          type: string
+          description: >
+            Target OU distinguished name. Must be an organizationalUnit (OU=…).
+            CN=Computers is rejected. Blank is filled from the profile OU when
+            present; otherwise admit fails if the domain default is still
+            CN=Computers (unless redircmp already points at an OU).
       responses:
         '200':
           description: Bind succeeded
@@ -507,6 +510,10 @@ components:
           type: string
         domain_ou:
           type: string
+          description: >
+            Required for join_domain when LDAP is reachable: a real OU=…
+            distinguished name. CN=Computers and a blank field whose domain
+            default is still that container are refused.
         remote_id:
           type: string
           description: Key into PVE_REMOTES_JSON (credentials resolved in worker)

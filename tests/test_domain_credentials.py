@@ -282,6 +282,23 @@ def test_host_ldap_ou_rejects_computers_container(monkeypatch):
         )
 
 
+def test_host_ldap_ou_kill_switch_allows_computers_container(app, monkeypatch):
+    from app import domain_credentials as dc
+
+    def _boom(*a, **k):
+        raise AssertionError('LDAP must not run when OU validate is off')
+
+    monkeypatch.setattr(dc, 'host_ldap_check_join_ou', _boom)
+    app.config['DOMAIN_JOIN_VALIDATE_OU'] = False
+    try:
+        with app.app_context():
+            dc.host_ldap_validate_ou(
+                _sample_join_data(domain_ou='CN=Computers,DC=lab,DC=test')
+            )
+    finally:
+        app.config['DOMAIN_JOIN_VALIDATE_OU'] = True
+
+
 def test_host_ldap_ou_accepts_organizational_unit(monkeypatch):
     from app import domain_credentials as dc
 
@@ -343,10 +360,96 @@ def test_host_ldap_check_join_ou_empty_warns_default_container(monkeypatch):
 
     _patch_ldap_conn(monkeypatch, FakeConn)
     info = host_ldap_check_join_ou(_sample_join_data(domain_ou=''))
-    assert info['ok'] is True
+    assert info['ok'] is False
     assert info['class'] == 'empty_default_container'
     assert info['default_computer_container'] == 'CN=Computers,DC=lab,DC=test'
     assert '24H2' in (info.get('warning') or '')
+
+
+def test_host_ldap_validate_ou_rejects_empty_default_container(monkeypatch):
+    from app import domain_credentials as dc
+
+    class FakeConn:
+        def search(self, base, filt, search_scope=None, attributes=None, **k):
+            attrs = list(attributes or [])
+            base = str(base or '')
+            if base == '':
+                self.entries = [
+                    _FakeEntry(dn='', defaultNamingContext='DC=lab,DC=test')
+                ]
+                return True
+            if base.lower() == 'dc=lab,dc=test' and 'wellKnownObjects' in attrs:
+                self.entries = [
+                    _FakeEntry(
+                        dn=base,
+                        wellKnownObjects=[
+                            'B:32:AA312825768811D1ADED00C04FD8D5CD:'
+                            'CN=Computers,DC=lab,DC=test'
+                        ],
+                    )
+                ]
+                return True
+            if base.lower() == 'cn=computers,dc=lab,dc=test':
+                self.entries = [
+                    _FakeEntry(
+                        dn=base,
+                        objectClass=['top', 'container'],
+                        distinguishedName=base,
+                    )
+                ]
+                return True
+            self.entries = []
+            return False
+
+        def unbind(self):
+            pass
+
+    _patch_ldap_conn(monkeypatch, FakeConn)
+    with pytest.raises(ValidationError, match='Target OU is empty'):
+        dc.host_ldap_validate_ou(_sample_join_data(domain_ou=''))
+
+
+def test_host_ldap_validate_ou_empty_ok_when_redircmp(monkeypatch):
+    from app import domain_credentials as dc
+
+    redirected = 'OU=Workstations,DC=lab,DC=test'
+
+    class FakeConn:
+        def search(self, base, filt, search_scope=None, attributes=None, **k):
+            attrs = list(attributes or [])
+            base = str(base or '')
+            if base == '':
+                self.entries = [
+                    _FakeEntry(dn='', defaultNamingContext='DC=lab,DC=test')
+                ]
+                return True
+            if base.lower() == 'dc=lab,dc=test' and 'wellKnownObjects' in attrs:
+                self.entries = [
+                    _FakeEntry(
+                        dn=base,
+                        wellKnownObjects=[
+                            f'B:32:AA312825768811D1ADED00C04FD8D5CD:{redirected}'
+                        ],
+                    )
+                ]
+                return True
+            if base == redirected:
+                self.entries = [
+                    _FakeEntry(
+                        dn=base,
+                        objectClass=['top', 'organizationalUnit'],
+                        distinguishedName=base,
+                    )
+                ]
+                return True
+            self.entries = []
+            return False
+
+        def unbind(self):
+            pass
+
+    _patch_ldap_conn(monkeypatch, FakeConn)
+    dc.host_ldap_validate_ou(_sample_join_data(domain_ou=''))
 
 
 def test_host_ldap_check_join_ou_empty_ok_when_redircmp(monkeypatch):
@@ -548,7 +651,7 @@ def test_api_domain_test_credentials_empty_ou_warns(client, app, monkeypatch):
     def _fake_ou(data, timeout=5.0):
         assert not (data.get('domain_ou') or '').strip()
         return {
-            'ok': True,
+            'ok': False,
             'class': 'empty_default_container',
             'result': 'warning',
             'skipped': False,
@@ -557,7 +660,7 @@ def test_api_domain_test_credentials_empty_ou_warns(client, app, monkeypatch):
             'warning': (
                 'Target OU is empty; domain default computer location is '
                 'CN=Computers,DC=lab,DC=test (a container, not an OU). '
-                'Windows 11 24H2 Add-Computer will fail.'
+                'Windows 11 24H2/25H2 cannot join CN=Computers via -OUPath.'
             ),
         }
 
@@ -575,10 +678,12 @@ def test_api_domain_test_credentials_empty_ou_warns(client, app, monkeypatch):
         },
         headers={'Authorization': 'Bearer tok'},
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 400
     body = resp.get_json()
-    assert body['ok'] is True
-    assert '24H2' in (body.get('ou_warning') or '')
+    assert body['ok'] is False
+    assert body['class'] == 'empty_default_container'
+    assert body.get('continue_allowed') is True
+    assert '24H2' in (body.get('ou_warning') or body.get('advisory') or '')
     assert body.get('default_computer_container') == 'CN=Computers,DC=lab,DC=test'
 
 

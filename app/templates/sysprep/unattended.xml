@@ -2,9 +2,12 @@
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
     <!--
       specialize: hostname/timezone + enable built-in Administrator + register
-      GuestOS-Setup (SYSTEM AtStartup scheduled task). RunSynchronous commands
-      are launched via wscript GuestOS-RunHidden.vbs so cmd.exe does not flash
-      a console on the setup desktop. setup.ps1 is delivered via
+      GuestOS-Setup (SYSTEM AtStartup scheduled task). RunSynchronous Path
+      values must stay short (Win11 specialize rejects Path ≳259 chars with
+      0x80220005 “answer file is invalid”). Long work lives in
+      GuestOS-Specialize.cmd / GuestOS-RegisterSetup.cmd, launched via
+      wscript GuestOS-RunHidden.vbs so cmd.exe does not flash a console.
+      setup.ps1 is delivered via
       HKLM\SOFTWARE\GuestOS SetupPs1B64 (survives specialize cleanup). The task
       extracts and runs it after OOBE — no AutoLogon / FirstLogonCommands.
 
@@ -36,21 +39,11 @@
             <RunSynchronous>
                 <RunSynchronousCommand wcm:action="add">
                     <Order>1</Order>
-                    <Description>Enable built-in Administrator for GuestOS local admin</Description>
-                    <Path>wscript.exe //B //nologo C:\Windows\System32\GuestOS-RunHidden.vbs cmd.exe /c net user Administrator /active:yes</Path>
+                    <Description>GuestOS: enable Administrator, OOBE/UAC specialize regs</Description>
+                    <Path>wscript.exe //B //nologo C:\Windows\System32\GuestOS-RunHidden.vbs C:\Windows\System32\GuestOS-Specialize.cmd</Path>
                 </RunSynchronousCommand>
                 <RunSynchronousCommand wcm:action="add">
                     <Order>2</Order>
-                    <Description>GuestOS: mark unattend-created user for OOBE</Description>
-                    <Path>wscript.exe //B //nologo C:\Windows\System32\GuestOS-RunHidden.vbs cmd.exe /c reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE" /v UnattendCreatedUser /t REG_DWORD /d 1 /f{% if windows_evaluation %} &amp; reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE" /v SetupDisplayedProductKey /t REG_DWORD /d 1 /f{% endif %}</Path>
-                </RunSynchronousCommand>
-                <RunSynchronousCommand wcm:action="add">
-                    <Order>3</Order>
-                    <Description>GuestOS: disable first-logon animation; UAC for built-in Administrator</Description>
-                    <Path>wscript.exe //B //nologo C:\Windows\System32\GuestOS-RunHidden.vbs cmd.exe /c reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableFirstLogonAnimation /t REG_DWORD /d 0 /f &amp; reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v FilterAdministratorToken /t REG_DWORD /d 1 /f</Path>
-                </RunSynchronousCommand>
-                <RunSynchronousCommand wcm:action="add">
-                    <Order>4</Order>
                     <Description>GuestOS: register SYSTEM AtStartup setup task</Description>
                     <Path>wscript.exe //B //nologo C:\Windows\System32\GuestOS-RunHidden.vbs C:\Windows\System32\GuestOS-RegisterSetup.cmd</Path>
                 </RunSynchronousCommand>

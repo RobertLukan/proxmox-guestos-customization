@@ -58,7 +58,10 @@ def test_build_task_options_records_effective_ou():
         'domain_join_method': 'add-computer',
     })
     assert 'domain_ou' not in blank
-    assert 'Target OU (none) — default computer container' in join_summary_lines(blank)
+    assert any(
+        ln.startswith('Target OU (none) — default computer container')
+        for ln in join_summary_lines(blank)
+    )
 
 
 def test_build_task_options_join_path_chips():

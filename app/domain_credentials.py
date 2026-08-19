@@ -298,7 +298,8 @@ def _ou_not_an_ou_message(dn: str, classes: list[str] | None = None) -> str:
     if is_computers_container_dn(dn):
         return (
             f'domain_ou {dn!r} is the default Computers container, not an OU. '
-            'Windows 11 24H2 cannot join there — use a real OU=… distinguished name.'
+            'Windows 11 24H2/25H2 cannot join there (NetJoin 0x2, no downlevel '
+            'retry) — use a real OU=… distinguished name.'
         )
     return (
         f'domain_ou {dn!r} exists but is not an organizationalUnit '
@@ -309,8 +310,10 @@ def _ou_not_an_ou_message(dn: str, classes: list[str] | None = None) -> str:
 def _empty_ou_default_container_warning(dn: str) -> str:
     return (
         f'Target OU is empty; domain default computer location is {dn} '
-        '(a container, not an OU). Windows 11 24H2 Add-Computer will fail — '
-        'set Target OU to a real OU=… DN, or redirect the default with redircmp.'
+        '(a container, not an OU). GuestOS requires a real OU=… distinguished '
+        'name. Windows 11 24H2/25H2 cannot join CN=Computers via -OUPath '
+        '(NetJoin 0x2, no downlevel retry). Set Target OU to an OU=… DN, or '
+        'redirect the default with redircmp.'
     )
 
 
@@ -499,10 +502,10 @@ def host_ldap_check_computer_exists(data: dict, hostname: str, *, timeout: float
 def host_ldap_check_join_ou(data: dict, *, timeout: float = 5.0) -> dict:
     """Inspect the join OU for the credential test / admit checks.
 
-    ``ok`` is False only when a *specified* ``domain_ou`` is invalid or not an
-    organizationalUnit. Empty Target OU stays ``ok``; ``warning`` is set when
-    the domain default computer location is ``CN=Computers`` (24H2 join fails).
-    Unreachable LDAP sets ``skipped`` and does not fail the test.
+    ``ok`` is False when a *specified* ``domain_ou`` is invalid or not an
+    organizationalUnit, or when Target OU is blank and the domain default
+    computer location is still ``CN=Computers``. Unreachable LDAP sets
+    ``skipped`` and does not fail the test.
     """
     from ldap3 import ALL, BASE, Connection, Server
     from ldap3.core.exceptions import LDAPException
@@ -635,6 +638,7 @@ def host_ldap_check_join_ou(data: dict, *, timeout: float = 5.0) -> dict:
                         f'default computer location {default_dn} is an organizationalUnit'
                     )
                     return out
+                out['ok'] = False
                 out['warning'] = _empty_ou_default_container_warning(default_dn)
                 out['class'] = 'empty_default_container'
                 out['result'] = out['warning']
@@ -670,16 +674,45 @@ def host_ldap_check_join_ou(data: dict, *, timeout: float = 5.0) -> dict:
     return out
 
 
+def _ou_admit_validate_enabled() -> bool:
+    """Admit OU check is on unless DOMAIN_JOIN_VALIDATE_OU=false (lab kill-switch)."""
+    try:
+        from flask import current_app
+
+        from app.util import as_bool as _as_bool
+
+        return _as_bool(current_app.config.get('DOMAIN_JOIN_VALIDATE_OU', True), True)
+    except RuntimeError:
+        return True
+
+
 def host_ldap_validate_ou(data: dict, *, timeout: float = 5.0) -> None:
-    """Raise ValidationError if domain_ou is set but missing or not an OU."""
+    """Raise ValidationError if Target OU is missing or not an organizationalUnit.
+
+    A blank Target OU is refused when LDAP is reachable and the domain default
+    computer location is still ``CN=Computers``. ``redircmp`` to a real OU
+    keeps a blank field valid. Lab-only ``DOMAIN_JOIN_VALIDATE_OU=false``
+    skips this check (including an explicit Computers-container DN).
+    """
     ou = (data.get('domain_ou') or '').strip()
-    if not ou:
+    if not _ou_admit_validate_enabled():
+        logging.warning(
+            'domain_ou admit validation skipped (DOMAIN_JOIN_VALIDATE_OU=false) '
+            'ou=%s',
+            ou or '(empty)',
+        )
         return
     info = host_ldap_check_join_ou(data, timeout=timeout)
     if info.get('skipped'):
         return
     if info.get('class') in ('invalid_credentials', 'account_restricted'):
         raise ValidationError(info.get('result') or 'Cannot validate domain_ou')
+    if info.get('class') == 'empty_default_container':
+        raise ValidationError(
+            info.get('result')
+            or info.get('warning')
+            or 'Target OU is empty and the domain default is not an OU'
+        )
     if not info.get('ok'):
         raise ValidationError(
             info.get('result') or f'domain_ou is invalid: {ou!r}'

@@ -68,7 +68,7 @@ def _patch_workflow_side_effects(monkeypatch, *, clone_vmid=9055, fail_clone=Fal
             on_progress('guest agent mock ok')
         return True
 
-    def _write_files(vmid, unattended_xml, setup_ps1, setup_complete):
+    def _write_files(vmid, unattended_xml, setup_ps1, setup_complete, **kwargs):
         calls['write_files'] += 1
         assert unattended_xml
         assert setup_ps1

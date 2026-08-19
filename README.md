@@ -4,7 +4,7 @@
 [![Security](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/security.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/security.yml)
 [![CodeQL](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/codeql.yml/badge.svg)](https://github.com/RobertLukan/proxmox-guestos-customization/actions/workflows/codeql.yml)
 
-**Current release: [2.8.2](VERSION)** — community project for **guest OS customization** of Windows (**Sysprep**) and Linux (**cloud-init**) VMs in Proxmox VE (golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
+**Current release: [2.8.3](VERSION)** — community project for **guest OS customization** of Windows (**Sysprep**) and Linux (**cloud-init**) VMs in Proxmox VE (golden image template → clone → customize), including **bulk Win11 desktop provisioning** with safeguards.
 
 > **Not an official Proxmox product.** Lab-validated matrix (versions + editions):
 > [docs/VALIDATED_MATRIX.md](docs/VALIDATED_MATRIX.md) (Windows Server / Win11 + Linux
@@ -50,7 +50,7 @@ Windows path is **Sysprep-only** (template → clone → guest agent). In-place 
 - Clone Windows templates and run **Clone + Sysprep (customize)** in one job.
 - Clone Linux templates and apply **Proxmox cloud-init** (hostname, DNS, user/SSH/password, optional OS disk grow + detach after ready).
 - Sysprep applies hostname, **timezone**, **locale**, **static** or **DHCP** networking (optional **IPv6**), **workgroup** or AD join, optional multi-NIC on single deploys.
-- Domain join: TCP preflight to DC (53/88/389) when joining; soft warning path if join fails after Sysprep.
+- Domain join: TCP preflight to DC (53/88/389) when joining; Target OU must be a real `OU=…` (`CN=Computers` and a blank field that still maps there are refused at admit); soft warning path if join fails after Sysprep.
 - **Customization Specs** tab: named reusable presets (no admin password stored); apply in the wizard / via `spec_id`.
 - **Bulk Win11 provisioning:** CSV rows (`hostname,ip/prefix[,vlan]`), shared gateway/DNS, batch monitor, idempotent API (single NIC).
 - **Safeguards:** batch/day/inflight limits; Win11 vs Server cores/RAM/disk caps; storage warn@65% / block@80%; live CSV duplicate hostname/IP checks; clone VMID collision retries.
@@ -107,7 +107,7 @@ cp .env.example .env
 # Compose HTTPS: GUESTOS_TLS_HOST, BEHIND_REVERSE_PROXY=True; set PRIMARY_BRIDGE to your PVE bridge.
 chmod +x deploy/caddy/gen-selfsigned.sh
 ./deploy/caddy/gen-selfsigned.sh "$GUESTOS_TLS_HOST"   # lab self-signed; use real certs in prod
-export GUESTOS_VERSION=2.8.2   # pin a release; or omit for :latest
+export GUESTOS_VERSION=2.8.3   # pin a release; or omit for :latest
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 curl -fsS "https://${GUESTOS_TLS_HOST}/api/version"
@@ -165,7 +165,7 @@ when pulling.
 ```bash
 # Connected machine (force amd64 even on Apple Silicon / ARM builders)
 PLATFORM=linux/amd64
-VER=2.8.2
+VER=2.8.3
 docker pull --platform "$PLATFORM" "ghcr.io/robertlukan/proxmox-guestos-customization:${VER}"
 docker pull --platform "$PLATFORM" redis:7-alpine
 # optional if using Compose Caddy:
@@ -235,6 +235,7 @@ Full list and comments: [`.env.example`](.env.example). Summary by necessity:
 | `DOMAIN_PROFILES_JSON` | `{}` | Named AD / DNS / VLAN profiles for domain join |
 | `DOMAIN_JOIN_CRED_PROBE` | `true` | Pre-Sysprep in-clone QGA LDAP/ADSI credential check |
 | `DOMAIN_JOIN_CRED_PROBE_WAIT_SECONDS` | `90` | Max wait for guest IP during cred probe |
+| `DOMAIN_JOIN_VALIDATE_OU` | `true` | Admit refuses `CN=Computers`, other non-OU DNs, and a blank Target OU whose domain default is still that container. Lab-only: `false` to let those through |
 | `DOMAIN_JOIN_ODJ` | `false` | Provision the computer account here and join during Sysprep specialize ([docs](docs/OFFLINE_DOMAIN_JOIN.md)); falls back to `Add-Computer` |
 | `DOMAIN_JOIN_ODJ_TIMEOUT_SECONDS` | `60` | Max wait for `net offlinejoin provision` |
 | `GUESTOS_PATH_PREFIX` | empty | Subpath mount (e.g. `/guestos`); leave empty at site root |

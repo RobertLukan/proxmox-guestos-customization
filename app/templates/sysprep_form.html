@@ -279,14 +279,16 @@
                 <div class="invalid-feedback"></div>
             </div>
             <div class="mb-3">
-                <label for="domain_ou" class="form-label">Target OU (optional)</label>
+                <label for="domain_ou" class="form-label">Target OU</label>
                 <input type="text" class="form-control" id="domain_ou" name="domain_ou" placeholder="OU=Servers,DC=corp,DC=example,DC=com">
                 <div class="form-text">
-                    Must be a real <code>OU=…</code> distinguished name.
-                    <code>CN=Computers</code> is a container, not an OU, and
-                    Windows 11 24H2 cannot join there. Leave blank only for
-                    23H2 / Server 2019, or if <code>redircmp</code> already
-                    points at an OU. Test credentials checks this path.
+                    Required for domain join: a real <code>OU=…</code>
+                    distinguished name. <code>CN=Computers</code> is a
+                    container, not an OU — Windows 11 24H2/25H2 fail NetJoin
+                    <code>0x2</code> (“is not an OU”) and cannot retry
+                    downlevel. Leave blank only if <code>redircmp</code>
+                    already points the default computer location at an OU.
+                    Test credentials checks this path.
                 </div>
             </div>
             <div id="domain_credentials_fields" hidden>
@@ -324,7 +326,8 @@
                     <span class="form-text ms-2" id="test_domain_credentials_status" aria-live="polite"></span>
                     <div class="form-text mt-1" id="test_domain_credentials_dns_hint">
                         Uses DNS servers from the <strong>Network</strong> step, and
-                        checks Target OU when set.
+                        checks Target OU (must be an <code>OU=…</code> unless
+                        <code>redircmp</code> already redirects the default).
                     </div>
                 </div>
             </div>
@@ -336,6 +339,8 @@
                 <div class="form-text mt-1" id="test_domain_profile_dns_hint">
                     Uses DNS from the <strong>Network</strong> step when set; otherwise the profile’s DNS.
                     Also checks Target OU (form value, or the profile OU if the field is blank).
+                    Admit refuses <code>CN=Computers</code> and a blank field whose
+                    domain default is still that container.
                 </div>
             </div>
             <div class="alert alert-warning py-2 mb-3" id="domain_cred_test_continue_note" hidden role="status">

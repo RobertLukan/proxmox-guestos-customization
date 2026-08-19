@@ -7,6 +7,7 @@ PowerShell script.
 """
 import base64
 import json
+import re
 
 import pytest
 
@@ -16,6 +17,7 @@ from app.celery_app import (
     _prepare_domain_join,
     _render_sysprep_files,
 )
+from app.sysprep_render import _specialize_cmd_bytes
 from app.validators import ValidationError
 
 
@@ -66,6 +68,7 @@ def test_unattend_sets_hostname_and_timezone():
     assert '<TimeZone>Central European Standard Time</TimeZone>' in xml
     assert '<InputLocale>en-US</InputLocale>' in xml
     assert 'GuestOS-RegisterSetup.cmd' in xml
+    assert 'GuestOS-Specialize.cmd' in xml
     assert 'GuestOS-RunHidden.vbs' in xml
     assert 'wscript.exe //B //nologo' in xml
     assert 'register SYSTEM AtStartup setup task' in xml
@@ -73,18 +76,26 @@ def test_unattend_sets_hostname_and_timezone():
     assert '<AutoLogon>' not in xml
     assert 'GUESTOS_SETUP_B64' not in xml  # must NOT embed huge blob in unattend (hangs Sysprep)
 
-    assert 'net user Administrator /active:yes' in xml
     assert 'Microsoft-Windows-Setup' not in xml
     assert '<WillShowUI>' not in xml
     assert '<ProductKey>' not in xml
     assert 'SetupDisplayedProductKey' not in xml  # VL / non-eval path
+    # Long specialize work is in GuestOS-Specialize.cmd (Path ≳259 → 0x80220005).
+    assert 'net user Administrator /active:yes' not in xml
+    assert all(
+        'EnableFirstLogonAnimation' not in p and 'FilterAdministratorToken' not in p
+        for p in re.findall(r'<Path>([^<]*)</Path>', xml)
+    )
+    spec = _specialize_cmd_bytes(False).decode()
+    assert 'net user Administrator /active:yes' in spec
+    assert 'UnattendCreatedUser' in spec
+    assert 'SetupDisplayedProductKey' not in spec
+    assert 'EnableFirstLogonAnimation' in spec
+    assert 'FilterAdministratorToken' in spec
     # Client OOBE needs LocalAccounts when AutoLogon is absent (Server-only HideLocalAccountScreen).
-    assert 'UnattendCreatedUser' in xml
     assert '<LocalAccounts>' in xml
     assert '<Name>GuestOSOobe</Name>' in xml
     assert '<HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>' in xml
-    assert 'EnableFirstLogonAnimation' in xml
-    assert 'FilterAdministratorToken' in xml
 
 
 def test_unattend_evaluation_skips_product_key_and_marks_oobe():
@@ -96,16 +107,33 @@ def test_unattend_evaluation_skips_product_key_and_marks_oobe():
         xml, _ps1, _cmd = _render_sysprep_files(data)
     xml = xml.decode()
     assert '<ProductKey>' not in xml
-    assert 'SetupDisplayedProductKey' in xml
-    assert 'UnattendCreatedUser' in xml
-    assert 'mark unattend-created user for OOBE' in xml
+    assert 'SetupDisplayedProductKey' not in xml
+    assert 'GuestOS-Specialize.cmd' in xml
+    spec = _specialize_cmd_bytes(True).decode()
+    assert 'SetupDisplayedProductKey' in spec
+    assert 'UnattendCreatedUser' in spec
+    assert 'mark unattend-created user for OOBE' not in xml
+    assert 'GuestOS: enable Administrator, OOBE/UAC specialize regs' in xml
     assert 'GuestOS-RegisterSetup.cmd' in xml
     assert '<LocalAccounts>' in xml
     assert '<Name>GuestOSOobe</Name>' in xml
     assert '<AutoLogon>' not in xml
     assert '<FirstLogonCommands>' not in xml
-    assert 'EnableFirstLogonAnimation' in xml
-    assert 'FilterAdministratorToken' in xml
+    assert 'EnableFirstLogonAnimation' in spec
+    assert 'FilterAdministratorToken' in spec
+
+
+def test_unattend_runsynchronous_paths_fit_specialize_limit():
+    for evaluation in (False, True):
+        data = _base_data()
+        data['windows_evaluation'] = evaluation
+        with flask_app.app_context():
+            _validate_sysprep_network(data)
+            xml, _ps1, _cmd = _render_sysprep_files(data)
+        paths = re.findall(r'<Path>([^<]*)</Path>', xml.decode())
+        assert paths, evaluation
+        for p in paths:
+            assert len(p) <= 259, (evaluation, len(p), p)
 
 
 def test_unattend_includes_product_key_when_set():
@@ -368,6 +396,7 @@ def test_write_sysprep_files_registers_task_launcher(monkeypatch):
         sr._write_sysprep_files(1, b'<xml/>', b'# ps1', b'@echo off')
     assert r'C:\Windows\System32\GuestOS-FirstLogon.cmd' in written
     assert r'C:\Windows\System32\GuestOS-RegisterSetup.cmd' in written
+    assert r'C:\Windows\System32\GuestOS-Specialize.cmd' in written
     assert r'C:\Windows\System32\GuestOS-RegisterSetup.ps1' in written
     assert r'C:\Windows\System32\GuestOS-RunHidden.vbs' in written
     assert r'C:\Windows\Setup\Scripts\SetupComplete.cmd' in written

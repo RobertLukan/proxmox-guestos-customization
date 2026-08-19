@@ -14,6 +14,27 @@ profile select is used for join credentials only.
 For the full **OS / edition** lab matrix (not only AD), see
 [VALIDATED_MATRIX.md](VALIDATED_MATRIX.md).
 
+## Domain join restrictions (2.8.3+)
+
+Target OU must be a real `OU=…` distinguished name. These rules are admit-time
+when LDAP is reachable from the GuestOS host (`DOMAIN_JOIN_VALIDATE_OU`,
+default on):
+
+| Target OU | Guest `Add-Computer` | Admit |
+|-----------|----------------------|--------|
+| Real `OU=Workstations,…` (or any `organizationalUnit`) | Joins that OU | Allowed |
+| Explicit `CN=Computers,…` | Windows 11 **24H2/25H2** NetJoin **0x2** (“is not an OU”); **cannot retry downlevel**. Same as production `SCCMJoin`. | **Refused** |
+| Blank | Omits `-OUPath`. Some builds still create the account in `CN=Computers` via SAMR/downlevel (lab 25H2). That is **not** a production path (quota, GPO, wrong OU). | **Refused** when the domain default is still `CN=Computers` |
+| Blank after `redircmp` to an OU | Joins the redirected OU | Allowed |
+
+Lab-only kill-switch: `DOMAIN_JOIN_VALIDATE_OU=false` admits a Computers-container
+DN or a blank field so you can reproduce the guest 0x2 path. Do not set this in
+production.
+
+The join account does not need to be Domain Admin. It needs create-computer
+rights in the **target OU** (and, for Offline Domain Join, from the GuestOS host).
+
+
 ## Lab status (2026-08-16 — GuestOS 2.8.0)
 
 | Check | Result |
@@ -68,19 +89,23 @@ Credential layers:
    reach AD. Continuing is allowed; in-clone probe is the hard gate.
 3. **Admit LDAP** (best-effort from GuestOS host): refuse if the computer account
    for `hostname` already exists **when LDAP is reachable**; validate `domain_ou`
-   DN when set and reachable. Unreachable LDAP skips uniqueness/OU with a log
-   warning (does not block admit). Wrong join password while LDAP *is* reachable
-   still fails admit.
+   when reachable. A specified DN must be an `organizationalUnit`
+   (`CN=Computers` is rejected). A blank Target OU is refused when the domain
+   default computer location is still `CN=Computers`. Kill-switch:
+   `DOMAIN_JOIN_VALIDATE_OU=false` (lab only — guest `Add-Computer -OUPath`
+   can then hit 24H2/25H2 NetJoin `0x2`). Unreachable LDAP skips uniqueness/OU
+   with a log warning (does not block admit). Wrong join password while LDAP
+   *is* reachable still fails admit.
 4. **Profile / manual Test credentials** (`POST /api/domain/test_credentials`) —
    host LDAP bind from the GuestOS instance, then an OU check on the same bind
    path. **Profile credentials always bind to that profile's `dns_servers`**
    (never request DNS). Manual credentials use Network-step DNS (required for a
    meaningful manual test). After a successful bind:
    - a specified `domain_ou` must exist and be an `organizationalUnit`
-     (`CN=Computers` is rejected — Windows 11 24H2 cannot join a container);
+     (`CN=Computers` is rejected — Windows 11 24H2/25H2 cannot join a container);
    - a blank Target OU looks up the domain default computer location
-     (`wellKnownObjects` / `redircmp`) and returns `ou_warning` when it is
-     still `CN=Computers`.
+     (`wellKnownObjects` / `redircmp`) and fails the test (`empty_default_container`)
+     when it is still `CN=Computers`.
    A failed UI test is advisory only — the wizard can continue; failure often means
    routing/firewall between GuestOS and DNS/AD, not necessarily bad passwords.
    The in-clone probe remains authoritative for the guest network path.

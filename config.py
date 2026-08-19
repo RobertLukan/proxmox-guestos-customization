@@ -138,6 +138,11 @@ ALLOW_FAST_WAITS = _env_bool('ALLOW_FAST_WAITS', False)
 
 # Pre-Sysprep in-clone AD credential probe (QGA LDAP/ADSI bind). Default on.
 DOMAIN_JOIN_CRED_PROBE = _env_bool('DOMAIN_JOIN_CRED_PROBE', True)
+# Admit-time Target OU must be an organizationalUnit (rejects CN=Computers and
+# a blank field whose domain default is still that container). Lab-only
+# kill-switch: false lets those DNs through so guest Add-Computer can
+# reproduce the 24H2/25H2 NetJoin 0x2 / "is not an OU" path. Default on.
+DOMAIN_JOIN_VALIDATE_OU = _env_bool('DOMAIN_JOIN_VALIDATE_OU', True)
 try:
     DOMAIN_JOIN_CRED_PROBE_WAIT_SECONDS = max(
         30, int(os.environ.get('DOMAIN_JOIN_CRED_PROBE_WAIT_SECONDS') or '90')

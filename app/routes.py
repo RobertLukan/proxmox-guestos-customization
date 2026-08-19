@@ -1526,11 +1526,12 @@ def api_domain_test_credentials():
             domain_profile=payload.get('domain_profile'),
             domain_ou=payload.get('domain_ou'),
         )
-        if payload['class'] in ('not_an_ou', 'invalid_ou'):
+        if payload['class'] in ('not_an_ou', 'invalid_ou', 'empty_default_container'):
             payload['advisory'] = (
                 'Target OU is not a usable organizationalUnit. '
-                'Windows 11 24H2 cannot join CN=Computers. Set a real OU=… DN. '
-                'You may still submit, but domain join will fail on 24H2.'
+                'Windows 11 24H2/25H2 cannot join CN=Computers '
+                '(NetJoin 0x2, no downlevel retry). Set a real OU=… DN. '
+                'You may still submit, but domain join will fail on those builds.'
             )
         else:
             payload['advisory'] = (

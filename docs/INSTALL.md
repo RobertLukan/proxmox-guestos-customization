@@ -157,8 +157,8 @@ GuestOS is an automation sidecar. Privilege planning has three layers:
 | **Operators** | Browser / PDM | GuestOS UI login or PDM login only — **no** PVE password, **no** API tokens. |
 
 Optional **AD join** credentials (`DOMAIN_PROFILES_JSON`) are separate from PVE
-ACLs: that account only needs rights to join computers to the domain (and OU if
-you set `domain_ou`).
+ACLs: that account only needs rights to create computer objects in the **target
+OU** (set `domain_ou` to a real `OU=…` DN; do not use `CN=Computers`).
 
 #### What the API user does
 
@@ -263,7 +263,7 @@ Compose **v2** required (see [Packages / tools](#packages--tools-guestos-host)).
 **Preferred — pull from GHCR** (image published on each `v*` release):
 
 ```bash
-export GUESTOS_VERSION=2.8.2   # pin; both 2.8.2 and v2.8.2 tags exist on GHCR
+export GUESTOS_VERSION=2.8.3   # pin; both 2.8.3 and v2.8.3 tags exist on GHCR
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 # Podman: podman compose -f docker-compose.yml -f docker-compose.ghcr.yml …

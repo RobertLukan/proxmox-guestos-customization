@@ -30,7 +30,7 @@ licensing advice, or production certification.
 | Windows Server **2019** | **Standard Evaluation** (`ServerStandardEval`) | `windowsserver2019` | OK | OK | OK | OK | Eval path (no VL GVLK); DHCP+AD+disks reconfirmed 2.7.1; static `192.168.123.210` + AD+disks 2026-08-14 (`S19ST224349`) |
 | Windows Server **2022** | **Standard** volume-license (`ServerStandard`) | `windowsserver2022` | OK | — | OK | OK | Auto GVLK for OOBE; reconfirmed 2.7.1 (DHCP+AD+disks) |
 | Windows Server **2025** | **Datacenter Evaluation** | `windowsserver2025` | — | OK | — | — | Eval path; static IP smoke 2026-08 |
-| Windows **11** | Desktop / VDI template | `windows11` | OK | OK | OK | — | Disks N/A (Win11); DHCP+AD reconfirmed 2.7.1; static `192.168.123.211` + AD 2026-08-16 (`W11ST191727`, ODJ). **25H2** (`26200.8894`) DHCP+AD empty OU 2026-08-17 (`W25E190624` VMID 123, `add-computer`) |
+| Windows **11** | Desktop / VDI template | `windows11` | OK | OK | OK | — | Disks N/A (Win11); DHCP+AD reconfirmed 2.7.1; static `192.168.123.211` + AD 2026-08-16 (`W11ST191727`, ODJ). **25H2** (`26200.8894`) DHCP+AD empty OU 2026-08-17 (`W25E190624`) and 2026-08-18 (`W25SJ193708`, `sccmjoin`) joined `CN=Computers` via downlevel (not a production path). Explicit Target OU `CN=Computers` 2026-08-18 (`W25CN201831`) **failed** NetJoin `0x2` / “is not an OU”. From 2.8.3 admit requires a real `OU=…`. |
 
 Lab smoke helpers: `scripts/lab_full_feature_smoke.py` (see [AD_VALIDATION.md](AD_VALIDATION.md)).
 

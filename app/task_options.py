@@ -178,7 +178,10 @@ def join_summary_lines(options: dict | None) -> list[str]:
                 'downlevel. Use a real OU=… DN.'
             )
     else:
-        lines.append('Target OU (none) — default computer container')
+        lines.append(
+            'Target OU (none) — default computer container '
+            '(not a production path; set a real OU=… DN)'
+        )
     if o.get('host_dc_reachable') is True:
         tgt = (o.get('host_dc_target') or '').strip()
         lines.append('GuestOS host DC reachable' + (f' ({tgt})' if tgt else ''))

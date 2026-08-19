@@ -3,9 +3,10 @@
 **Audience:** operators and reviewers comparing Proxmox GuestOS customization to
 vSphere Guest Customization Specifications.
 
-**GuestOS baseline:** 2.8.2 (SYSTEM scheduled task `GuestOS-Setup`;
+**GuestOS baseline:** 2.8.3 (SYSTEM scheduled task `GuestOS-Setup`;
 no AutoLogon; host DC preflight advisory; in-clone cred probe is the hard gate;
-failed joins write `join-diag.txt` / job Target OU).
+admit requires a real `OU=…` Target OU; failed joins write `join-diag.txt` /
+job Target OU).
 
 **VMware baseline:** vSphere **Guest Customization Specification** for Windows
 (Sysprep / unattend) and Linux (VMware Tools / scripting), as documented in
@@ -89,7 +90,7 @@ flowchart LR
 | AutoLogon as Administrator | Optional (`auto_logon` / count) | **Removed** — SYSTEM task runner | **Ahead** (security); **Different** (ops) |
 | FirstLogonCommands / GuiRunOnce | Supported in Spec / API | Not used; `GuestOS-Setup` replaces that role | **Different** |
 | Workgroup | Yes | Yes | **Parity** |
-| Domain join + OU | Yes (domain + credentials + OU path) | Yes (ODJ blob at specialize, else `Add-Computer`; optional `domain_ou`) | **Parity** (outcome); join **mechanism** **Ahead** (no credentials in the answer file) — [Appendix A](#appendix-a-unattendedjoin-vs-late-add-computer) |
+| Domain join + OU | Yes (domain + credentials + OU path) | Yes (ODJ blob at specialize, else `Add-Computer`; **required** real `OU=…` `domain_ou`) | **Parity** (outcome); join **mechanism** **Ahead** (no credentials in the answer file) — [Appendix A](#appendix-a-unattendedjoin-vs-late-add-computer) |
 | DHCP / static IPv4 + DNS | Yes | Yes | **Parity** |
 | Multi-NIC | Yes | Yes (≤8; MAC then order) | **Parity** (code); lab matrix incomplete for Windows multi-NIC |
 | IPv6 | Spec-dependent | Supported in validators / setup | **Parity** (code); limited Windows lab |
@@ -109,7 +110,7 @@ validation / orchestration.
 
 | When | What | Source | Fail severity |
 |------|------|--------|----------------|
-| Domain step (optional) | **Test credentials** — LDAP bind using Network DNS, then Target OU (`organizationalUnit`; warns if default is `CN=Computers`) | GuestOS host → DC | **Advisory** — wizard can continue |
+| Domain step (optional) | **Test credentials** — LDAP bind using Network DNS, then Target OU (`organizationalUnit`; fails if default is `CN=Computers`) | GuestOS host → DC | **Advisory** — wizard can continue |
 | Admit (start job) | Username form (UPN / `DOMAIN\user`); required password | GuestOS app | **Critical** — HTTP 400, no clone |
 | Admit | TCP 53/88/389 to `dns_servers` | GuestOS host → DC/DNS | **Advisory** — `warnings[]`; job still starts (guest VLAN may reach AD) |
 | Admit | LDAP: hostname uniqueness + OU DN | GuestOS host → DC | **Critical** if LDAP is reachable (collision / bad OU / bad password). **Skipped** (log warning) if LDAP unreachable |

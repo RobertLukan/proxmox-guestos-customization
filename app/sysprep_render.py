@@ -348,6 +348,34 @@ _REGISTER_SETUP_CMD = (
     'exit /b %ERRORLEVEL%\r\n'
 )
 
+# Keep RunSynchronous Path short: inline `reg add` + wscript wrapper exceeded
+# the specialize SMI limit (~259 chars → 0x80220005 "answer file is invalid").
+_SPECIALIZE_CMD_HEAD = (
+    '@echo off\r\n'
+    'net user Administrator /active:yes\r\n'
+    'reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Setup\\OOBE" '
+    '/v UnattendCreatedUser /t REG_DWORD /d 1 /f\r\n'
+)
+_SPECIALIZE_CMD_EVAL = (
+    'reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Setup\\OOBE" '
+    '/v SetupDisplayedProductKey /t REG_DWORD /d 1 /f\r\n'
+)
+_SPECIALIZE_CMD_TAIL = (
+    'reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" '
+    '/v EnableFirstLogonAnimation /t REG_DWORD /d 0 /f\r\n'
+    'reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" '
+    '/v FilterAdministratorToken /t REG_DWORD /d 1 /f\r\n'
+    'exit /b 0\r\n'
+)
+
+
+def _specialize_cmd_bytes(windows_evaluation: bool) -> bytes:
+    body = _SPECIALIZE_CMD_HEAD
+    if windows_evaluation:
+        body += _SPECIALIZE_CMD_EVAL
+    body += _SPECIALIZE_CMD_TAIL
+    return body.encode('ascii')
+
 # wscript.exe is a Windows-subsystem host (no console). Run style 0 hides cmd.
 _RUN_HIDDEN_VBS = '\r\n'.join([
     "' GuestOS: run a command with no visible window and wait.",
@@ -371,7 +399,9 @@ _RUN_HIDDEN_VBS = '\r\n'.join([
 ])
 
 
-def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
+def _write_sysprep_files(
+    vmid, unattended_xml, setup_ps1, setup_complete, *, data=None
+):
     """Write the answer file and persist setup.ps1 for the SYSTEM setup task.
 
     Loose files under ``System32\\Sysprep`` / ``ProgramData\\GuestOS`` are often
@@ -395,6 +425,11 @@ def _write_sysprep_files(vmid, unattended_xml, setup_ps1, setup_complete):
         vmid,
         _REGISTER_SETUP_CMD.encode('ascii'),
         r'C:\Windows\System32\GuestOS-RegisterSetup.cmd',
+    )
+    write_file_to_guest(
+        vmid,
+        _specialize_cmd_bytes(_as_bool((data or {}).get('windows_evaluation'))),
+        r'C:\Windows\System32\GuestOS-Specialize.cmd',
     )
     write_file_to_guest(
         vmid,
