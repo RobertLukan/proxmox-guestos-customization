@@ -561,8 +561,32 @@ def get_vm_nic_macs(vmid):
     return macs
 
 
+def _parse_pve_net_options(existing_net):
+    """Parse a PVE ``netN`` value into ``{key: value}`` (first token is model[=mac])."""
+    opts = {}
+    for part in str(existing_net or '').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if '=' in part:
+            key, val = part.split('=', 1)
+            opts[key.strip().lower()] = val.strip()
+        else:
+            opts[part.lower()] = True
+    return opts
+
+
+# Options GuestOS does not expose in the wizard; copy them from the template NIC.
+_NET_PRESERVE_KEYS = ('mtu', 'firewall', 'queues', 'rate', 'link_down', 'trunks')
+
+
 def _build_net_config(bridge, vlan, existing_net=''):
-    """Build a virtio netN config string, preserving MAC when present."""
+    """Build a virtio netN config string, preserving MAC and extra NIC options.
+
+    Clone overwrites bridge/VLAN from the wizard. MTU, firewall, queues, rate,
+    link_down, and trunks stay from the template ``netN`` line so virtio does
+    not fall back to a non-1500 MTU after customize.
+    """
     from app.validators import ValidationError, validate_bridge
 
     try:
@@ -578,6 +602,18 @@ def _build_net_config(bridge, vlan, existing_net=''):
         net_config = f'virtio,bridge={bridge}'
     if vlan:
         net_config += f',tag={vlan}'
+    existing = _parse_pve_net_options(existing_net)
+    extras = []
+    for key in _NET_PRESERVE_KEYS:
+        if key not in existing:
+            continue
+        val = existing[key]
+        if val is True:
+            extras.append(key)
+        else:
+            extras.append(f'{key}={val}')
+    if extras:
+        net_config += ',' + ','.join(extras)
     return net_config
 
 

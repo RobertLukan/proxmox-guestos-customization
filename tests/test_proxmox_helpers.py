@@ -80,6 +80,26 @@ def test_is_windows_ostype():
     assert pm.is_windows_ostype('') is False
 
 
+def test_build_net_config_preserves_mtu_and_extras():
+    existing = (
+        'virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr1,firewall=1,mtu=1500,queues=2'
+    )
+    got = pm._build_net_config('vmbr0', 100, existing)
+    assert got.startswith('virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0,tag=100')
+    assert 'mtu=1500' in got
+    assert 'firewall=1' in got
+    assert 'queues=2' in got
+    assert 'bridge=vmbr1' not in got
+
+
+def test_build_net_config_plain_template_has_no_mtu():
+    got = pm._build_net_config(
+        'vmbr0', None, 'virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0'
+    )
+    assert got == 'virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0'
+    assert 'mtu=' not in got
+
+
 class _FakeConfigGet:
     def __init__(self, cfg):
         self._cfg = cfg
