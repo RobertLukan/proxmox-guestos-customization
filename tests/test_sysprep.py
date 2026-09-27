@@ -373,6 +373,11 @@ def test_setup_ps1_enables_admin_and_removes_other_local_users():
     assert "Enable-LocalUser -Name 'Administrator'" in ps1
     assert 'Remove-LocalUser' in ps1
     assert 'keepLocalUsers' in ps1
+    keep_block = ps1.split('keepLocalUsers')[1].split('Get-LocalUser')[0]
+    assert 'defaultuser0' not in keep_block
+    assert 'GuestOSOobe' not in keep_block
+    assert r"C:\Users" in ps1
+    assert r'^defaultuser\d+$' in ps1
 
 
 def test_write_sysprep_files_registers_task_launcher(monkeypatch):
@@ -456,6 +461,37 @@ def test_multi_nic_second_without_gateway():
     nics = json.loads(base64.b64decode(blob_line.split("'", 2)[1]))
     assert nics[1]['gateway'] == ''
     assert 'if ($gateway)' in ps1.decode()
+
+
+# --- Network-ready wait -----------------------------------------------------
+
+def test_setup_ps1_skips_network_ready_wait_for_static_only_plan():
+    """Static-only NIC plans skip the pre-config wait (no routable IP yet)."""
+    data = _base_data()
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        assert data['use_dhcp'] is False
+        assert all(not n['use_dhcp'] for n in data['nics'])
+        _xml, ps1, _cmd = _render_sysprep_files(data)
+    ps1 = ps1.decode()
+    assert 'function Wait-GuestOsNetworkReady' in ps1
+    assert 'static plan; skipping network-ready wait' in ps1
+    assert re.search(r'(?m)^Wait-GuestOsNetworkReady\s*$', ps1) is None
+
+
+def test_setup_ps1_keeps_network_ready_wait_for_dhcp_plan():
+    """DHCP plans still wait for a lease before applying NIC config."""
+    data = _base_data()
+    data['network_mode'] = 'dhcp'
+    data.pop('ip_address')
+    data.pop('gateway')
+    with flask_app.app_context():
+        _validate_sysprep_network(data)
+        assert data['use_dhcp'] is True
+        _xml, ps1, _cmd = _render_sysprep_files(data)
+    ps1 = ps1.decode()
+    assert 'static plan; skipping network-ready wait' not in ps1
+    assert re.search(r'(?m)^Wait-GuestOsNetworkReady\s*$', ps1)
 
 
 # --- DHCP mode --------------------------------------------------------------

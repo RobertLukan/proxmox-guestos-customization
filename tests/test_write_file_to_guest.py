@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 
 from app import proxmox as proxmox_mod
-from app.proxmox import write_file_to_guest
+from app.proxmox import _guest_exec_finished, write_file_to_guest
 
 
 def test_write_file_to_guest_uses_native_file_write(monkeypatch):
@@ -132,8 +132,47 @@ def test_write_file_to_guest_retries_share_violation(monkeypatch):
     monkeypatch.setattr(proxmox_mod, '_agent_file_write', _fw)
     monkeypatch.setattr(proxmox_mod, '_write_file_to_guest_via_exec_once', _once)
     monkeypatch.setattr(proxmox_mod, '_unlock_guest_path', _unlock)
+    monkeypatch.setattr(proxmox_mod, '_restart_qemu_guest_agent', lambda *a, **k: None)
     monkeypatch.setattr(proxmox_mod.time, 'sleep', lambda *a, **k: None)
 
     write_file_to_guest(42, b'hello-guestos', r'C:\Windows\System32\GuestOS-RegisterSetup.ps1')
     assert calls['write'] == 2
     assert calls['unlock'] == 1
+
+
+def test_guest_exec_finished_waits_for_exitcode():
+    assert _guest_exec_finished({'exited': 0}) == (False, None)
+    assert _guest_exec_finished({'exited': 1}) == (True, None)
+    assert _guest_exec_finished({'exited': 1, 'exitcode': 0}) == (True, 0)
+    assert _guest_exec_finished({'exited': 1, 'exitcode': 1}) == (True, 1)
+
+
+def test_write_file_to_guest_retries_native_write_after_share_violation(monkeypatch):
+    calls = {'write': 0, 'restart': 0, 'exec': 0}
+
+    monkeypatch.setattr(proxmox_mod, '_ensure_guest_parent_dir', lambda *a, **k: None)
+
+    def _fw(vmid, raw, file_path, **kwargs):
+        calls['write'] += 1
+        if calls['write'] == 1:
+            raise Exception(
+                "500 Internal Server Error: Agent error: failed to open file "
+                "'C:\\Windows\\System32\\GuestOS-Specialize.cmd': The process "
+                "cannot access the file because it is being used by another process."
+            )
+
+    def _restart(vmid):
+        calls['restart'] += 1
+
+    monkeypatch.setattr(proxmox_mod, '_agent_file_write', _fw)
+    monkeypatch.setattr(proxmox_mod, '_restart_qemu_guest_agent', _restart)
+    monkeypatch.setattr(
+        proxmox_mod,
+        'run_command_in_guest',
+        lambda *a, **k: calls.__setitem__('exec', calls['exec'] + 1),
+    )
+
+    write_file_to_guest(112, b'@echo off\r\n', r'C:\Windows\System32\GuestOS-Specialize.cmd')
+    assert calls['write'] == 2
+    assert calls['restart'] == 1
+    assert calls['exec'] == 0

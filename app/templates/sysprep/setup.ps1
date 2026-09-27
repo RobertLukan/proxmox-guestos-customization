@@ -235,7 +235,11 @@ try {
 
 try {
 
+{% if nics is defined and nics and not (nics | selectattr('use_dhcp') | list) %}
+Write-Output "setup.ps1: static plan; skipping network-ready wait."
+{% else %}
 Wait-GuestOsNetworkReady
+{% endif %}
 
 {% if manage_disks and disk_plan_b64 %}
 # --- Disk reconcile (optional) --------------------------------------------
@@ -642,7 +646,8 @@ Write-Output "setup.ps1: Network configuration complete."
 # (e.g. an interactive "rl" user). Unattend also creates GuestOSOobe so client
 # OOBE can finish without AutoLogon. Enable the built-in Administrator and drop
 # every other local account so clones boot to a clean admin-only local state.
-# Built-in / system accounts are left alone.
+# Built-in / system accounts are left alone. Windows OOBE leftover
+# defaultuser0 is removed (it is not a GuestOS account).
 Write-Output "setup.ps1: Enabling built-in Administrator account."
 try {
     Enable-LocalUser -Name 'Administrator' -ErrorAction Stop
@@ -655,8 +660,7 @@ $keepLocalUsers = @(
     'Administrator',
     'Guest',
     'DefaultAccount',
-    'WDAGUtilityAccount',
-    'defaultuser0'
+    'WDAGUtilityAccount'
 )
 Get-LocalUser | Where-Object { $keepLocalUsers -notcontains $_.Name } | ForEach-Object {
     Write-Output "setup.ps1: Removing leftover local user '$($_.Name)'."
@@ -666,6 +670,13 @@ Get-LocalUser | Where-Object { $keepLocalUsers -notcontains $_.Name } | ForEach-
         Write-Output "setup.ps1: Could not remove '$($_.Name)': $($_.Exception.Message)"
     }
 }
+# Windows OOBE may leave defaultuser0 (disabled) plus a profile folder.
+Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^defaultuser\d+$' } |
+    ForEach-Object {
+        Write-Output "setup.ps1: Removing leftover OOBE profile $($_.FullName)."
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
 
 # Scrub plaintext admin password from answer files left on disk (Winlogon
 # DefaultPassword should already be absent without AutoLogon).

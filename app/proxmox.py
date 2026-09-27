@@ -1615,6 +1615,20 @@ def _is_share_violation(exc):
     )
 
 
+def _guest_exec_finished(status):
+    """Return ``(finished, exitcode)`` for one ``exec-status`` payload.
+
+    ``exitcode`` is ``None`` when the agent has set ``exited`` but has not
+    reported a code yet. Callers must not index a missing ``exitcode``: that
+    raised ``KeyError('exitcode')`` and aborted the file-unlock retry.
+    """
+    if not status.get('exited'):
+        return False, None
+    if 'exitcode' not in status or status.get('exitcode') is None:
+        return True, None
+    return True, status.get('exitcode')
+
+
 def _unlock_guest_path(vmid, file_path):
     """Drop leftover GuestOS-Setup / PowerShell that may be locking ``file_path``.
 
@@ -1630,7 +1644,7 @@ def _unlock_guest_path(vmid, file_path):
         "Unregister-ScheduledTask -TaskName 'GuestOS-Setup' -Confirm:$false; "
         f"$leaf='{leaf}'; "
         "Get-CimInstance Win32_Process | Where-Object { "
-        "  $_.Name -match 'powershell|pwsh' -and $_.CommandLine "
+        "  $_.Name -match 'powershell|pwsh|cmd|wscript|cscript' -and $_.CommandLine "
         "  -and $_.CommandLine -like ('*'+$leaf+'*') "
         "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
         "Start-Sleep -Seconds 1; "
@@ -1638,6 +1652,31 @@ def _unlock_guest_path(vmid, file_path):
         retries=2,
         retry_delay=3,
     )
+
+
+def _restart_qemu_guest_agent(vmid):
+    """Restart Windows qemu-ga so a timed-out file-write drops its handle.
+
+    ``agent/file-write`` truncates the destination as soon as it opens it. If
+    that call times out, qemu-ga can keep the handle and later overwrites fail
+    with a sharing violation. The restart is detached because stopping the
+    service kills the agent that launched it.
+    """
+    proxmox = get_proxmox_api()
+    node = _get_vm_node(vmid)
+    if not node:
+        raise Exception(f"VM {vmid} not found.")
+    # ``start`` treats the first quoted argument as a window title.
+    command = (
+        'cmd.exe /c start /b "" powershell.exe -NoProfile -WindowStyle Hidden '
+        '-Command "Restart-Service -Name QEMU-GA -Force"'
+    )
+    logging.warning(
+        'VM %s: restarting QEMU guest agent to release a locked file', vmid,
+    )
+    proxmox.nodes(node).qemu(vmid).agent.exec.post(command=command)
+    time.sleep(3)
+    wait_for_guest_agent(vmid, timeout=90, stable_for=8, poll=4, drop_reset=24)
 
 
 def _write_file_to_guest_via_exec_once(vmid, raw, file_path):
@@ -1702,6 +1741,13 @@ def _write_file_to_guest_via_exec(vmid, raw, file_path):
                 logging.warning(
                     'VM %s: unlock %s failed: %s', vmid, file_path, unlock_err,
                 )
+            if attempt == 1:
+                try:
+                    _restart_qemu_guest_agent(vmid)
+                except Exception as restart_err:
+                    logging.warning(
+                        'VM %s: guest-agent restart failed: %s', vmid, restart_err,
+                    )
             time.sleep(2 * attempt)
     raise last_err
 
@@ -1748,6 +1794,25 @@ def write_file_to_guest(vmid, content, file_path):
                 e,
             )
     except Exception as e:
+        if _is_share_violation(e):
+            logging.warning(
+                "VM %s: %s locked during file-write (%s); releasing guest-agent handle",
+                vmid,
+                file_path,
+                e,
+            )
+            try:
+                _restart_qemu_guest_agent(vmid)
+                if len(raw) <= _FILE_WRITE_MAX:
+                    _agent_file_write(vmid, raw, file_path)
+                    return
+            except Exception as retry_err:
+                logging.warning(
+                    "VM %s: rewrite after guest-agent restart failed: %s",
+                    vmid,
+                    retry_err,
+                )
+                e = retry_err
         if _is_transient_agent_error(e):
             raise
         logging.warning(
@@ -1806,15 +1871,27 @@ def _run_command_in_guest_once(vmid, command):
     result = proxmox.nodes(node).qemu(vmid).agent.exec.post(command=command)
     pid = result['pid']
 
+    missing_exitcode = 0
     while True:
         status = proxmox.nodes(node).qemu(vmid).agent('exec-status').get(pid=pid)
-        if status.get('exited'):
-            if status.get('exitcode') != 0:
+        finished, exitcode = _guest_exec_finished(status)
+        if finished and exitcode is None:
+            missing_exitcode += 1
+            if missing_exitcode >= 5:
                 raise Exception(
-                    f"Command failed with exit code {status['exitcode']}: "
+                    "Command exited without an exit code: "
+                    f"{status.get('err-data')}"
+                )
+            time.sleep(1)
+            continue
+        if finished:
+            if exitcode != 0:
+                raise Exception(
+                    f"Command failed with exit code {exitcode}: "
                     f"{status.get('err-data')}"
                 )
             return status.get('out-data')
+        missing_exitcode = 0
         time.sleep(2)
 
 
