@@ -246,3 +246,31 @@ def test_render_vendor_data_with_data_disk():
     assert 'disk_setup:' in text
     assert 'guestos-data1' in text
     assert '/data' in text
+
+
+def test_prepare_linux_payload_packages():
+    data = {
+        'hostname': 'pkg-01',
+        'cores': 2,
+        'ram': 2048,
+        'network_mode': 'dhcp',
+        'packages': ['curl', 'nginx'],
+    }
+    prepare_linux_payload(data)
+    assert data['packages'] == ['curl', 'nginx']
+    text = render_linux_vendor_data(data)
+    assert 'packages:' in text
+    assert '  - curl' in text
+    assert '  - nginx' in text
+
+
+def test_prepare_linux_payload_rejects_shell_package():
+    data = {
+        'hostname': 'pkg-01',
+        'cores': 2,
+        'ram': 2048,
+        'network_mode': 'dhcp',
+        'packages': ['curl;reboot'],
+    }
+    with pytest.raises(ValidationError):
+        prepare_linux_payload(data)

@@ -59,7 +59,9 @@ def _load_redis(task_id: str) -> dict | None:
         key = f'guestos:task:secrets:{task_id}'
         raw = client.get(key)
         if raw is None:
-            return {}
+            # Miss: return None so load_task_secrets can fall back to SQLite
+            # (secrets may have been stashed there while Redis was down).
+            return None
         client.delete(key)
         return json.loads(raw)
     except Exception as e:  # noqa: BLE001

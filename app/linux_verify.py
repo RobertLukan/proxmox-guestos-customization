@@ -38,33 +38,29 @@ def _verify_linux_hostname(vmid, expected):
 
 
 def _verify_mount(vmid, mountpoint):
-    """Return True when findmnt reports the mountpoint."""
+    """Return True when findmnt reports an exact mountpoint (not a parent FS)."""
     mp = str(mountpoint).rstrip('/') or '/'
     if mp == '/':
         return True
-    cmd = f'/bin/findmnt -n -o TARGET --target {mp}'
+    cmd = f"/bin/findmnt -n -o TARGET --mountpoint {mp}"
     try:
         out = (run_command_in_guest(vmid, cmd) or '').strip()
     except Exception:  # noqa: BLE001
         return False
-    return out == mp or out.startswith(mp)
+    return out == mp
 
 
-def finalize_linux_data_disks(vmid, disk_guest_plan):
-    """Format/mount data+swap disks by serial via QGA (advanced path).
-
-    Used when cloud-init cicustom snippets are not configured. Idempotent-ish:
-    skips mkfs when already mounted.
-    """
-    plan = disk_guest_plan or []
-    for d in plan:
-        role = d.get('role')
-        serial = d.get('serial')
-        if role == 'os' or not serial:
-            continue
-        by_id = f'/dev/disk/by-id/scsi-{serial}'
-        # Prefer virtio-pci serial path fallbacks via ls /dev/disk/by-id
-        script = f"""
+def _linux_data_disk_script(serial: str, mountpoint: str, fstype: str) -> str:
+    """Shell that finds a disk by serial, formats if needed, and mounts it."""
+    mp = mountpoint or '/data'
+    fs = fstype or 'ext4'
+    # --mountpoint requires the path itself to be a mount; --target would
+    # succeed for an unmounted directory that lives on the root FS.
+    if fs == 'xfs':
+        mkfs_cmd = f"mkfs.xfs -L '{serial}' -f \"$DEV\""
+    else:
+        mkfs_cmd = f"mkfs.{fs} -L '{serial}' -F \"$DEV\""
+    return f"""
 set -e
 DEV=""
 for p in /dev/disk/by-id/*{serial}* /dev/disk/by-id/scsi-{serial} /dev/disk/by-id/virtio-{serial}; do
@@ -74,27 +70,53 @@ if [ -z "$DEV" ]; then
   echo "device for serial {serial} not found" >&2
   exit 1
 fi
-"""
-        if role == 'data':
-            mp = d.get('mountpoint') or '/data'
-            fstype = d.get('fstype') or 'ext4'
-            script += f"""
-if findmnt -n --target '{mp}' >/dev/null 2>&1; then
+if findmnt -n --mountpoint '{mp}' >/dev/null 2>&1; then
   echo already_mounted
   exit 0
 fi
 mkdir -p '{mp}'
 if ! blkid "$DEV" >/dev/null 2>&1; then
-  mkfs.{fstype} -L '{serial}' -F "$DEV"
+  {mkfs_cmd}
 fi
 mount "$DEV" '{mp}'
 if ! grep -q "LABEL={serial}" /etc/fstab 2>/dev/null; then
-  echo "LABEL={serial} {mp} {fstype} defaults,nofail 0 2" >> /etc/fstab
+  echo "LABEL={serial} {mp} {fs} defaults,nofail 0 2" >> /etc/fstab
 fi
 echo ok
 """
+
+
+def finalize_linux_data_disks(vmid, disk_guest_plan):
+    """Format/mount data+swap disks by serial via QGA (advanced path).
+
+    Used when cloud-init cicustom snippets are not configured. Idempotent-ish:
+    skips mkfs when already mounted.
+    """
+    import base64
+
+    plan = disk_guest_plan or []
+    for d in plan:
+        role = d.get('role')
+        serial = d.get('serial')
+        if role == 'os' or not serial:
+            continue
+        if role == 'data':
+            script = _linux_data_disk_script(
+                serial,
+                d.get('mountpoint') or '/data',
+                d.get('fstype') or 'ext4',
+            )
         elif role == 'swap':
-            script += f"""
+            script = f"""
+set -e
+DEV=""
+for p in /dev/disk/by-id/*{serial}* /dev/disk/by-id/scsi-{serial} /dev/disk/by-id/virtio-{serial}; do
+  if [ -e "$p" ]; then DEV="$p"; break; fi
+done
+if [ -z "$DEV" ]; then
+  echo "device for serial {serial} not found" >&2
+  exit 1
+fi
 if swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
   echo swap_present
 fi
@@ -109,8 +131,6 @@ echo ok
 """
         else:
             continue
-        # Run via bash -c with base64 to avoid quoting hell
-        import base64
         b64 = base64.b64encode(script.encode()).decode()
         run_command_in_guest(
             vmid,
@@ -217,4 +237,24 @@ def verify_linux_result(vmid, data, timeout=600, on_progress=None):
                 ok = False
                 parts.append(f'mount {mp} missing')
 
+    packages = data.get('packages') or []
+    if ok and packages:
+        try:
+            _progress('Installing apt packages...')
+            install_linux_packages(vmid, packages)
+            parts.append('packages ' + ' '.join(packages))
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            parts.append(f'package install failed ({type(e).__name__})')
+
     return '; '.join(parts), ok
+
+
+def install_linux_packages(vmid, packages):
+    """Install already-validated apt names. The names cannot carry shell syntax."""
+    names = ' '.join(packages)
+    command = (
+        "sh -c 'export DEBIAN_FRONTEND=noninteractive; "
+        f"apt-get update && apt-get install -y --no-install-recommends {names}'"
+    )
+    run_command_in_guest(vmid, command, retries=2, retry_delay=10)

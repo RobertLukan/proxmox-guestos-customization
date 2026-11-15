@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import re
 
 from app.linux_disks import prepare_linux_disk_plan
 from app.util import as_bool
@@ -139,7 +140,30 @@ def prepare_linux_payload(data):
 
     _apply_os_disk_gb(data)
     prepare_linux_disk_plan(data)
+    data['packages'] = normalize_packages(data.get('packages'))
     return data
+
+
+_PACKAGE = re.compile(r'^[a-z0-9][a-z0-9.+-]*$')
+
+
+def normalize_packages(raw):
+    """Apt package tokens only. Shell commands are refused."""
+    if raw in (None, '', []):
+        return []
+    if isinstance(raw, str):
+        raw = [part for part in re.split(r'[\s,]+', raw.strip()) if part]
+    if not isinstance(raw, list):
+        raise ValidationError('packages must be a list of apt package names.')
+    if len(raw) > 20:
+        raise ValidationError('List at most 20 packages.')
+    names = []
+    for item in raw:
+        name = str(item).strip()
+        if not _PACKAGE.match(name):
+            raise ValidationError(f'{name} is not an apt package name.')
+        names.append(name)
+    return names
 
 
 def _apply_os_disk_gb(data):
@@ -168,21 +192,26 @@ def _apply_os_disk_gb(data):
 
 
 def render_linux_vendor_data(data, disk_guest_plan=None):
-    """Render cloud-init vendor-data YAML for optional disk mounts (advanced).
-
-    Simple large-root path returns empty string (PVE ipconfig/ciuser enough).
-    """
+    """Render cloud-init vendor-data for disk mounts and apt packages."""
     plan = disk_guest_plan or data.get('disk_guest_plan') or []
     data_disks = [d for d in plan if d.get('role') == 'data']
     swap_disks = [d for d in plan if d.get('role') == 'swap']
-    if not data_disks and not swap_disks:
+    packages = data.get('packages') or []
+    if not data_disks and not swap_disks and not packages:
         return ''
 
-    lines = [
-        '#cloud-config',
-        '# GuestOS Linux advanced disk layout',
-        'disk_setup:',
-    ]
+    lines = ['#cloud-config']
+    if packages:
+        lines.append('# GuestOS apt packages')
+        lines.append('package_update: true')
+        lines.append('packages:')
+        for name in packages:
+            lines.append(f'  - {name}')
+    if not data_disks and not swap_disks:
+        return '\n'.join(lines) + '\n'
+
+    lines.append('# GuestOS Linux advanced disk layout')
+    lines.append('disk_setup:')
     for d in data_disks + swap_disks:
         serial = d.get('serial')
         lines.append(f'  /dev/disk/by-id/scsi-{serial}:')

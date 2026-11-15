@@ -147,6 +147,82 @@ def test_guest_exec_finished_waits_for_exitcode():
     assert _guest_exec_finished({'exited': 1, 'exitcode': 1}) == (True, 1)
 
 
+def test_agent_file_write_does_not_retry_file_open_timeout(monkeypatch):
+    calls = {'n': 0}
+
+    def _once(vmid, raw, file_path):
+        calls['n'] += 1
+        raise Exception(
+            "500 Internal Server Error: VM 108 qga command 'guest-file-open' "
+            "failed - got timeout"
+        )
+
+    monkeypatch.setattr(proxmox_mod, '_agent_file_write_once', _once)
+
+    try:
+        proxmox_mod._agent_file_write(108, b'{}', r'C:\ProgramData\GuestOS\credprobe\cred.json')
+        raised = None
+    except Exception as e:
+        raised = e
+    assert raised is not None
+    assert 'guest-file-open' in str(raised)
+    assert calls['n'] == 1
+
+
+def test_write_file_to_guest_releases_handle_after_file_open_timeout(monkeypatch):
+    calls = {'write': 0, 'restart': 0}
+
+    monkeypatch.setattr(proxmox_mod, '_ensure_guest_parent_dir', lambda *a, **k: None)
+
+    def _fw(vmid, raw, file_path, **kwargs):
+        calls['write'] += 1
+        if calls['write'] == 1:
+            raise Exception(
+                "500 Internal Server Error: VM 108 qga command 'guest-file-open' "
+                "failed - got timeout"
+            )
+
+    monkeypatch.setattr(proxmox_mod, '_agent_file_write', _fw)
+    monkeypatch.setattr(
+        proxmox_mod,
+        '_restart_qemu_guest_agent',
+        lambda vmid: calls.__setitem__('restart', calls['restart'] + 1),
+    )
+
+    write_file_to_guest(108, b'{"domain":"lab.test"}', r'C:\ProgramData\GuestOS\credprobe\cred.json')
+    assert calls['write'] == 2
+    assert calls['restart'] == 1
+
+
+def test_write_file_to_guest_exec_fallback_when_agent_restart_times_out(monkeypatch):
+    calls = {'exec': 0}
+
+    monkeypatch.setattr(proxmox_mod, '_ensure_guest_parent_dir', lambda *a, **k: None)
+
+    def _fw(*a, **k):
+        raise Exception(
+            "500 Internal Server Error: Agent error: failed to open file "
+            "'C:\\ProgramData\\GuestOS\\credprobe\\cred.json': The process "
+            "cannot access the file because it is being used by another process."
+        )
+
+    def _restart(vmid):
+        raise Exception(
+            "Timed out waiting for a stable QEMU Guest Agent on VM 108 "
+            "(timeout=90s, stable_for=8s, held=0s)."
+        )
+
+    def _once(vmid, raw, file_path):
+        calls['exec'] += 1
+
+    monkeypatch.setattr(proxmox_mod, '_agent_file_write', _fw)
+    monkeypatch.setattr(proxmox_mod, '_restart_qemu_guest_agent', _restart)
+    monkeypatch.setattr(proxmox_mod, '_write_file_to_guest_via_exec_once', _once)
+
+    write_file_to_guest(108, b'{"domain":"lab.test"}', r'C:\ProgramData\GuestOS\credprobe\cred.json')
+    assert calls['exec'] == 1
+
+
 def test_write_file_to_guest_retries_native_write_after_share_violation(monkeypatch):
     calls = {'write': 0, 'restart': 0, 'exec': 0}
 

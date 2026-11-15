@@ -667,6 +667,8 @@ def clone_vm(template_vmid, hostname, cores, ram, bridge, vlan, max_attempts=5, 
     fam = (os_family or 'windows').strip().lower()
     if fam == 'linux':
         require_linux_guest(template_vmid, node=node, proxmox=proxmox)
+    elif fam == 'appliance':
+        pass
     else:
         require_windows_guest(template_vmid, node=node, proxmox=proxmox)
 
@@ -1518,6 +1520,18 @@ def _is_transient_agent_error(exc):
     )
 
 
+def _agent_file_open_timeout(exc):
+    """True when ``guest-file-open`` timed out.
+
+    qemu-ga opens the destination before the write finishes. If that call
+    times out, the agent keeps the handle and the next ``file-write`` fails
+    with a sharing violation. Callers must restart the agent or use
+    guest-exec; retrying ``file-write`` alone does not drop the handle.
+    """
+    msg = str(exc).lower()
+    return 'guest-file-open' in msg and 'timeout' in msg
+
+
 def _guest_agent_is_up(proxmox, node, vmid):
     """Cheap reachability check (prefer ping over get-fsinfo)."""
     agent = proxmox.nodes(node).qemu(vmid).agent
@@ -1583,6 +1597,10 @@ def _agent_file_write(vmid, raw, file_path, retries=8, retry_delay=15):
             return
         except Exception as e:
             last_err = e
+            # Do not retry a leaked guest-file-open. The same process still
+            # holds the file; the caller restarts qemu-ga or falls back to exec.
+            if _agent_file_open_timeout(e) or _is_share_violation(e):
+                raise
             if not _is_transient_agent_error(e):
                 raise
             logging.warning(
@@ -1794,7 +1812,13 @@ def write_file_to_guest(vmid, content, file_path):
                 e,
             )
     except Exception as e:
-        if _is_share_violation(e):
+        # A timed-out guest-file-open and the sharing violation that follows
+        # are the same leaked qemu-ga handle. Restart drops it. If the agent
+        # does not come back, fall through to guest-exec — do not re-raise.
+        # Rebinding ``e`` and using a bare ``raise`` rethrew the original lock
+        # and skipped this fallback whenever the restart wait timed out.
+        leaked = _is_share_violation(e) or _agent_file_open_timeout(e)
+        if leaked:
             logging.warning(
                 "VM %s: %s locked during file-write (%s); releasing guest-agent handle",
                 vmid,
@@ -1808,18 +1832,19 @@ def write_file_to_guest(vmid, content, file_path):
                     return
             except Exception as retry_err:
                 logging.warning(
-                    "VM %s: rewrite after guest-agent restart failed: %s",
+                    "VM %s: rewrite after guest-agent restart failed (%s); "
+                    "falling back to guest-exec",
                     vmid,
                     retry_err,
                 )
-                e = retry_err
-        if _is_transient_agent_error(e):
+        elif _is_transient_agent_error(e):
             raise
-        logging.warning(
-            "VM %s: agent file-write unavailable (%s); falling back to exec",
-            vmid,
-            e,
-        )
+        else:
+            logging.warning(
+                "VM %s: agent file-write unavailable (%s); falling back to exec",
+                vmid,
+                e,
+            )
 
     _write_file_to_guest_via_exec(vmid, raw, file_path)
 

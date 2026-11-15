@@ -11,6 +11,7 @@ from app.proxmox import (
     power_on_vm,
     power_off_vm,
     wait_for_guest_agent,
+    run_command_in_guest,
     run_shutdown_command_in_guest,
     get_primary_mac_address,
     get_vm_nic_macs,
@@ -858,5 +859,110 @@ def linux_verify_task(self, task_id, vmid, data):
                 vmid=vmid,
                 hostname=hostname,
                 error_code='verify_exception',
+                data=data,
+            )
+
+
+@celery.task(bind=True, soft_time_limit=3600, time_limit=3900)
+def appliance_workflow_task(self, task_id, data):
+    """Clone an OPNsense template, attach two untagged NICs, and enable outbound NAT."""
+    with app.app_context():
+        new_vmid = None
+        data = dict(data or {})
+        hostname = data.get('hostname')
+        try:
+            try:
+                pve_override = attach_pve_override(data)
+            except ValueError as e:
+                _fail_sysprep_task(task_id, str(e), hostname=hostname, error_code='remote', data=data)
+                return
+
+            with use_pve_override(pve_override):
+                from app.appliance import prepare_appliance_payload, opnsense_setup_script
+                from app.provision_limits import validate_resource_caps, check_storage_for_template
+
+                try:
+                    prepare_appliance_payload(data)
+                    validate_resource_caps(data, 'linux')
+                    check_storage_for_template(data['template_vmid'])
+                except (ValidationError, ValueError) as e:
+                    _fail_sysprep_task(
+                        task_id,
+                        f"Invalid appliance input: {e}",
+                        hostname=hostname,
+                        error_code='validation',
+                        data=data,
+                    )
+                    return
+
+                if _task_cancelled(task_id):
+                    return
+                update_task_progress(task_id, 10, "Cloning firewall...")
+                clone_result = clone_vm(
+                    data['template_vmid'],
+                    data['hostname'],
+                    data.get('cores') or 1,
+                    data.get('ram') or 2048,
+                    data['bridge'],
+                    None,
+                    nics=clone_nic_list(data),
+                    os_family='appliance',
+                )
+                new_vmid = clone_result['vmid']
+                update_task_progress(
+                    task_id,
+                    40,
+                    f"Firewall cloned. New VMID: {new_vmid}",
+                    result_vmid=new_vmid,
+                )
+                if _task_cancelled(task_id):
+                    _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
+                    return
+
+                set_lifecycle_tag(new_vmid, 'lifecycle-booting')
+                update_task_progress(task_id, 50, "Powering on firewall...")
+                power_on_vm(new_vmid)
+                update_task_progress(task_id, 60, "Waiting for the guest agent...")
+                wait_for_guest_agent(new_vmid, timeout=300, stable_for=10, poll=5, drop_reset=20)
+                if _task_cancelled(task_id):
+                    _abandon_cancelled_clone(task_id, vmid=new_vmid, hostname=hostname, data=data)
+                    return
+
+                update_task_progress(task_id, 80, "Setting WAN, LAN, and outbound NAT...")
+                script = opnsense_setup_script(data['nics'])
+                encoded = base64.b64encode(script.encode('utf-8')).decode('ascii')
+                run_command_in_guest(
+                    new_vmid,
+                    f"sh -c 'echo {encoded} | base64 -d | sh'",
+                    retries=2,
+                    retry_delay=10,
+                )
+                set_lifecycle_tag(new_vmid, 'lifecycle-ready')
+                task = Task.query.get(task_id)
+                if not task or task.status == 'CANCELLED':
+                    return
+                task.status = 'SUCCESS'
+                task.progress = 100
+                task.result_vmid = new_vmid
+                task.message = f"Appliance workflow for {hostname} completed."
+                append_task_log(task, task.message)
+                db.session.commit()
+        except SoftTimeLimitExceeded:
+            _fail_sysprep_task(
+                task_id,
+                'Appliance workflow exceeded time limit.',
+                vmid=new_vmid,
+                hostname=hostname,
+                error_code='time_limit',
+                data=data,
+            )
+        except Exception as e:
+            app.logger.error("Appliance task %s failed: %s", task_id, e, exc_info=True)
+            _fail_sysprep_task(
+                task_id,
+                f"An error occurred: {e}",
+                vmid=new_vmid,
+                hostname=hostname,
+                error_code='appliance',
                 data=data,
             )

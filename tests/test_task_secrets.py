@@ -54,3 +54,20 @@ def test_stash_fail_closed_when_backends_unavailable(app, monkeypatch):
             assert 'stash' in str(e).lower()
         # Secrets restored onto data so caller can clean up; not left only on Redis.
         assert data.get('administrator_password') == 'secret'
+
+
+def test_load_falls_back_to_sqlite_when_redis_recovers_empty(app, monkeypatch):
+    """Redis down at stash → SQLite holds secrets; Redis up at load must still restore."""
+    from app import task_secrets as ts
+
+    monkeypatch.setattr(ts, '_stash_redis', lambda *a, **k: False)
+    data = {'administrator_password': 'AdminSecret!', 'hostname': 'H'}
+    with app.app_context():
+        ts.stash_task_secrets('redis-recover-1', data)
+        assert 'administrator_password' not in data
+
+        # Healthy Redis with no key looks like a miss (None), not {}.
+        monkeypatch.setattr(ts, '_load_redis', lambda *_a, **_k: None)
+        restored = {'hostname': 'H'}
+        ts.load_task_secrets('redis-recover-1', restored)
+        assert restored['administrator_password'] == 'AdminSecret!'

@@ -15,7 +15,7 @@ from app.proxmox import (
     power_off_vm,
     inventory_vm_disks,
 )
-from app.celery_app import sysprep_workflow_task, linux_cloudinit_workflow_task
+from app.celery_app import sysprep_workflow_task, linux_cloudinit_workflow_task, appliance_workflow_task
 from app.models import Task, User, BatchRequest, CustomizationSpec
 from app.task_progress import append_task_log
 from app.specs import resolve_spec_from_request, sanitize_spec_payload
@@ -918,6 +918,67 @@ def start_sysprep_workflow():
         queue='clone_queue',
     )
 
+    resp = {'task_id': task_id}
+    if warnings:
+        resp['warnings'] = warnings
+    return jsonify(resp)
+
+
+@app.route('/start_appliance_workflow', methods=['POST'])
+@csrf.exempt
+@login_or_api_token_required
+@with_session_csrf
+def start_appliance_workflow():
+    """Clone an OPNsense template onto an untagged WAN NIC and an untagged LAN NIC."""
+    data = request.json or {}
+    data['os_family'] = 'appliance'
+    ok, err = resolve_pve_remote(data, _json_field_error)
+    if not ok:
+        return err
+
+    template_vmid = data.get('template_vmid')
+    if not template_vmid:
+        return _json_field_error('template_vmid is required.', template_vmid='Required.')
+
+    from app.appliance import prepare_appliance_payload
+    from app.remotes import attach_pve_override
+
+    try:
+        pve_override = attach_pve_override(data)
+    except ValueError as e:
+        msg = public_error_text(e, fallback='Invalid remote.')
+        return _json_field_error(msg, remote_id=msg)
+    with use_pve_override(pve_override):
+        try:
+            if not is_proxmox_template(template_vmid):
+                raise ValueError('The firewall source must be a template.')
+            prepare_appliance_payload(data)
+            validate_resource_caps(data, 'linux')
+            check_daily_quota(extra_items=1)
+            _level, storage = check_storage_for_template(template_vmid)
+        except (ValidationError, ValueError) as e:
+            return _json_field_error(public_error_text(e, fallback='Invalid appliance request.'))
+        warnings = []
+        if storage and storage.get('level') == 'warn' and storage.get('message'):
+            warnings.append(storage['message'])
+
+    data.pop('_pve', None)
+    task_id = str(uuid.uuid4())
+    hostname = data.get('hostname')
+    task = Task(
+        id=task_id,
+        name='Appliance Workflow',
+        description=f'Starting appliance workflow for {hostname}',
+        vm_uuid=str(uuid.uuid4()),
+        hostname=(hostname or None),
+        template_vmid=int(data['template_vmid']) if str(data.get('template_vmid', '')).isdigit() else None,
+        remote_id=(data.get('remote_id') or None),
+        submitter=_request_submitter(),
+        options_json=options_to_json(data),
+    )
+    db.session.add(task)
+    db.session.commit()
+    appliance_workflow_task.apply_async(args=(task_id, data), queue='clone_queue')
     resp = {'task_id': task_id}
     if warnings:
         resp['warnings'] = warnings
