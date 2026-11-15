@@ -7,12 +7,13 @@ WORKDIR /app
 
 # samba-common-bin provides /usr/bin/net, used for Offline Domain Join
 # provisioning (djoin.exe equivalent). Client tooling only; no daemons run.
-# Reinstall util-linux/mount so Debian security updates (Trivy image CVEs)
+# Reinstall util-linux/mount/zlib so Debian security updates (Trivy image CVEs)
 # land even when the python:3.12-slim snapshot is a few days behind.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends samba-common-bin \
     && apt-get install -y --no-install-recommends \
          util-linux mount libblkid1 libmount1 libuuid1 libfdisk1 libsmartcols1 bsdutils \
+         zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies first for better layer caching.
@@ -24,17 +25,18 @@ RUN pip install --no-cache-dir --upgrade 'pip>=26.1.2' \
     && pip uninstall -y setuptools pkg_resources msgpack 2>/dev/null || true \
     && pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir --force-reinstall \
-         'setuptools==83.0.0' 'msgpack==1.2.1' \
+         'setuptools==84.1.0' 'msgpack==1.2.3' \
     && rm -rf /usr/local/lib/python*/ensurepip \
     && find /usr /root /tmp -xdev \( \
-         -name 'setuptools-70*' -o -name 'msgpack-1.1*' \
+         -name 'setuptools-70*' -o -name 'setuptools-83*' -o -name 'msgpack-1.1*' \
+         -o -name 'msgpack-1.2.1*' \
          -o -name '*.cdx' -o -name '*.cdx.json' \
          -o -name '*.spdx' -o -name '*.spdx.json' \
          -o -name 'bom.json' -o -name 'sbom.json' \
        \) -exec rm -rf {} + 2>/dev/null || true \
     && python -c "import setuptools, msgpack, importlib.metadata as m; \
-assert m.version('setuptools') >= '83.0.0', m.version('setuptools'); \
-assert m.version('msgpack') >= '1.2.1', m.version('msgpack'); \
+assert m.version('setuptools') >= '84.1.0', m.version('setuptools'); \
+assert m.version('msgpack') >= '1.2.3', m.version('msgpack'); \
 print('setuptools', m.version('setuptools'), 'msgpack', m.version('msgpack'))" \
     && pip check
 
